@@ -1,4 +1,0 @@
-# name  repo-url  commit
-# Third-party sources compiled unmodified into the desktop build. Bump the commit to take an update,
-# then run ./sync-vendor.sh and fix whatever the compiler reports (usually in shims/).
-bitchord https://github.com/kushagrasinghx/BitChord acf219a7e4a7f52f026d4336d5c7ac5cf7bfafcc

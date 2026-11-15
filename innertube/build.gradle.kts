@@ -4,7 +4,7 @@ plugins {
 }
 
 // Upstream's :innertube module, compiled unmodified (it has no Android dependencies).
-sourceSets.main { kotlin.srcDir(rootDir.resolve("../innertube/src/main/kotlin")) }
+sourceSets.main { kotlin.srcDir(rootDir.resolve("metrolist/innertube/src/main/kotlin")) }
 
 dependencies {
     api(project(":shims"))

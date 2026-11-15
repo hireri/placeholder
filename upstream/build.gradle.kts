@@ -7,8 +7,8 @@ plugins {
 
 // Subset of upstream's :app sources compiled unmodified. This list is the whole "port":
 // to bring another upstream package over, add it here and fix what the compiler reports
-// by extending ../shims (never by editing upstream files).
-val app = rootDir.resolve("../app/src/main/kotlin")
+// by extending shims/ (never by editing upstream files).
+val app = rootDir.resolve("metrolist/app/src/main/kotlin")
 val upstreamSources = fileTree(app) {
     include(
         "com/metrolist/lrclib/**",

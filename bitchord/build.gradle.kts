@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-// BitChord's JVM-shared Spotify library, compiled unmodified from vendor/bitchord (see ../vendor.lock).
+// BitChord's JVM-shared Spotify library, compiled unmodified from vendor/bitchord (see vendor/bitchord submodule).
 sourceSets.main {
     kotlin.srcDir(rootDir.resolve("vendor/bitchord/shared/src/jvmSharedMain/kotlin"))
     kotlin.include(

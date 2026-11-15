@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # Opens a PR whenever Metrolist (innertube/YouTube fixes) or BitChord (Spotify) moves.
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: daily

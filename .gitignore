@@ -1,6 +1,3 @@
-# Vendored sources (re-created by sync-vendor.sh, pinned in vendor.lock)
-vendor/*/
-
 # Build output
 build/
 */build/
