@@ -2,7 +2,7 @@
 
 use eframe::egui::Color32;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Theme {
     pub hue: f32,
     /// window, sidebar, panel, hover
@@ -30,6 +30,34 @@ impl Theme {
         };
         Theme { hue, tx, tm, tf, ax, on_ax, axc, s0: c(s[0], nc), s1: c(s[1], nc), s2: c(s[2], nc), s3: c(s[3], nc) }
     }
+
+    /// Nothing playing: near-grey surfaces with a blue accent.
+    pub fn idle() -> Self {
+        Theme::new(265., 0.12, 0.003, true)
+    }
+
+    /// Built around a cover's (hue, chroma): vivid covers get a stronger accent and tinted surfaces.
+    pub fn tinted((hue, chroma): (f32, f32)) -> Self {
+        Theme::new(hue, (chroma * 1.4).clamp(0.06, 0.16), (chroma * 0.2).clamp(0.006, 0.026), true)
+    }
+
+    /// Colour-wise blend `t` of the way from `self` to `to`.
+    pub fn lerp(&self, to: &Theme, t: f32) -> Theme {
+        let m = |a, b| mix(a, b, t);
+        Theme {
+            hue: to.hue,
+            s0: m(self.s0, to.s0),
+            s1: m(self.s1, to.s1),
+            s2: m(self.s2, to.s2),
+            s3: m(self.s3, to.s3),
+            tx: m(self.tx, to.tx),
+            tm: m(self.tm, to.tm),
+            tf: m(self.tf, to.tf),
+            ax: m(self.ax, to.ax),
+            on_ax: m(self.on_ax, to.on_ax),
+            axc: m(self.axc, to.axc),
+        }
+    }
 }
 
 /// OKLCH (hue in degrees) to sRGB, clamped to gamut.
@@ -51,7 +79,39 @@ pub fn oklch(l: f32, c: f32, h: f32) -> Color32 {
     Color32::from_rgb(enc(lin[0]), enc(lin[1]), enc(lin[2]))
 }
 
+/// sRGB to OKLab (L, a, b).
+pub fn oklab([r, g, b]: [u8; 3]) -> (f32, f32, f32) {
+    let lin = |v: u8| {
+        let v = v as f32 / 255.;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let (r, g, b) = (lin(r), lin(g), lin(b));
+    let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
+    let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b).cbrt();
+    let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b).cbrt();
+    (
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+}
+
 pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t + 0.5) as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oklab_round_trips_through_oklch() {
+        for rgb in [[200u8, 40, 60], [30, 120, 220], [90, 200, 110]] {
+            let (l, a, b) = oklab(rgb);
+            let back = oklch(l, (a * a + b * b).sqrt(), b.atan2(a).to_degrees());
+            let d = |x: u8, y: u8| (x as i32 - y as i32).abs();
+            assert!(d(back.r(), rgb[0]) <= 1 && d(back.g(), rgb[1]) <= 1 && d(back.b(), rgb[2]) <= 1, "{rgb:?} -> {back:?}");
+        }
+    }
 }

@@ -2,34 +2,62 @@
 //! Laid out at a fixed 308px from the slot's left edge, so closing just slides it out behind the clip.
 
 use crate::app::{App, PlayerView};
+use crate::audio;
 use crate::backend::{self, Lyrics};
+use crate::data::Track;
 use crate::gfx::*;
+use crate::menu::Target;
+use crate::theme::{mix, oklch, Theme};
 use eframe::egui::{self, lerp, pos2, vec2, Align2, Color32, CornerRadius, Rect, Sense};
-use std::sync::mpsc::{channel, Receiver};
-use std::time::Duration;
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct Song {
+    /// Track id as the daemon reports it (Spotify tracks carry a Spotify id here).
     id: String,
-    title: String,
-    artist: String,
-    album: String,
+    /// YouTube id the stream and lyrics come from; empty for a Spotify song until its first search.
+    vid: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
     dur: u32,
+    pub thumbnail: Option<String>,
+    pub artist_id: Option<String>,
+    pub album_id: Option<String>,
+    source: String,
 }
 
-/// SEAM: the daemon has no player/queue API yet (only `/stream/{id}` and `/lyrics`), and the client has no audio
-/// engine. Queue, now-playing and "more like this" come from here; replace with daemon data when it exists.
-fn sample_queue() -> (Vec<Song>, Vec<Song>) {
-    let s = |title: &str, artist: &str, dur| Song { id: String::new(), title: title.into(), artist: artist.into(), album: "Night Bus Home".into(), dur };
-    (
-        vec![
-            s("Window Seat, Rain", "Hoshi Yume", 248),
-            s("Transfer at Midnight", "Hoshi Yume, Aoi Tsuru", 195),
-            s("Fare Card Blue", "Hoshi Yume", 177),
-            s("Depot", "Hoshi Yume", 321),
-            s("Everyone Gets Off Here, Eventually", "Hoshi Yume", 219),
-        ],
-        vec![s("Platform Nine", "Aoi Tsuru", 201), s("Slow Ferry", "Mirrorlake", 233)],
-    )
+fn song_of(t: &Track) -> Song {
+    let vid = if t.source == "spotify" { String::new() } else { t.id.clone() };
+    Song {
+        id: t.id.clone(),
+        vid,
+        title: t.title.clone(),
+        artist: t.artists.join(", "),
+        album: t.album.clone().unwrap_or_default(),
+        dur: t.duration_sec.unwrap_or(0),
+        thumbnail: t.thumbnail.clone(),
+        artist_id: t.artist_id.clone(),
+        album_id: t.album_id.clone(),
+        source: t.source.clone(),
+    }
+}
+
+impl Song {
+    /// Back to the track it came from, for menus and the song page.
+    pub fn track(&self) -> Track {
+        Track {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            artists: self.artist.split(", ").filter(|a| !a.is_empty()).map(String::from).collect(),
+            album: (!self.album.is_empty()).then(|| self.album.clone()),
+            duration_sec: (self.dur > 0).then_some(self.dur),
+            thumbnail: self.thumbnail.clone(),
+            source: self.source.clone(),
+            artist_id: self.artist_id.clone(),
+            album_id: self.album_id.clone(),
+        }
+    }
 }
 
 enum Lyr {
@@ -39,87 +67,359 @@ enum Lyr {
     Failed(String),
 }
 
-/// Player state. Position is a wall-clock timer (SEAM: no audio engine, so nothing is actually audible).
+/// (queue index, request counter, resolved YouTube id and stream) from a worker.
+type Resolved = (usize, u64, Result<(String, audio::StreamInfo), String>);
+
+/// Player state. `engine` decodes and outputs audio; the queue, transport and lyrics live here.
 pub struct Player {
+    pub engine: audio::Engine,
     queue: Vec<Song>,
-    more: Vec<Song>,
     cur: usize,
     pub playing: bool,
-    pos: f32,
-    last: f64,
-    shuffle: bool,
-    repeat: bool,
-    endless: bool,
-    following: bool,
+    /// Playhead in seconds. Read from the engine while a stream is loaded; while resolving, where playback will start.
+    pub pos: f32,
+    /// True when the engine holds the current song's stream.
+    loaded: bool,
+    /// The scrubber is being dragged, so the engine position is not read back over the pointer.
+    scrub: bool,
+    /// Stream lookup in flight for the current song.
+    pending: Option<Receiver<Resolved>>,
+    req: u64,
+    /// The current song has already been re-resolved once after an engine error.
+    retried: bool,
+    /// Last stream or like failure, shown on the player's muted line.
+    pub error: Option<String>,
+    pub shuffle: bool,
+    pub repeat: bool,
+    /// The current song's like as the star shows it; not read back from YouTube, so it starts unfilled.
+    pub liked: bool,
+    /// Like request in flight: the value it asked for, and the daemon's answer.
+    like: Option<(bool, Receiver<Result<(), String>>)>,
     scroll: f32,
     card_scroll: f32,
     lyr: Lyr,
     shown: (PlayerView, f64),
-}
-
-impl Default for Player {
-    fn default() -> Self {
-        let (queue, more) = sample_queue();
-        Player { queue, more, cur: 0, playing: false, pos: 0., last: 0., shuffle: false, repeat: false, endless: true, following: false, scroll: 0., card_scroll: 0., lyr: Lyr::Idle, shown: (PlayerView::Art, f64::NEG_INFINITY) }
-    }
+    /// Stream of the next song, looked up while this one plays: (song id, lookup).
+    ahead: Option<(String, Receiver<Result<(String, audio::StreamInfo), String>>)>,
 }
 
 fn clock(s: f32) -> String {
     format!("{}:{:02}", s as u32 / 60, s as u32 % 60)
 }
 
+/// Fisher-Yates driven by a time-seeded xorshift64; no RNG crate needed for a queue order.
+fn shuffle_in_place(songs: &mut [Song]) {
+    let mut x = SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
+    for i in (1..songs.len()).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        songs.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+}
+
+/// Blocking: the stream for a song. A Spotify song has no YouTube id yet, so the first search hit stands in for it.
+fn stream(vid: &str, title: &str, artist: &str) -> Result<(String, audio::StreamInfo), String> {
+    let vid = if vid.is_empty() {
+        let hits: Vec<Track> = backend::get(&format!("/youtube/search?q={}", backend::enc(&format!("{title} {artist}"))))?;
+        hits.into_iter().next().map(|t| t.id).ok_or("no YouTube match")?
+    } else {
+        vid.to_string()
+    };
+    let info = backend::get(&format!("/stream/{vid}"))?;
+    Ok((vid, info))
+}
+
 impl Player {
-    fn song(&self) -> &Song {
-        &self.queue[self.cur]
+    pub fn new(engine: audio::Engine) -> Self {
+        Player { engine, queue: vec![], cur: 0, playing: false, pos: 0., loaded: false, scrub: false, pending: None, req: 0, retried: false, error: None, shuffle: false, repeat: false, liked: false, like: None, scroll: 0., card_scroll: 0., lyr: Lyr::Idle, shown: (PlayerView::Art, f64::NEG_INFINITY), ahead: None }
     }
 
-    fn jump(&mut self, i: usize) {
-        self.cur = i;
-        self.pos = 0.;
+    pub fn song(&self) -> Option<&Song> {
+        self.queue.get(self.cur)
+    }
+
+    pub fn next_song(&self) -> Option<&Song> {
+        self.queue.get(self.cur + 1)
+    }
+
+    pub fn track_at(&self, i: usize) -> Option<Track> {
+        self.queue.get(i).map(Song::track)
+    }
+
+    /// Adds `tracks` right after the current song (`next`) or at the end; with an empty queue they start playing.
+    pub fn enqueue(&mut self, ctx: &egui::Context, tracks: &[Track], next: bool) {
+        if self.queue.is_empty() {
+            return self.play_tracks(ctx, tracks, 0, false);
+        }
+        let at = if next { self.cur + 1 } else { self.queue.len() };
+        self.queue.splice(at..at, tracks.iter().map(song_of));
+    }
+
+    /// Drops queue item `i`; the current song is not removable.
+    pub fn remove_at(&mut self, i: usize) {
+        if i != self.cur && i < self.queue.len() {
+            self.queue.remove(i);
+            if i < self.cur {
+                self.cur -= 1;
+            }
+        }
+    }
+
+    /// Moves queue item `i` to play right after the current song.
+    pub fn move_next(&mut self, i: usize) {
+        if i > self.cur + 1 && i < self.queue.len() {
+            let s = self.queue.remove(i);
+            self.queue.insert(self.cur + 1, s);
+        }
+    }
+
+    pub fn play_index(&mut self, ctx: &egui::Context, i: usize) {
+        if i < self.queue.len() {
+            self.play_at(ctx, i, 0.);
+        }
+    }
+
+    /// Length in seconds: the engine's once a stream is loaded, else the track's own.
+    pub fn dur(&self) -> f32 {
+        let meta = self.song().map_or(0, |s| s.dur) as f32;
+        if self.loaded { self.engine.duration().filter(|d| *d > 0.).unwrap_or(meta) } else { meta }
+    }
+
+    pub fn frac(&self) -> f32 {
+        let d = self.dur();
+        if d > 0. { (self.pos / d).clamp(0., 1.) } else { 0. }
+    }
+
+    /// Whether `t` is the song loaded now.
+    pub fn is_current(&self, t: &Track) -> bool {
+        !t.id.is_empty() && self.song().is_some_and(|s| s.id == t.id)
+    }
+
+    /// Replaces the queue with `tracks` and starts it at `start`; `shuffle` shuffles it and starts from the top.
+    pub fn play_tracks(&mut self, ctx: &egui::Context, tracks: &[Track], start: usize, shuffle: bool) {
+        let mut songs: Vec<Song> = tracks.iter().map(song_of).collect();
+        if songs.is_empty() {
+            return;
+        }
+        let start = if shuffle {
+            shuffle_in_place(&mut songs);
+            0
+        } else {
+            start
+        };
+        self.queue = songs;
+        self.play_at(ctx, start, 0.);
+    }
+
+    /// Plays queue item `idx` from `at` seconds. The stream is looked up on a worker; `tick` loads it when it arrives.
+    fn play_at(&mut self, ctx: &egui::Context, idx: usize, at: f32) {
+        if self.queue.get(idx).map(|s| &s.id) != self.song().map(|s| &s.id) {
+            self.liked = false;
+            self.like = None;
+        }
+        self.cur = idx;
         self.scroll = 0.;
         self.lyr = Lyr::Idle;
+        self.retried = false;
+        self.error = None;
+        self.resolve(ctx, at);
     }
 
-    fn next(&mut self) {
-        if self.cur + 1 == self.queue.len() && self.endless && !self.more.is_empty() {
-            self.queue.push(self.more.remove(0));
+    fn resolve(&mut self, ctx: &egui::Context, at: f32) {
+        let Some(s) = self.song() else { return };
+        let (idx, id, vid, title, artist) = (self.cur, s.id.clone(), s.vid.clone(), s.title.clone(), s.artist.clone());
+        let ahead = match &self.ahead {
+            Some((a, _)) if *a == id => self.ahead.take().map(|(_, rx)| rx),
+            _ => None,
+        };
+        self.req += 1;
+        let req = self.req;
+        self.engine.stop();
+        self.loaded = false;
+        self.playing = true;
+        self.pos = at;
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            // A failed look-ahead gets a fresh try.
+            let r = ahead.and_then(|rx| rx.recv().ok()).filter(Result::is_ok).unwrap_or_else(|| stream(&vid, &title, &artist));
+            let _ = tx.send((idx, req, r));
+            ctx.request_repaint();
+        });
+        self.pending = Some(rx);
+    }
+
+    /// Starts looking up the next song's stream so skipping to it does not wait on the daemon.
+    fn look_ahead(&mut self) {
+        let Some(s) = self.next_song() else { return };
+        if self.ahead.as_ref().is_some_and(|(id, _)| *id == s.id) {
+            return;
         }
+        let (id, vid, title, artist) = (s.id.clone(), s.vid.clone(), s.title.clone(), s.artist.clone());
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(stream(&vid, &title, &artist));
+        });
+        self.ahead = Some((id, rx));
+    }
+
+    pub fn next(&mut self, ctx: &egui::Context) {
         if self.cur + 1 < self.queue.len() {
-            self.jump(self.cur + 1);
+            self.play_at(ctx, self.cur + 1, 0.);
         } else {
-            self.playing = false;
-            self.pos = self.song().dur as f32;
+            self.halt();
         }
     }
 
-    fn prev(&mut self) {
-        if self.pos > 3. || self.cur == 0 { self.pos = 0.; } else { self.jump(self.cur - 1); }
+    pub fn prev(&mut self, ctx: &egui::Context) {
+        if self.pos > 3. || self.cur == 0 {
+            self.seek(0.);
+        } else {
+            self.play_at(ctx, self.cur - 1, 0.);
+        }
     }
 
-    /// Advances the position clock; called every frame (also while the sidebar is collapsed).
-    pub fn tick(&mut self, ctx: &egui::Context) {
-        let now = ctx.input(|i| i.time);
+    /// Stops at the end of the queue.
+    fn halt(&mut self) {
+        self.engine.stop();
+        self.pending = None;
+        self.loaded = false;
+        self.playing = false;
+        self.pos = 0.;
+    }
+
+    fn fail(&mut self, e: String) {
+        self.playing = false;
+        self.loaded = false;
+        self.error = Some(e);
+    }
+
+    /// Moves the playhead. Without a loaded stream the next load starts from here.
+    pub fn seek(&mut self, secs: f32) {
+        self.pos = secs;
+        if self.loaded {
+            self.engine.seek(secs);
+        }
+    }
+
+    /// Turning shuffle on reorders the songs after the current one; the current song keeps its place.
+    pub fn toggle_shuffle(&mut self) {
+        self.shuffle = !self.shuffle;
+        if self.shuffle && self.cur + 1 < self.queue.len() {
+            shuffle_in_place(&mut self.queue[self.cur + 1..]);
+        }
+    }
+
+    pub fn toggle_repeat(&mut self) {
+        self.repeat = !self.repeat;
+    }
+
+    /// Likes or unlikes the current song on YouTube. The star flips at once; `tick` reverts it if the daemon refuses.
+    pub fn set_like(&mut self, ctx: &egui::Context) {
+        let Some(vid) = self.song().map(|s| s.vid.clone()).filter(|v| !v.is_empty()) else { return };
+        let on = !self.liked;
+        self.liked = on;
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(backend::post(&format!("/youtube/like/{vid}?on={on}")));
+            ctx.request_repaint();
+        });
+        self.like = Some((on, rx));
+    }
+
+    pub fn toggle(&mut self, ctx: &egui::Context) {
         if self.playing {
-            self.pos += (now - self.last) as f32;
-            if self.pos >= self.song().dur as f32 {
-                if self.repeat { self.pos = 0.; } else { self.next(); }
+            self.playing = false;
+            self.engine.pause();
+        } else if self.loaded {
+            self.playing = true;
+            self.engine.play();
+        } else if self.pending.is_some() {
+            self.playing = true;
+        } else if self.song().is_some() {
+            self.play_at(ctx, self.cur, self.pos);
+        }
+    }
+
+    /// Applies a finished stream lookup, handles engine events and refreshes the playhead; called every frame (also while the sidebar is collapsed).
+    pub fn tick(&mut self, ctx: &egui::Context) {
+        for ev in self.engine.poll_events() {
+            // Events from a stream that was replaced or stopped are stale.
+            if !self.loaded {
+                break;
             }
+            match ev {
+                audio::Event::Ended if self.repeat => self.resolve(ctx, 0.),
+                audio::Event::Ended => self.next(ctx),
+                // Stream URLs expire mid-track; a fresh lookup of the same song usually fixes it.
+                audio::Event::Error(_) if !self.retried => {
+                    self.retried = true;
+                    self.resolve(ctx, self.pos);
+                }
+                audio::Event::Error(e) => self.fail(e),
+            }
+        }
+        if let Some((idx, req, res)) = self.pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.pending = None;
+            if (idx, req) == (self.cur, self.req) {
+                match res {
+                    Ok((vid, info)) => {
+                        if let Some(s) = self.queue.get_mut(idx) {
+                            if s.dur == 0 {
+                                s.dur = info.duration_sec.unwrap_or(0);
+                            }
+                            if s.vid != vid {
+                                s.vid = vid;
+                                self.lyr = Lyr::Idle;
+                            }
+                        }
+                        self.engine.load(info, self.pos);
+                        self.loaded = true;
+                        if !self.playing {
+                            self.engine.pause();
+                        }
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+        }
+        if let Some((on, rx)) = self.like.take() {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => self.like = Some((on, rx)),
+                Ok(Err(e)) => {
+                    self.liked = !on;
+                    self.error = Some(e);
+                }
+                _ => {}
+            }
+        }
+        if self.loaded && !self.scrub {
+            self.pos = self.engine.position();
+        }
+        if self.loaded {
+            self.look_ahead();
+        }
+        if self.playing {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
-        self.last = now;
     }
 
-    fn poll_lyrics(&mut self, ctx: &egui::Context) {
+    pub fn poll_lyrics(&mut self, ctx: &egui::Context) {
         if let Lyr::Idle = self.lyr {
-            let s = self.song();
-            let (id, title, artist, dur, album) = (s.id.clone(), s.title.clone(), s.artist.clone(), s.dur, s.album.clone());
-            let (tx, rx) = channel();
-            let ctx = ctx.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(backend::lyrics(&id, &title, &artist, dur, &album));
-                ctx.request_repaint();
-            });
-            self.lyr = Lyr::Loading(rx);
+            if let Some(s) = self.song() {
+                let (id, title, artist, dur, album) = (s.vid.clone(), s.title.clone(), s.artist.clone(), s.dur, s.album.clone());
+                let (tx, rx) = channel();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(backend::lyrics(&id, &title, &artist, dur, &album));
+                    ctx.request_repaint();
+                });
+                self.lyr = Lyr::Loading(rx);
+            } else {
+                self.lyr = Lyr::Done(None);
+            }
         }
         if let Lyr::Loading(rx) = &self.lyr {
             match rx.try_recv() {
@@ -141,69 +441,41 @@ fn bar(ui: &egui::Ui, key: &str, rect: Rect, track: Color32, fill: Color32, frac
     resp.is_pointer_button_down_on().then(|| resp.interact_pointer_pos().map(|p| ((p.x - rect.min.x) / rect.width()).clamp(0., 1.))).flatten()
 }
 
-/// SEAM: songs here carry no artist id, so the "About" and "Credits" cards use canned text. The daemon's
-/// `/youtube/artists/{id}` already returns a description and subscriber count to replace it with.
-const ABOUT: (&str, &str) = ("167,418 monthly listeners", "Writes and produces late-night city pop from a bedroom studio. Mostly songs about trains, rain and the last stop on the line.");
+/// Hover affordance for a text link: pointing hand and a 1px underline in the text colour.
+fn link_hover(ctx: &egui::Context, p: &egui::Painter, resp: &egui::Response, r: Rect, col: Color32) {
+    if resp.hovered() {
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        p.line_segment([r.left_bottom() + vec2(0., 1.), r.right_bottom() + vec2(0., 1.)], (1., col));
+    }
+}
+
+/// Cover, backdrop and video crossfade time.
+const ART_FADE: f32 = 0.25;
+
+/// What the player art shows, kept in egui memory between frames.
+#[derive(Clone, Default)]
+struct ArtFade {
+    /// The cover url being faded in (or fully shown), and the one it replaced while fading.
+    shown: Option<String>,
+    prev: Option<String>,
+    /// Bumped on each switch; `animate_value` eases toward it so the fade runs from `gen - 1` to `gen`.
+    gen: u32,
+    /// Last video frame, kept (and its texture alive) so the video can fade out after video.rs drops it.
+    last: Option<(egui::TextureHandle, f32)>,
+}
+
+/// The blur's dimming at alpha `a`, premultiplied so a layer fades over whatever lies beneath it.
+fn dim_alpha(a: f32) -> Color32 {
+    let g = (DIM as f32 * a) as u8;
+    Color32::from_rgba_premultiplied(g, g, g, (a * 255.) as u8)
+}
 
 impl App {
-    /// "About the artist" and "Credits" cards starting at `y0`; returns their height (`paint == false` only measures).
-    fn info_cards(&mut self, ui: &mut egui::Ui, c: Rect, y0: f32, paint: bool) -> f32 {
-        let t = self.t;
-        let artist = self.pl.song().artist.clone();
-        let (bx, bw) = (c.min.x + 12., c.width() - 24.);
-        let bio = wrapped(ui.painter(), ABOUT.1, font(12.5), t.tm, bw - 32., 4);
-        let about_h = 214. + bio.size().y + 16.;
-        let mut credits = vec![];
-        for (i, a) in artist.split(", ").enumerate() {
-            credits.push((a.to_string(), if i == 0 { "Main Artist · Producer" } else { "Featured Artist" }));
-        }
-        credits.push(("Mika Sorano".into(), "Lyricist · Composer"));
-        let credits_h = 44. + credits.len() as f32 * 52. + 12.;
-        let h = about_h + 12. + credits_h + 24.;
-        if !paint {
-            return h;
-        }
-        let p = ui.painter().clone();
-        let avatar = self.g.art(ui.ctx(), &t, 120.);
-        let pl = &mut self.pl;
-        let fill = t.s1.gamma_multiply(0.7);
-
-        let a = Rect::from_min_size(pos2(bx, y0), vec2(bw, about_h));
-        p.rect_filled(a, rad(14.), fill);
-        trunc(&p, pos2(a.min.x + 16., a.min.y + 26.), bw - 32., "About the artist", font_w(14., Weight::Bold), t.tx);
-        egui::Image::new(sized(avatar, 80.)).corner_radius(rad(8.)).paint_at(ui, Rect::from_min_size(a.min + vec2(16., 46.), vec2(80., 80.)));
-        trunc(&p, pos2(a.min.x + 16., a.min.y + 149.), bw - 32., artist.split(", ").next().unwrap_or(""), font_w(15., Weight::Bold), t.tx);
-        let follow = Rect::from_min_size(pos2(a.max.x - 16. - 84., a.min.y + 170. + 2.), vec2(84., 32.));
-        trunc(&p, pos2(a.min.x + 16., a.min.y + 188.), bw - 32. - 92., ABOUT.0, font(12.5), t.tm);
-        if pill(ui, &t, "follow-about", follow, if pl.following { "Following" } else { "Follow" }).clicked() {
-            pl.following = !pl.following;
-        }
-        p.galley(pos2(a.min.x + 16., a.min.y + 214.), bio, t.tm);
-
-        let k = Rect::from_min_size(pos2(bx, a.max.y + 12.), vec2(bw, credits_h));
-        p.rect_filled(k, rad(14.), fill);
-        trunc(&p, pos2(k.min.x + 16., k.min.y + 26.), bw - 100., "Credits", font_w(14., Weight::Bold), t.tx);
-        p.text(pos2(k.max.x - 16., k.min.y + 26.), Align2::RIGHT_CENTER, "Show all", font_w(12., Weight::Semi), t.tm);
-        for (i, (name, role)) in credits.iter().enumerate() {
-            let cy = k.min.y + 44. + i as f32 * 52. + 26.;
-            let tw = bw - 32. - if i == 0 { 96. } else { 0. };
-            trunc(&p, pos2(k.min.x + 16., cy - 9.), tw, name, font_w(13.5, Weight::Medium), t.tx);
-            trunc(&p, pos2(k.min.x + 16., cy + 10.), tw, role, font(12.), t.tm);
-            if i == 0 && pill(ui, &t, "follow-credit", Rect::from_center_size(pos2(k.max.x - 16. - 42., cy), vec2(84., 32.)), if pl.following { "Following" } else { "Follow" }).clicked() {
-                pl.following = !pl.following;
-            }
-        }
-        h
-    }
-
     /// `open` is 0..1 (0 = collapsed to the peek sliver); the card keeps its full size and is just slid by the caller.
     pub fn player(&mut self, ui: &mut egui::Ui, slot: Rect, open: f32) {
         let t = self.t;
         let mut owned = App::region(ui, slot);
         let view = self.view;
-        if view == PlayerView::Lyrics {
-            self.pl.poll_lyrics(owned.ctx());
-        }
         // Rounded card inset from the slot like the page card; fixed width so closing just slides it out behind the clip.
         let c = Rect::from_min_max(pos2(slot.min.x + 10., slot.min.y), pos2(slot.min.x + self.player_w - 10., slot.max.y - 10.));
         let (x0, x1) = (c.min.x + 18., c.max.x - 18.);
@@ -216,17 +488,29 @@ impl App {
         };
         let behind = t.s0.lerp_to_gamma(t.s1, 1. - open);
 
-        // Backdrop: the whole card is the blurred, dimmed cover.
-        let blur = self.g.backdrop(owned.ctx(), &t);
-        egui::Image::new(sized(blur, 1.)).fit_to_exact_size(c.size()).corner_radius(rad(18.)).tint(Color32::from_gray(DIM)).paint_at(&owned, c);
+        let empty = self.pl.song().is_none();
+        let url = self.pl.song().and_then(|s| s.thumbnail.clone());
+        let blur = url.as_deref().and_then(|u| self.g.backdrop(owned.ctx(), u));
         let ui = &mut App::region(&mut owned, c);
+
+        // Ink: text and controls over the backdrop switch to dark tones when the cover is bright, so they stay readable.
+        let luma = url.as_deref().and_then(|u| self.g.luma(u));
+        let dark = ui.ctx().animate_value_with_time(ui.scope_id().with("pl-ink"), if luma.is_some_and(|l| l > 0.62) { 1. } else { 0. }, 0.4);
+        let it = Theme {
+            tx: mix(t.tx, oklch(0.18, 0.02, t.hue), dark),
+            tm: mix(t.tm, oklch(0.30, 0.02, t.hue), dark),
+            tf: mix(t.tf, oklch(0.40, 0.02, t.hue), dark),
+            s2: t.s2.lerp_to_gamma(Color32::from_black_alpha(30), dark),
+            s3: t.s3.lerp_to_gamma(Color32::from_black_alpha(46), dark),
+            ..t
+        };
 
         // The whole card scrolls: cover/lyrics/queue slot, then the controls (CTRL_H), then the info cards.
         // `va` morphs the art view (0) into the compact header (1) so the cover and title travel between them.
         const CTRL_H: f32 = 230.;
         let art = view == PlayerView::Art;
         let va = crate::app::anim(ui.ctx(), "pl-view", !art);
-        let cards_h = self.info_cards(ui, c, 0., false);
+        let cards_h = if empty { 0. } else { self.info_cards(ui, c, 0., false) };
         // Lyrics/queue body: shrinks (down to 240) so the controls stay on screen in short windows, caps at 380 so tall ones show the cards.
         let body_h = (c.height() - 118. - CTRL_H - 6.).clamp(240., 380.);
         let top_h = lerp(c.width()..=118. + body_h, va).max(c.height() - CTRL_H - 6. - cards_h);
@@ -239,7 +523,9 @@ impl App {
         let base = c.min.y - sc;
         let yb = base + top_h + CTRL_H;
 
-        // Bottom stack, built upward: device label, mode row, volume, transport, scrubber (14px gaps).
+        let square = Rect::from_min_size(pos2(c.min.x, base), vec2(c.width(), c.width()));
+
+        // Bottom stack, built upward: error line, mode row, volume, transport, scrubber (14px gaps).
         let mut y = yb - 12.;
         let device_y = y - 7.;
         y -= 14. + 14.;
@@ -252,19 +538,87 @@ impl App {
         let scrub = Rect::from_min_size(pos2(x0, y - 24.), vec2(w, 24.));
         let body_bottom = scrub.min.y - 14.;
 
-        // Cover: full-width at the top of the art view, a 46px thumbnail in the compact header.
-        let cover = self.g.cover(ui.ctx(), &t);
+        // Cover: a square at the top of the art view (a wide video thumbnail floats instead), a 46px thumbnail in the compact header.
         let ident_top = base + 12. + 32. + 14.;
-        let big = Rect::from_min_max(pos2(c.min.x, base), pos2(c.max.x, body_bottom));
+        let aspect = url.as_deref().and_then(|u| cover_aspect(ui.ctx(), u, square.size()));
+        let wide = aspect.filter(|a| *a > 1.2);
+        // A wide cover is a video's: with videos on, the video itself plays in the floating rect (paced by the audio playhead).
+        let want = (self.video_on && wide.is_some() && open > 0.5 && va < 0.99).then(|| self.pl.song().map(|s| s.vid.clone())).flatten().filter(|v| !v.is_empty());
+        #[cfg(feature = "video")]
+        let frame = self.video_frame(ui.ctx(), want.as_deref());
+        #[cfg(not(feature = "video"))]
+        let frame: Option<(egui::TextureHandle, f32)> = want.and(None);
+
+        // Crossfades: a new cover only replaces the shown one once its cover and blur have loaded; the outgoing layer stays
+        // under the incoming one, so the stack is always opaque. The video fades over the cover by `vf`.
+        let (ctx, id) = (ui.ctx().clone(), ui.scope_id().with("pl-art"));
+        let mut st = ctx.data(|d| d.get_temp::<ArtFade>(id)).unwrap_or_default();
+        if url != st.shown && (url.is_none() || (blur.is_some() && aspect.is_some())) {
+            st.prev = if url.is_some() { st.shown.take() } else { None };
+            st.shown = url.clone();
+            st.gen += 1;
+        }
+        let f = (ctx.animate_value_with_time(id.with("gen"), st.gen as f32, ART_FADE) - st.gen.saturating_sub(1) as f32).clamp(0., 1.);
+        let vf = ctx.animate_bool_with_time(id.with("vid"), frame.is_some(), ART_FADE);
+        if frame.is_some() {
+            st.last = frame.clone();
+        } else if vf == 0. {
+            st.last = None;
+        }
+        let vtex = frame.clone().or(st.last.clone());
+        let old_blur = st.prev.as_deref().and_then(|u| self.g.backdrop(&ctx, u));
+        let cur_blur = st.shown.as_deref().and_then(|u| self.g.backdrop(&ctx, u));
+        ctx.data_mut(|d| d.insert_temp(id, st.clone()));
+
+        // Backdrop: the blurred, dimmed cover lined up with the art view's square cover and reflected below it. Scrolls with the card.
+        let layers = [old_blur.filter(|_| f < 1.).map(|o| (o, 1.)), cur_blur.map(|b| (b, f))];
+        for (tex, a) in layers.into_iter().flatten() {
+            egui::Image::new(sized(tex, 1.)).fit_to_exact_size(c.size()).uv(backdrop_uv(square, c)).corner_radius(rad(18.)).tint(dim_alpha(a)).paint_at(ui, c);
+        }
+        if cur_blur.is_none() {
+            ui.painter().rect_filled(c, rad(18.), t.s1);
+        }
+
+        let start = wide.map(|a| frame.as_ref().map_or(a, |f| f.1)).map_or(square, |a| {
+            let slot = Rect::from_min_max(pos2(x0, base + 56.), pos2(x1, body_bottom - 62.));
+            let h = (w / a).min(slot.height().max(0.));
+            Rect::from_center_size(slot.center(), vec2(h * a, h))
+        });
         let small = Rect::from_min_size(pos2(x0, ident_top), vec2(46., 46.));
-        let cr = Rect::from_min_max(big.min.lerp(small.min, va), big.max.lerp(small.max, va));
-        let asp = cr.width() / cr.height();
-        let uv = Rect::from_center_size(pos2(0.5, 0.5), if asp < 1. { vec2(asp, 1.) } else { vec2(1., 1. / asp) });
-        let (top_r, bot_r) = (lerp(18.0..=6., va) as u8, lerp(0.0..=6., va) as u8);
+        let cr = Rect::from_min_max(start.min.lerp(small.min, va), start.max.lerp(small.max, va));
+        let (r0, b0): (f32, f32) = if wide.is_some() { (12., 12.) } else { (18., 0.) };
+        let (top_r, bot_r) = (lerp(r0..=6., va) as u8, lerp(b0..=6., va) as u8);
         let shown = lerp(1.0..=open, va);
-        egui::Image::new(sized(cover, 1.)).fit_to_exact_size(cr.size()).uv(uv)
-            .corner_radius(CornerRadius { nw: top_r, ne: top_r, sw: bot_r, se: bot_r }).tint(Color32::WHITE.gamma_multiply(shown)).paint_at(ui, cr);
-        fade_blur(ui.painter(), blur, c, big.min.y + big.height() * 0.5, big.max.y, 1. - va);
+        let cr_corners = CornerRadius { nw: top_r, ne: top_r, sw: bot_r, se: bot_r };
+        let tint = Color32::WHITE.gamma_multiply(shown);
+        if wide.is_some() {
+            shadow(ui.painter(), cr, 12., 8, 28, (90. * (1. - va)) as u8);
+        }
+        if let Some(p) = st.prev.as_deref().filter(|_| f < 1.) {
+            paint_cover(ui, p, cr, cr_corners, tint);
+        }
+        match st.shown.as_deref() {
+            Some(u) => paint_cover(ui, u, cr, cr_corners, tint.gamma_multiply(f)),
+            None if url.is_none() && empty => icon(ui, icon!("song"), square.center(), 72., it.tf.gamma_multiply(1. - va)),
+            None if url.is_none() => {
+                ui.painter().rect_filled(cr, cr_corners, it.s3.gamma_multiply(shown));
+            }
+            None => {}
+        }
+        if let Some((tex, a)) = vtex.filter(|_| vf > 0.) {
+            egui::Image::new(sized(tex.id(), 1.)).fit_to_exact_size(cr.size()).uv(crop_uv(a, cr.width() / cr.height())).corner_radius(cr_corners).tint(tint.gamma_multiply(vf)).paint_at(ui, cr);
+        }
+        if let Some(u) = self.pl.next_song().and_then(|s| s.thumbnail.as_deref()) {
+            preload_cover(ui.ctx(), u, square.size());
+        }
+        if wide.is_none() {
+            if let Some(o) = old_blur.filter(|_| f < 1.) {
+                fade_blur(ui.painter(), o, c, square, square.center().y, square.max.y, 1. - va);
+            }
+            if let Some(b) = cur_blur {
+                fade_blur(ui.painter(), b, c, square, square.center().y, square.max.y, (1. - va) * f);
+            }
+        }
         if open < 0.02 {
             corners(behind);
             return;
@@ -272,89 +626,131 @@ impl App {
         ui.set_opacity(open);
         let p = ui.painter().clone();
 
-        let pl = &mut self.pl;
-        let (dur, title, artist, album) = (pl.song().dur as f32, pl.song().title.clone(), pl.song().artist.clone(), pl.song().album.clone());
-
-        p.text(pos2(c.center().x, device_y), Align2::CENTER_CENTER, "This computer", font(11.), t.tf);
-        let frac = (pl.pos / dur).clamp(0., 1.);
-        if let Some(f) = bar(ui, "scrub", Rect::from_min_size(scrub.min, vec2(w, 4.)), t.s3, t.tx, frac, true) {
-            pl.pos = f * dur;
+        // Right-click on the cover in the art view opens the track menu; applied once the drawing borrows end.
+        let mut pending_menu: Option<(egui::Pos2, Target)> = None;
+        let mut menu_btn = None;
+        if va < 0.5 {
+            let hit = ui.interact(cr, ui.scope_id().with("pl-cover"), Sense::click());
+            if let (true, Some(pos), Some(s)) = (hit.secondary_clicked(), hit.interact_pointer_pos(), self.pl.song()) {
+                pending_menu = Some((pos, Target::Track(s.track())));
+            }
         }
-        p.text(pos2(x0, scrub.min.y + 17.), Align2::LEFT_CENTER, clock(pl.pos), font(11.), t.tf);
-        p.text(pos2(x1, scrub.min.y + 17.), Align2::RIGHT_CENTER, format!("−{}", clock((dur - pl.pos).max(0.))), font(11.), t.tf);
+        // Video / thumbnail toggle in the floating rect's corner.
+        if wide.is_some() && va < 0.5 && cfg!(feature = "video") {
+            let at = pos2(cr.max.x - 24., cr.max.y - 24.);
+            p.circle_filled(at, 16., Color32::from_black_alpha(140));
+            let (ic, tip) = if self.video_on { (icon!("vidoff"), "Show the thumbnail") } else { (icon!("vid"), "Play the video") };
+            if glyph_button(ui, "pl-video", at, 32., ic, 16., Color32::WHITE).on_hover_text(tip).clicked() {
+                self.video_on = !self.video_on;
+            }
+        }
 
-        let tr_x = [x0 + 14. + 26., (x0 + x1) / 2., x1 - 14. - 26.];
+        let pl = &mut self.pl;
+        let dur = pl.dur();
+        let (title, artist, album) = pl.song().map_or_else(|| ("Nothing playing".to_string(), "Pick a song to start listening".to_string(), String::new()), |s| (s.title.clone(), s.artist.clone(), s.album.clone()));
+        let artist_id = pl.song().and_then(|s| s.artist_id.clone());
+
+        if let Some(e) = &pl.error {
+            trunc(&p, pos2(x0, device_y), w, e, font(11.), it.tm);
+        }
+        if let Some(f) = bar(ui, "scrub", Rect::from_min_size(scrub.min, vec2(w, 4.)), it.s3, it.tx, pl.frac(), true) {
+            pl.pos = f * dur;
+            pl.scrub = true;
+        } else if pl.scrub {
+            pl.scrub = false;
+            pl.seek(pl.pos);
+        }
+        p.text(pos2(x0, scrub.min.y + 17.), Align2::LEFT_CENTER, clock(pl.pos), font(11.), it.tf);
+        p.text(pos2(x1, scrub.min.y + 17.), Align2::RIGHT_CENTER, format!("−{}", clock((dur - pl.pos).max(0.))), font(11.), it.tf);
+
+        // Spread across the width like the mode row below, so resizing the player keeps them evenly spaced.
+        let tr_x = [x0 + w * 0.15, x0 + w * 0.5, x0 + w * 0.85];
         let main_icon = if pl.playing { icon!("pause") } else { icon!("play") };
-        for (i, (ic, s)) in [(icon!("rw"), 26.), (main_icon, 34.), (icon!("ff"), 26.)].into_iter().enumerate() {
-            if icon_button(ui, &t, ("tr", i), pos2(tr_x[i], tr_y), 52., ic, s, t.tx).clicked() {
+        for (i, (ic, s)) in [(icon!("rw"), 34.), (main_icon, 46.), (icon!("ff"), 34.)].into_iter().enumerate() {
+            if glyph_button(ui, ("tr", i), pos2(tr_x[i], tr_y), 52., ic, s, if empty { it.tf } else { it.tx }).clicked() {
                 match i {
-                    0 => pl.prev(),
-                    1 => {
-                        pl.playing = !pl.playing;
-                        if pl.playing && pl.pos >= dur { pl.pos = 0.; }
-                    }
-                    _ => pl.next(),
+                    0 => pl.prev(ui.ctx()),
+                    1 => pl.toggle(ui.ctx()),
+                    _ => pl.next(ui.ctx()),
                 }
             }
         }
 
-        icon(ui, icon!("vlo"), pos2(x0 + 8., vol_y), 16., t.tm);
-        icon(ui, icon!("vhi"), pos2(x1 - 8., vol_y), 16., t.tm);
-        if let Some(v) = bar(ui, "vol", Rect::from_min_max(pos2(x0 + 26., vol_y - 2.), pos2(x1 - 26., vol_y + 2.)), t.s3, t.tm, self.volume, false) {
+        icon(ui, icon!("vlo"), pos2(x0 + 8., vol_y), 16., it.tm);
+        icon(ui, icon!("vhi"), pos2(x1 - 8., vol_y), 16., it.tm);
+        if let Some(v) = bar(ui, "vol", Rect::from_min_max(pos2(x0 + 26., vol_y - 2.), pos2(x1 - 26., vol_y + 2.)), it.s3, it.tm, self.volume, false) {
             self.volume = v;
+            pl.engine.set_volume(v);
         }
 
-        // Mode row: lyrics | shuffle, repeat, endless pill | queue.
-        for (i, (v, ic, cx)) in [(PlayerView::Lyrics, icon!("lyr"), x0 + 22.), (PlayerView::Queue, icon!("que"), x1 - 22.)].into_iter().enumerate() {
+        // Mode row: lyrics | shuffle, repeat pill | queue.
+        for (i, (v, ic, cx)) in [(PlayerView::Lyrics, icon!("lyr"), tr_x[0]), (PlayerView::Queue, icon!("que"), tr_x[2])].into_iter().enumerate() {
             let r = Rect::from_center_size(pos2(cx, modes_y), vec2(44., 38.));
             let on = view == v;
-            if tonal(ui, &t, ("mode", i), r, 11., on.then_some(t.s3)).clicked() {
+            if on {
+                p.rect_filled(r, rad(11.), it.s3);
+            }
+            if glyph_button(ui, ("mode", i), r.center(), 44., ic, 18., if on { it.tx } else { it.tm }).clicked() {
                 self.view = if on { PlayerView::Art } else { v };
                 pl.scroll = 0.;
             }
-            icon(ui, ic, r.center(), 16., if on { t.tx } else { t.tm });
         }
-        let pill = Rect::from_min_max(pos2(x0 + 44. + 12., modes_y - 21.), pos2(x1 - 44. - 12., modes_y + 21.));
-        let seg_w = pill.width() / 3.;
-        p.rect_filled(pill, rad(21.), t.s2);
-        let modes = [(icon!("shuf"), &mut pl.shuffle), (icon!("rep"), &mut pl.repeat), (icon!("inf"), &mut pl.endless)];
+        let pw = (tr_x[2] - tr_x[0] - 44. - 24.).min(132.);
+        let pill = Rect::from_center_size(pos2(tr_x[1], modes_y), vec2(pw, 42.));
+        let seg_w = pill.width() / 2.;
+        p.rect_filled(pill, rad(21.), it.s2);
+        let modes = [(icon!("shuf"), pl.shuffle), (icon!("rep"), pl.repeat)];
         for (i, (ic, on)) in modes.into_iter().enumerate() {
             let r = Rect::from_min_size(pos2(pill.min.x + i as f32 * seg_w, pill.min.y), vec2(seg_w, pill.height()));
-            let resp = ui.interact(r, ui.scope_id().with(("pm", i)), Sense::click());
-            let cr = CornerRadius { nw: if i == 0 { 21 } else { 0 }, sw: if i == 0 { 21 } else { 0 }, ne: if i == 2 { 21 } else { 0 }, se: if i == 2 { 21 } else { 0 } };
-            if resp.hovered() || resp.is_pointer_button_down_on() {
-                p.rect_filled(r, cr, t.s3);
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            if *on {
-                p.rect_filled(r, cr, t.tx.gamma_multiply(0.24));
+            let cr = CornerRadius { nw: if i == 0 { 21 } else { 0 }, sw: if i == 0 { 21 } else { 0 }, ne: if i == 1 { 21 } else { 0 }, se: if i == 1 { 21 } else { 0 } };
+            if on {
+                p.rect_filled(r, cr, it.tx.gamma_multiply(0.24));
             }
             if i > 0 {
-                p.rect_filled(Rect::from_min_size(r.min, vec2(1., r.height())), 0., t.s0);
+                p.rect_filled(Rect::from_min_size(r.min, vec2(1., r.height())), 0., it.s0);
             }
-            icon(ui, ic, r.center(), 20., if *on || resp.hovered() { t.tx } else { t.tm });
-            if resp.clicked() {
-                *on = !*on;
+            if glyph_button(ui, ("pm", i), r.center(), r.height(), ic, 20., if on { it.tx } else { it.tm }).clicked() {
+                if i == 0 { pl.toggle_shuffle() } else { pl.toggle_repeat() }
             }
         }
 
         // Header: album name (compact views) + hide button.
         let top = base + 12.;
         if va < 0.99 {
-            p.circle_filled(pos2(x1 - 16., top + 16.), 16., Color32::from_black_alpha((90. * (1. - va)) as u8));
+            let disc = Color32::from_black_alpha(90).lerp_to_gamma(Color32::from_white_alpha(70), dark).gamma_multiply(1. - va);
+            p.circle_filled(pos2(x1 - 16., top + 16.), 16., disc);
         }
         if va > 0.01 {
-            trunc(&p, pos2(x0 + 4., top + 16.), w - 44., &album, font_w(13., Weight::Semi), t.tx.gamma_multiply(va));
+            trunc(&p, pos2(x0 + 4., top + 16.), w - 44., &album, font_w(13., Weight::Semi), it.tx.gamma_multiply(va));
         }
-        let hide = icon_button(ui, &t, "hide", pos2(x1 - 16., top + 16.), 32., icon!("colr"), 16., if va < 0.5 { t.tx } else { t.tm }).clicked();
-        // Identity row; in the art view it sits on the cover's lower edge.
+        let hide = glyph_button(ui, "hide", pos2(x1 - 16., top + 16.), 32., icon!("colr"), 16., if va < 0.5 { it.tx } else { it.tm }).clicked();
+        // Identity row; in the art view it sits on the cover's lower edge. Title and artist are links.
         let cy = lerp(body_bottom - 50. + 23.0..=ident_top + 23., va);
         let tx = lerp(x0..=x0 + 56., va);
         let text_w = x1 - 72. - tx;
-        trunc(&p, pos2(tx, cy - 9.), text_w, &title, font_w(15., Weight::Bold), t.tx);
-        trunc(&p, pos2(tx, cy + 10.), text_w, &artist, font(13.), t.tm);
-        icon_button(ui, &t, "fav", pos2(x1 - 52., cy), 32., icon!("star"), 16., t.tm);
-        icon_button(ui, &t, "more", pos2(x1 - 16., cy), 32., icon!("more"), 16., t.tm);
+        let title_r = trunc(&p, pos2(tx, cy - 9.), text_w, &title, font_w(15., Weight::Bold), it.tx);
+        let artist_r = trunc(&p, pos2(tx, cy + 10.), text_w, &artist, font(13.), it.tm);
+        let (mut title_click, mut artist_click) = (false, false);
+        if !empty {
+            let resp = ui.interact(title_r, ui.scope_id().with("pl-title"), Sense::click());
+            link_hover(ui.ctx(), &p, &resp, title_r, it.tx);
+            title_click = resp.clicked();
+        }
+        if artist_id.is_some() {
+            let resp = ui.interact(artist_r, ui.scope_id().with("pl-artist"), Sense::click());
+            link_hover(ui.ctx(), &p, &resp, artist_r, it.tm);
+            artist_click = resp.clicked();
+        }
+        if !empty && glyph_button(ui, "fav", pos2(x1 - 52., cy), 32., if pl.liked { icon!("starf") } else { icon!("star") }, 16., if pl.liked { t.ax } else { it.tm }).clicked() {
+            pl.set_like(ui.ctx());
+        }
+        let more = Rect::from_center_size(pos2(x1 - 16., cy), vec2(32., 32.));
+        if !empty && glyph_button(ui, "pl-more", more.center(), 32., icon!("more"), 16., it.tm).clicked() {
+            if let Some(tr) = pl.song().map(Song::track) {
+                pending_menu = Some((pos2(more.min.x - 200., more.max.y + 6.), Target::Track(tr)));
+                menu_btn = Some(more);
+            }
+        }
         let top = ident_top + 46. + 14.;
 
         // Body (lyrics / queue) fills what is left.
@@ -386,11 +782,11 @@ impl App {
                     _ => Some("Loading lyrics…".to_string()),
                 };
                 if let Some(m) = msg {
-                    bp.text(pos2(x0 + 2., area.min.y + 20.), Align2::LEFT_CENTER, m, font(14.), t.tm);
+                    bp.text(pos2(x0 + 2., area.min.y + 20.), Align2::LEFT_CENTER, m, font(14.), it.tm);
                 } else if let Lyr::Done(Some(l)) = &pl.lyr {
                     let cur = if l.synced { l.lines.iter().rposition(|(s, _)| *s <= pl.pos) } else { None };
                     let gs: Vec<_> = l.lines.iter().enumerate().map(|(i, (_, tx))| {
-                        bp.layout(tx.clone(), font_w(21., Weight::Bold), if !l.synced || Some(i) == cur { t.tx } else { t.tf }, w - 4.)
+                        bp.layout(tx.clone(), font_w(21., Weight::Bold), if !l.synced || Some(i) == cur { it.tx } else { it.tf }, w - 4.)
                     }).collect();
                     let mut ys = vec![];
                     let mut ly = 10.;
@@ -410,53 +806,65 @@ impl App {
                     for (g, y) in gs.into_iter().zip(ys) {
                         lp.galley(pos2(x0 + 2., area.min.y + y - pl.scroll), g, Color32::WHITE);
                     }
-                    fade_blur(&p, blur, c, area.min.y + area.height() * 0.12, area.min.y, 1.);
-                    fade_blur(&p, blur, c, area.min.y + area.height() * 0.8, area.max.y, 1.);
-                    p.text(pos2(x0, body.max.y - foot_h / 2.), Align2::LEFT_CENTER, format!("Lyrics by {}", l.provider), font(12.), t.tm);
-                    // Stub: no translation endpoint in the daemon yet.
-                    let tr = Rect::from_min_size(pos2(x1 - 70., body.max.y - foot_h), vec2(70., foot_h));
-                    p.rect_filled(tr, rad(14.), t.s3);
-                    p.text(tr.center(), Align2::CENTER_CENTER, "Translate", font_w(11., Weight::Semi), t.tm);
+                    if let Some(b) = blur {
+                        fade_blur(&p, b, c, square, area.min.y + area.height() * 0.12, area.min.y, 1.);
+                        fade_blur(&p, b, c, square, area.min.y + area.height() * 0.8, area.max.y, 1.);
+                    }
+                    p.text(pos2(x0, body.max.y - foot_h / 2.), Align2::LEFT_CENTER, format!("Lyrics by {}", l.provider), font(12.), it.tm);
                 }
+            }
+            PlayerView::Queue if pl.queue.is_empty() => {
+                let mut b = App::region(ui, body);
+                b.set_opacity(op);
+                b.painter().text(pos2(x0, body.min.y + 12.), Align2::LEFT_CENTER, "Nothing in the queue", font(14.), it.tm);
             }
             PlayerView::Queue => {
                 let mut b = App::region(ui, body);
                 b.set_opacity(op);
                 let bp = b.painter().clone();
-                bp.text(pos2(x0, body.min.y + 12.), Align2::LEFT_CENTER, "Queue", font_w(20., Weight::Bold), t.tx);
+                bp.text(pos2(x0, body.min.y + 12.), Align2::LEFT_CENTER, "Queue", font_w(20., Weight::Bold), it.tx);
                 let list = Rect::from_min_max(pos2(x0, body.min.y + 30.), body.max);
                 let upcoming = pl.queue.len() - pl.cur - 1;
-                let endless = if pl.endless { pl.more.len() } else { 0 };
-                let content = 20. + 52. + 14. + 14. + upcoming as f32 * 54. + if endless > 0 { 26. + endless as f32 * 54. } else { 0. };
+                let content = 20. + 52. + 14. + 14. + upcoming as f32 * 54.;
                 if b.rect_contains_pointer(list) {
                     pl.scroll = (pl.scroll - ui.input(|i| i.smooth_scroll_delta.y)).clamp(0., (content - list.height()).max(0.));
                 }
                 let lp = bp.with_clip_rect(list);
-                let label = |y: f32, s: &str| { lp.text(pos2(x0, y), Align2::LEFT_CENTER, s, font_w(10.5, Weight::Semi), t.tf); };
+                let label = |y: f32, s: &str| { lp.text(pos2(x0, y), Align2::LEFT_CENTER, s, font_w(10.5, Weight::Semi), it.tf); };
                 let mut qy = list.min.y - pl.scroll;
                 label(qy + 8., "NOW PLAYING");
                 qy += 20.;
-                // `i` is None for rows that are not removable (current song, endless suggestions); `fade` dims suggestions.
-                let row = |b: &mut egui::Ui, id: usize, s: &Song, qy: f32, on: bool, grip: bool, fade: bool| -> (bool, bool) {
+                // Returns (clicked, removed, right-click position). Only upcoming rows have a remove button.
+                let row = |b: &mut egui::Ui, id: usize, s: &Song, qy: f32, on: bool, removable: bool| -> (bool, bool, Option<egui::Pos2>) {
                     let r = Rect::from_min_size(pos2(x0, qy), vec2(w, 52.));
-                    let play = !on && tonal(b, &t, ("q", id), r, 8., None).clicked();
+                    let resp = press(b, ("q", id), r);
+                    let play = !on && resp.clicked();
+                    let menu = resp.interact_pointer_pos().filter(|_| resp.secondary_clicked());
                     let cy = r.center().y;
                     let mut gone = false;
-                    if grip {
-                        icon(b, icon!("grip"), pos2(r.min.x + 11., cy), 14., t.tf);
-                        gone = icon_button(b, &t, ("qx", id), pos2(r.max.x - 16., cy), 24., icon!("x"), 14., t.tf).clicked();
+                    if removable {
+                        gone = glyph_button(b, ("qx", id), pos2(r.max.x - 16., cy), 24., icon!("x"), 14., it.tf).clicked();
                     }
-                    b.set_opacity(op * if fade { 0.65 } else { 1. });
-                    egui::Image::new(sized(cover, 38.)).corner_radius(rad(6.)).paint_at(b, Rect::from_center_size(pos2(r.min.x + 14. + 10. + 19., cy), vec2(38., 38.)));
+                    b.set_opacity(op);
+                    let art = Rect::from_center_size(pos2(r.min.x + 14. + 10. + 19., cy), vec2(38., 38.));
+                    match &s.thumbnail {
+                        Some(u) => paint_cover(b, u, art, rad(6.), Color32::WHITE),
+                        None => {
+                            b.painter().rect_filled(art, rad(6.), it.s3);
+                        }
+                    }
                     let (tx, tw) = (r.min.x + 14. + 10. + 38. + 10., r.width() - 14. - 10. - 38. - 10. - 30.);
                     let lp = b.painter().with_clip_rect(list);
-                    trunc(&lp, pos2(tx, cy - 8.), tw, &s.title, font_w(13., Weight::Medium), if on { t.ax } else { t.tx });
-                    trunc(&lp, pos2(tx, cy + 9.), tw, &s.artist, font(12.), t.tm);
-                    b.set_opacity(op);
-                    (play, gone)
+                    trunc(&lp, pos2(tx, cy - 8.), tw, &s.title, font_w(13., Weight::Medium), if on { t.ax } else { it.tx });
+                    trunc(&lp, pos2(tx, cy + 9.), tw, &s.artist, font(12.), it.tm);
+                    (play, gone, menu)
                 };
                 let mut b = App::region(&mut b, list);
-                row(&mut b, usize::MAX, pl.song(), qy, true, false, false);
+                if let Some(s) = pl.song() {
+                    if let Some(at) = row(&mut b, usize::MAX, s, qy, true, false).2 {
+                        pending_menu = Some((at, Target::Queue(pl.cur)));
+                    }
+                }
                 if view == PlayerView::Queue {
                     // Equaliser bars on the current row.
                     let (ex, ey) = (list.max.x - 12., qy + 26.);
@@ -470,35 +878,44 @@ impl App {
                     }
                 }
                 qy += 52. + 2. + 12.;
-                label(qy, &format!("NEXT FROM {}", album.to_uppercase()));
+                label(qy, &if album.is_empty() { "NEXT UP".to_string() } else { format!("NEXT FROM {}", album.to_uppercase()) });
                 qy += 14.;
                 let (mut play, mut gone) = (None, None);
                 for i in pl.cur + 1..pl.queue.len() {
-                    let (p_, g_) = row(&mut b, i, &pl.queue[i], qy, false, true, false);
+                    let (p_, g_, menu) = row(&mut b, i, &pl.queue[i], qy, false, true);
                     if p_ { play = Some(i); }
                     if g_ { gone = Some(i); }
+                    if let Some(at) = menu {
+                        pending_menu = Some((at, Target::Queue(i)));
+                    }
                     qy += 54.;
                 }
-                if endless > 0 {
-                    label(qy + 8., "ENDLESS · MORE LIKE THIS");
-                    qy += 26.;
-                    for (i, s) in pl.more.iter().enumerate() {
-                        row(&mut b, 1000 + i, s, qy, false, false, true);
-                        qy += 54.;
-                    }
-                }
                 if let Some(i) = gone {
-                    pl.queue.remove(i);
+                    pl.remove_at(i);
                 } else if let Some(i) = play {
-                    pl.jump(i);
-                    pl.playing = true;
+                    pl.play_at(ui.ctx(), i, 0.);
                 }
             }
         }
-        self.info_cards(ui, c, yb + 6., true);
+        if !empty {
+            self.info_cards(ui, c, yb + 6., true);
+        }
         corners(behind);
         if hide {
             self.set_player(None);
+        }
+        if title_click {
+            if let Some(tr) = self.pl.song().map(Song::track) {
+                self.open_song(tr);
+            }
+        }
+        if artist_click {
+            if let Some(id) = &artist_id {
+                self.open_artist(id);
+            }
+        }
+        if let Some(m) = pending_menu {
+            self.toggle_menu(menu_btn, m);
         }
     }
 }

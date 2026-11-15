@@ -1,36 +1,34 @@
 //! Centre panel: album page (header wash, actions, virtualized track list).
 
 use crate::app::{App, Route};
-use crate::data::Track;
+use crate::data::{Item, Track};
 use crate::gfx::*;
-use eframe::egui::{self, pos2, vec2, Align2, Rect, ScrollArea};
+use crate::menu::Target;
+use eframe::egui::{self, pos2, vec2, Align2, Color32, Painter, Rect, ScrollArea};
 use std::time::Duration;
 
-pub fn sample_tracks() -> Vec<Track> {
-    let t = |title: &str, artist: &str, dur: u32| Track { title: title.into(), artists: vec![artist.into()], duration_sec: Some(dur), ..Default::default() };
-    vec![
-        t("Last Stop Is Mine", "Hoshi Yume", 222),
-        t("Window Seat, Rain", "Hoshi Yume", 248),
-        t("Transfer at Midnight", "Hoshi Yume, Aoi Tsuru", 195),
-        t("Fare Card Blue", "Hoshi Yume", 177),
-        t("Depot", "Hoshi Yume", 321),
-        t("Everyone Gets Off Here, Eventually", "Hoshi Yume", 219),
-        t("Terminus", "Hoshi Yume", 284),
-        t("Paper Lantern", "Hoshi Yume", 200),
-    ]
-}
-
 const ROW_H: f32 = 44.;
+const COVER_ROW_H: f32 = 60.;
+const COVER: f32 = 46.;
 
-/// Column x-ranges inside a row of width `w`: # | title (1.6) | artist (1) | time.
-fn columns(left: f32, w: f32) -> [(f32, f32); 4] {
-    let flex = w - 24. - 36. - 52. - 3. * 8.;
+/// Column x-ranges inside a row of width `w`: # (`num` wide) | title (1.6) | artist (1) | time.
+fn columns(left: f32, w: f32, num: f32) -> [(f32, f32); 4] {
+    let flex = w - num - 100.;
     let (tw, aw) = (flex * 1.6 / 2.6, flex / 2.6);
     let n = left + 12.;
-    let title = n + 36. + 8.;
+    let title = n + num + 8.;
     let artist = title + tw + 8.;
     let dur = artist + aw + 8.;
-    [(n, 36.), (title, tw), (artist, aw), (dur, 52.)]
+    [(n, num), (title, tw), (artist, aw), (dur, 52.)]
+}
+
+/// Three bars with their left edge at `x`, bottoms at `cy + 6`; bouncing while `playing`, otherwise static.
+fn equaliser(p: &Painter, x: f32, cy: f32, time: f32, playing: bool, col: Color32) {
+    for b in 0..3 {
+        let h = if playing { 3. + 9. * (0.5 + 0.5 * (time * 6. + b as f32 * 2.1).sin()) } else { [5., 9., 6.][b] };
+        let bx = x + b as f32 * 4.;
+        p.rect_filled(Rect::from_min_max(pos2(bx, cy + 6. - h), pos2(bx + 2., cy + 6.)), rad(1.), col);
+    }
 }
 
 impl App {
@@ -53,15 +51,8 @@ impl App {
                 let (kind, id) = self.sel.clone().unwrap();
                 self.live_detail(ui, card, kind, &id);
             }
-            Route::Album => {
-                let y = self.hero(ui, card, false, "ALBUM · 2024", "Night Bus Home", "Hoshi Yume · 11 songs · 41 min", None);
-                self.tracks_table(ui, card, y, &sample_tracks());
-            }
-            Route::Artist => {
-                let y = self.hero(ui, card, true, "ARTIST", "Hoshi Yume", "184,203 monthly listeners · 3 albums", None);
-                self.tracks_table(ui, card, y, &sample_tracks());
-            }
             Route::History => self.stats_page(ui, card),
+            Route::Song => self.song_page(ui, card),
             r => self.plain(ui, card, r),
         }
         fade_down(&p, Rect::from_min_max(pos2(card.min.x, card.max.y - 56.), card.max), t.s1);
@@ -73,11 +64,13 @@ impl App {
         let t = self.t;
         let p = ui.painter().clone();
         let (title, sub) = match r {
-            Route::Home => ("Good evening", "Picked from what you played this week"),
+            Route::Home => ("Home", "From YouTube Music"),
             Route::Search if self.submitted.is_empty() => ("Search", "Type in the box above and press Enter"),
-            Route::Search => ("Search", "Songs on YouTube Music"),
-            Route::Downloads => ("Downloads", "96 songs · 2.4 GB on this device"),
-            Route::Local => ("Local Music", "1,284 files · 3 folders"),
+            Route::Search => ("Search", "Songs, albums and artists on YouTube Music"),
+            Route::Downloads => ("Downloads", "Songs saved on this device"),
+            Route::Local => ("Local Music", ""),
+            Route::Album => ("Album", ""),
+            Route::Artist => ("Artist", ""),
             Route::Settings => ("Settings", ""),
             _ => ("Spotify import", "Your Spotify playlists"),
         };
@@ -87,34 +80,45 @@ impl App {
         match r {
             Route::Search => self.search_page(ui, card, top),
             Route::Import => self.import_page(ui, card, top),
-            Route::Downloads | Route::Local => self.tracks_table(ui, card, top, &sample_tracks()),
+            Route::Downloads => self.note(ui, card, top, "No downloads yet."),
+            Route::Local => self.note(ui, card, top, "No local music folders yet."),
+            Route::Album => self.note(ui, card, top, "Pick an album from Home, Search or your library."),
+            Route::Artist => self.note(ui, card, top, "Pick an artist from Home, Search or your library."),
             Route::Home => self.home_page(ui, card, top),
             Route::Settings => self.settings_page(ui, card, top),
-            _ => {
-                trunc(&p, pos2(card.min.x + 22., top + 20.), card.width() - 44., "Not designed yet.", font(13.), t.tf);
-            }
+            _ => {}
         }
     }
 
     /// Wash header with cover (round for artists), title block and action buttons, then the track table.
-    pub fn hero(&mut self, ui: &mut egui::Ui, card: Rect, round: bool, kicker: &str, title: &str, sub: &str, cover_url: Option<&str>) -> f32 {
+    /// `save` is (kind, id, saved) when the page can be added to the library.
+    pub fn hero(&mut self, ui: &mut egui::Ui, card: Rect, round: bool, kicker: &str, title: &str, sub: &str, cover_url: Option<&str>, tracks: &[Track], save: Option<(&'static str, &str, bool)>) -> f32 {
         let t = self.t;
         let p = ui.painter().clone();
 
         let wash_h = 24. + 148. + 20.;
         let wash = Rect::from_min_size(card.min, vec2(card.width(), wash_h));
+        // Album and artist pages can be right-clicked and opened from the menu; `sel` is only set on those.
+        let page_item = match (&self.sel, self.route) {
+            (Some((kind, id)), Route::Album | Route::Artist) => Some(Item {
+                r#type: match *kind { "albums" => "album", "playlists" => "playlist", "artists" => "artist", _ => "spotify" }.into(),
+                id: id.clone(),
+                title: title.into(),
+                thumbnail: cover_url.map(String::from),
+                ..Default::default()
+            }),
+            _ => None,
+        };
+        let wash_hit = ui.interact(wash, ui.scope_id().with("wash"), egui::Sense::click());
+        if let (true, Some(it), Some(pos)) = (wash_hit.secondary_clicked(), &page_item, wash_hit.interact_pointer_pos()) {
+            self.ctx_menu = Some((pos, Target::Item(it.clone())));
+        }
         let wash_tex = self.g.wash(ui.ctx(), &t);
         egui::Image::new(sized(wash_tex, 1.)).fit_to_exact_size(wash.size()).corner_radius(rad(18.)).paint_at(ui, wash);
         let art = Rect::from_min_size(pos2(card.min.x + 22., card.min.y + 24.), vec2(148., 148.));
         let ar = if round { 74. } else { 6. };
         shadow(&p, art, ar, 6, 22, 71);
-        match cover_url {
-            Some(_) => self.thumb(ui, cover_url, art, ar),
-            None => {
-                let cover = self.g.cover(ui.ctx(), &t);
-                egui::Image::new(sized(cover, 148.)).corner_radius(rad(ar)).paint_at(ui, art);
-            }
-        }
+        self.thumb(ui, cover_url, art, ar);
 
         // Meta block, bottom-aligned with the art.
         let mx = art.max.x + 22.;
@@ -136,13 +140,36 @@ impl App {
         if r.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
+        if r.clicked() {
+            self.pl.play_tracks(ui.ctx(), tracks, 0, false);
+        }
         let mut x = play.max.x + 8.;
-        for label in ["Shuffle", "Save", "Download"] {
+        let mut labels = vec!["Shuffle"];
+        if let Some((_, _, saved)) = save {
+            labels.push(if saved { "Saved" } else { "Save" });
+        }
+        for label in labels {
             let w = text_w(&p, label, font(13.)) + 24.;
             let b = Rect::from_min_size(pos2(x, ay), vec2(w, 35.));
             let hot = tonal(ui, &t, label, b, 8., None);
+            if hot.clicked() {
+                match save {
+                    Some((kind, id, saved)) if label != "Shuffle" => self.data.save(ui.ctx(), kind, id, !saved),
+                    _ => self.pl.play_tracks(ui.ctx(), tracks, 0, true),
+                }
+            }
             p.text(b.center(), Align2::CENTER_CENTER, label, font(13.), if hot.hovered() { t.tx } else { t.tm });
             x += w + 8.;
+        }
+        if let Some(it) = &page_item {
+            let more = Rect::from_min_size(pos2(x, ay), vec2(35., 35.));
+            if icon_button(ui, &t, "page-more", more.center(), 35., icon!("more"), 18., t.tm).clicked() {
+                self.toggle_menu(Some(more), (pos2(more.min.x, more.max.y + 6.), Target::Item(it.clone())));
+            }
+            x += 35. + 8.;
+        }
+        if let Some(e) = self.data.notice.lock().unwrap().clone() {
+            trunc(&p, pos2(x + 4., ay + 17.), (card.max.x - x - 26.).max(0.), &e, font(12.), t.tm);
         }
 
         ay + 35. + 8.
@@ -153,7 +180,10 @@ impl App {
         let t = self.t;
         let p = ui.painter().clone();
         let (tl, tr) = (card.min.x + 6., card.max.x - 6.);
-        let cols = columns(tl, tr - tl);
+        // Songs with their own covers (search results, playlists) get a cover column in place of the number column.
+        let covers = self.route == Route::Search || (self.route == Route::Album && matches!(self.sel.as_ref().map(|s| s.0), Some("playlists" | "spotify")));
+        let (rh, num) = if covers { (COVER_ROW_H, 76.) } else { (ROW_H, 36.) };
+        let cols = columns(tl, tr - tl, num);
         let hy = ty + 14.;
         let head = font_w(10.5, Weight::Semi);
         for (i, label) in ["#", "TITLE", "ARTIST", "TIME"].iter().enumerate() {
@@ -169,30 +199,52 @@ impl App {
         lui.spacing_mut().item_spacing = vec2(0., 0.);
         let time = ui.ctx().input(|i| i.time) as f32;
         let mut any_on = false;
-        ScrollArea::vertical().id_salt(("tracks", self.route)).auto_shrink(false).show_rows(&mut lui, ROW_H, tracks.len(), |ui, range| {
+        let mut clicked = None;
+        let mut menu = None;
+        ScrollArea::vertical().id_salt(("tracks", self.route)).auto_shrink(false).show_rows(&mut lui, rh, tracks.len(), |ui, range| {
             for ix in range {
-                let (_, r) = ui.allocate_space(vec2(list.width(), ROW_H));
+                let (_, r) = ui.allocate_space(vec2(list.width(), rh));
                 let row = Rect::from_min_max(pos2(tl, r.min.y), pos2(tr, r.max.y));
-                tonal(ui, &t, ("row", ix), row, 8., None);
+                let hit = tonal(ui, &t, ("row", ix), row, 8., None);
+                if hit.clicked() {
+                    clicked = Some(ix);
+                }
+                if let (true, Some(pos)) = (hit.secondary_clicked(), hit.interact_pointer_pos()) {
+                    menu = Some((pos, ix));
+                }
                 let tk = &tracks[ix];
-                let on = ix == self.playing && self.pl.playing;
-                any_on |= on;
+                let cur = self.pl.is_current(tk);
+                let playing = cur && self.pl.playing;
+                // The equaliser is the only continuous animation, repainted at ~30fps.
+                any_on |= playing;
                 let (cy, p) = (row.center().y, ui.painter());
-                if on {
-                    // Equaliser bars; the only continuous animation, repainted at ~30fps.
-                    for b in 0..3 {
-                        let h = 3. + 9. * (0.5 + 0.5 * (time * 6. + b as f32 * 2.1).sin());
-                        let bx = cols[0].0 + b as f32 * 4.;
-                        p.rect_filled(Rect::from_min_max(pos2(bx, cy + 6. - h), pos2(bx + 2., cy + 6.)), rad(1.), t.ax);
+                if covers {
+                    let cover = Rect::from_min_size(pos2(cols[0].0 + 26., cy - COVER / 2.), vec2(COVER, COVER));
+                    p.text(pos2(cols[0].0, cy), Align2::LEFT_CENTER, ix + 1, font(13.), t.tm);
+                    self.thumb(ui, tk.thumbnail.as_deref(), cover, 6.);
+                    if cur {
+                        p.rect_filled(cover, rad(6.), Color32::from_black_alpha(120));
+                        equaliser(p, cover.center().x - 5., cy, time, playing, Color32::WHITE);
+                    } else if hit.hovered() {
+                        p.rect_filled(cover, rad(6.), Color32::from_black_alpha(120));
+                        icon(ui, icon!("play"), cover.center(), 18., Color32::WHITE);
                     }
+                } else if cur {
+                    equaliser(p, cols[0].0, cy, time, playing, t.ax);
                 } else {
                     p.text(pos2(cols[0].0, cy), Align2::LEFT_CENTER, ix + 1, font(13.), t.tm);
                 }
-                trunc(p, pos2(cols[1].0, cy), cols[1].1, &tk.title, if on { font_w(13., Weight::Medium) } else { font(13.) }, if on { t.ax } else { t.tx });
+                trunc(p, pos2(cols[1].0, cy), cols[1].1, &tk.title, if cur { font_w(13., Weight::Medium) } else { font(13.) }, if cur { t.ax } else { t.tx });
                 trunc(p, pos2(cols[2].0, cy), cols[2].1, &tk.artists.join(", "), font(13.), t.tm);
                 p.text(pos2(cols[3].0 + cols[3].1, cy), Align2::RIGHT_CENTER, tk.dur(), font(13.), t.tm);
             }
         });
+        if let Some(ix) = clicked {
+            self.pl.play_tracks(ui.ctx(), tracks, ix, false);
+        }
+        if let Some((pos, ix)) = menu {
+            self.ctx_menu = Some((pos, Target::Track(tracks[ix].clone())));
+        }
         if any_on {
             ui.ctx().request_repaint_after(Duration::from_millis(33));
         }

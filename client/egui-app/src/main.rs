@@ -2,16 +2,21 @@
 
 #[macro_use]
 mod gfx;
+mod about;
 mod app;
+mod audio;
 mod backend;
 mod data;
 mod live;
 mod library;
+mod media;
 mod menu;
 mod page;
 mod player;
 mod stats;
 mod theme;
+#[cfg(feature = "video")]
+mod video;
 
 use eframe::egui;
 

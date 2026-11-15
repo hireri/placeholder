@@ -1,5 +1,6 @@
 package dev.metrolist.desktop
 
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.ApplicationCall
@@ -12,7 +13,9 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondBytesWriter
 import io.ktor.server.response.respondText
+import io.ktor.utils.io.writeFully
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -84,6 +87,9 @@ fun main() {
             get("/youtube/home") { call.respond(Services.home()) }
             get("/youtube/search/items") { call.respond(Services.searchItems(call.q("q") ?: "", call.q("type") ?: "song")) }
             get("/youtube/explore") { call.respond(Services.explore()) }
+            post("/youtube/like/{videoId}") { Services.like(call.parameters["videoId"]!!, call.q("on") == "true"); call.respond(HttpStatusCode.NoContent) }
+            post("/youtube/subscribe/{channelId}") { Services.subscribe(call.parameters["channelId"]!!, call.q("on") == "true"); call.respond(HttpStatusCode.NoContent) }
+            post("/youtube/save/{kind}/{id}") { Services.save(call.parameters["kind"]!!, call.parameters["id"]!!, call.q("on") == "true"); call.respond(HttpStatusCode.NoContent) }
             get("/youtube/history") { call.respond(Services.history()) }
             get("/youtube/library/{kind}") { call.respond(Services.library(call.parameters["kind"]!!)) }
             get("/youtube/albums/{id}") { call.respond(Services.album(call.parameters["id"]!!)) }
@@ -92,6 +98,11 @@ fun main() {
             get("/youtube/playlists/{id}/tracks") { call.respond(Services.youtubePlaylistTracks(call.parameters["id"]!!)) }
             get("/youtube/playlists/{id}") { call.respond(Services.playlist(call.parameters["id"]!!)) }
             get("/stream/{videoId}") { call.respond(Services.stream(call.parameters["videoId"]!!)) }
+            get("/video/{videoId}") {
+                val b = Services.videoBootstrap(call.parameters["videoId"]!!, call.q("maxHeight")?.toIntOrNull() ?: 480)
+                val type = ContentType.parse(b.selectedVideoMimeType?.substringBefore(';') ?: "video/webm")
+                call.respondBytesWriter(type) { Services.videoBytes(b, call.q("startMs")?.toLongOrNull() ?: 0).collect { writeFully(it) } }
+            }
             get("/lyrics") {
                 val l = Services.lyrics(call.q("id") ?: "", call.q("title") ?: "", call.q("artist") ?: "", call.q("duration")?.toIntOrNull() ?: -1, call.q("album"))
                 if (l == null) call.respond(HttpStatusCode.NotFound, ErrorDto("no lyrics")) else call.respond(l)

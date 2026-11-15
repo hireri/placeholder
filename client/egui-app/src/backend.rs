@@ -97,8 +97,28 @@ pub fn get<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
     let (url, token) = conn()?;
     match ureq::get(&format!("{url}{path}")).set("X-Metrolist-Token", token).call() {
         Ok(r) => r.into_json().map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(_, r)) => Err(r.into_json::<serde_json::Value>().ok().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| "request failed".into())),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(failure(e)),
+    }
+}
+
+/// URL of a song's video-only stream starting at `start_ms`, and the token its request must carry (for GStreamer to fetch).
+#[cfg(feature = "video")]
+pub fn video_url(id: &str, start_ms: u64, max_height: u32) -> Result<(String, String), String> {
+    let (url, token) = conn()?;
+    Ok((format!("{url}/video/{}?startMs={start_ms}&maxHeight={max_height}", enc(id)), token.clone()))
+}
+
+/// Blocking POST with no body (the daemon answers 204); call from a worker thread.
+pub fn post(path: &str) -> Result<(), String> {
+    let (url, token) = conn()?;
+    ureq::post(&format!("{url}{path}")).set("X-Metrolist-Token", token).call().map(drop).map_err(failure)
+}
+
+/// The daemon's `error` message for an HTTP failure, else the transport error.
+fn failure(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(_, r) => r.into_json::<serde_json::Value>().ok().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| "request failed".into()),
+        e => e.to_string(),
     }
 }
 

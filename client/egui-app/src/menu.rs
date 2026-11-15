@@ -2,13 +2,25 @@
 //! Caller owns the `open` flag (toggle it from the anchor button); the menu closes itself on Esc or a press outside it.
 //! It stays open after a pick so radio-style menus can show the change; set `open = false` to close on pick.
 
+use crate::app::App;
+use crate::data::{self, State, Track};
 use crate::gfx::*;
 use crate::theme::Theme;
 use eframe::egui::{self, pos2, vec2, Align2, Area, Context, Id, Key, Order, Rect, Sense};
 
 const W: f32 = 232.;
 
-#[allow(dead_code)] // Divider and Action are for the next menus
+/// What a right-click menu is for. Set `App::ctx_menu = Some((pointer, target))` on `secondary_clicked()`; `App::context_menu` draws it.
+#[derive(Clone)]
+pub enum Target {
+    /// A song (track row, song card, the player's current song).
+    Track(Track),
+    /// An album, playlist (YouTube or Spotify) or artist; `r#type` says which.
+    Item(data::Item),
+    /// Entry `i` of the play queue.
+    Queue(usize),
+}
+
 pub enum Item<'a> {
     Heading(&'a str),
     Divider,
@@ -114,4 +126,149 @@ pub fn show(ctx: &Context, t: &Theme, id: &'static str, open: &mut bool, at: egu
         *open = false;
     }
     picked
+}
+
+const PLAY: usize = 0;
+const NEXT: usize = 1;
+const QUEUE: usize = 2;
+const SHUFFLE: usize = 3;
+const OPEN: usize = 4;
+const SONG: usize = 5;
+const ARTIST: usize = 6;
+const ALBUM: usize = 7;
+const SAVE: usize = 8;
+const REMOVE: usize = 9;
+const LINK: usize = 10;
+
+fn track_link(t: &Track) -> String {
+    if t.source == "spotify" { format!("https://open.spotify.com/track/{}", t.id) } else { format!("https://music.youtube.com/watch?v={}", t.id) }
+}
+
+fn item_link(it: &data::Item) -> String {
+    match it.r#type.as_str() {
+        "artist" => format!("https://music.youtube.com/channel/{}", it.id),
+        "playlist" => format!("https://music.youtube.com/playlist?list={}", it.id.strip_prefix("VL").unwrap_or(&it.id)),
+        "spotify" => format!("https://open.spotify.com/playlist/{}", it.id),
+        _ => format!("https://music.youtube.com/browse/{}", it.id),
+    }
+}
+
+impl App {
+    /// Opens `m`; from a menu button (`btn`) a second click closes it instead.
+    pub fn toggle_menu(&mut self, btn: Option<Rect>, m: (egui::Pos2, Target)) {
+        if btn.is_some() && self.ctx_menu.is_some() {
+            self.ctx_menu = None;
+            self.ctx_keep = Rect::NOTHING;
+        } else {
+            self.ctx_keep = btn.unwrap_or(Rect::NOTHING);
+            self.ctx_menu = Some(m);
+        }
+    }
+
+    /// Draws the right-click menu in `ctx_menu`, if any, and runs the picked action.
+    pub fn context_menu(&mut self, ctx: &Context) {
+        let Some((at, target)) = self.ctx_menu.clone() else { return };
+        let t = self.t;
+        let mut items = vec![];
+        // Songs an album/playlist/artist item would play; `None` while its page is still loading.
+        let mut songs: Option<Vec<Track>> = None;
+        let mut saved = None;
+        match &target {
+            Target::Track(tr) => {
+                items.extend([Item::Action(PLAY, "Play", None), Item::Action(NEXT, "Play next", None), Item::Action(QUEUE, "Add to queue", None), Item::Divider, Item::Action(SONG, "View song", None)]);
+                if tr.artist_id.is_some() {
+                    items.push(Item::Action(ARTIST, "Go to artist", None));
+                }
+                if tr.album_id.is_some() {
+                    items.push(Item::Action(ALBUM, "Go to album", None));
+                }
+            }
+            Target::Item(it) => {
+                if let Some((kind, _)) = crate::live::target(it) {
+                    songs = match &*self.data.detail(ctx, kind, &it.id).lock() {
+                        State::Ready(d) if !d.tracks.is_empty() => Some(d.tracks.clone()),
+                        // Artists have no track list; their song shelves stand in.
+                        State::Ready(d) => Some(d.sections.iter().flat_map(|s| &s.items).filter(|i| i.r#type == "song").map(|i| i.track()).collect()),
+                        _ => None,
+                    };
+                }
+                match &songs {
+                    Some(v) if !v.is_empty() => items.extend([Item::Action(PLAY, "Play", None), Item::Action(SHUFFLE, "Shuffle", None), Item::Action(NEXT, "Play next", None), Item::Action(QUEUE, "Add to queue", None)]),
+                    Some(_) => {}
+                    None => items.push(Item::Heading("Loading songs…")),
+                }
+                items.extend([Item::Divider, Item::Action(OPEN, match it.r#type.as_str() { "artist" => "Go to artist", "album" => "Go to album", _ => "Open playlist" }, None)]);
+                if matches!(it.r#type.as_str(), "album" | "playlist") {
+                    let lib = if it.r#type == "album" { 2 } else { 1 };
+                    let on = self.lib_items.iter().any(|i| i.kind == lib && i.id == it.id);
+                    saved = Some(on);
+                    items.push(Item::Action(SAVE, if on { "Remove from library" } else { "Save to library" }, None));
+                }
+            }
+            Target::Queue(i) => {
+                let Some(tr) = self.pl.track_at(*i) else {
+                    self.ctx_menu = None;
+                    return;
+                };
+                let cur = self.pl.is_current(&tr);
+                if !cur {
+                    items.extend([Item::Action(PLAY, "Play now", None), Item::Action(NEXT, "Play next", None), Item::Action(REMOVE, "Remove from queue", None), Item::Divider]);
+                }
+                items.push(Item::Action(SONG, "View song", None));
+                if tr.artist_id.is_some() {
+                    items.push(Item::Action(ARTIST, "Go to artist", None));
+                }
+                if tr.album_id.is_some() {
+                    items.push(Item::Action(ALBUM, "Go to album", None));
+                }
+            }
+        }
+        items.extend([Item::Divider, Item::Action(LINK, "Copy link", None)]);
+        let mut open = true;
+        let picked = show(ctx, &t, "ctx-menu", &mut open, at, self.ctx_keep, &items);
+        if !open || picked.is_some() {
+            self.ctx_menu = None;
+            self.ctx_keep = Rect::NOTHING;
+        }
+        let Some(pick) = picked else { return };
+        match target {
+            Target::Track(tr) => match pick {
+                PLAY => self.pl.play_tracks(ctx, std::slice::from_ref(&tr), 0, false),
+                NEXT | QUEUE => self.pl.enqueue(ctx, std::slice::from_ref(&tr), pick == NEXT),
+                SONG => self.open_song(tr),
+                ARTIST => self.open_artist(tr.artist_id.as_deref().unwrap_or_default()),
+                ALBUM => self.open_album(tr.album_id.as_deref().unwrap_or_default()),
+                _ => ctx.copy_text(track_link(&tr)),
+            },
+            Target::Item(it) => {
+                let v = songs.unwrap_or_default();
+                match pick {
+                    PLAY | SHUFFLE => self.pl.play_tracks(ctx, &v, 0, pick == SHUFFLE),
+                    NEXT | QUEUE => self.pl.enqueue(ctx, &v, pick == NEXT),
+                    OPEN => {
+                        if let Some((kind, route)) = crate::live::target(&it) {
+                            self.open(route, Some((kind, it.id.clone())));
+                        }
+                    }
+                    SAVE => {
+                        let kind = if it.r#type == "album" { "albums" } else { "playlists" };
+                        self.data.save(ctx, kind, &it.id, !saved.unwrap_or(false));
+                    }
+                    _ => ctx.copy_text(item_link(&it)),
+                }
+            }
+            Target::Queue(i) => {
+                let Some(tr) = self.pl.track_at(i) else { return };
+                match pick {
+                    PLAY => self.pl.play_index(ctx, i),
+                    NEXT => self.pl.move_next(i),
+                    REMOVE => self.pl.remove_at(i),
+                    SONG => self.open_song(tr),
+                    ARTIST => self.open_artist(tr.artist_id.as_deref().unwrap_or_default()),
+                    ALBUM => self.open_album(tr.album_id.as_deref().unwrap_or_default()),
+                    _ => ctx.copy_text(track_link(&tr)),
+                }
+            }
+        }
+    }
 }

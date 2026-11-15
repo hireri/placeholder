@@ -2,8 +2,9 @@
 
 use crate::app::{App, Route};
 use crate::gfx::*;
+use crate::live::grid;
 use crate::data::State;
-use crate::menu::{self, Item};
+use crate::menu::{self, Item, Target};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, ScrollArea, Sense};
 
 pub struct LibItem {
@@ -16,15 +17,14 @@ pub struct LibItem {
     pub kind: usize,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LibSort {
     Recents,
-    Added,
     Alpha,
     Creator,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LibView {
     Compact,
     List,
@@ -32,7 +32,7 @@ pub enum LibView {
     Grid2,
 }
 
-const SORTS: [(LibSort, &str); 4] = [(LibSort::Recents, "Recents"), (LibSort::Added, "Recently added"), (LibSort::Alpha, "Alphabetical"), (LibSort::Creator, "Creator")];
+const SORTS: [(LibSort, &str); 3] = [(LibSort::Recents, "Recents"), (LibSort::Alpha, "Alphabetical"), (LibSort::Creator, "Creator")];
 const VIEWS: [(LibView, &str, &str); 4] =
     [(LibView::Compact, icon!("vc"), "Compact list"), (LibView::List, icon!("vl"), "List"), (LibView::Grid, icon!("vg"), "Grid of covers"), (LibView::Grid2, icon!("grid"), "Grid with titles")];
 
@@ -58,6 +58,12 @@ impl LibItem {
         let by = i.subtitle.clone().unwrap_or_default();
         let sub = if kind == 3 || by.is_empty() { label.to_string() } else { format!("{label} · {by}") };
         LibItem { id: i.id, thumb: i.thumbnail, title: i.title, sub, by, kind }
+    }
+
+    /// As a generic item, for the right-click menu.
+    pub fn item(&self) -> crate::data::Item {
+        let r#type = ["", "playlist", "album", "artist"][self.kind].to_string();
+        crate::data::Item { r#type, id: self.id.clone(), title: self.title.clone(), thumbnail: self.thumb.clone(), ..Default::default() }
     }
 
     pub fn endpoint(&self) -> &'static str {
@@ -193,7 +199,6 @@ impl App {
         let items = &self.lib_items;
         match self.lib_sort {
             LibSort::Recents => {}
-            LibSort::Added => order.reverse(),
             LibSort::Alpha => order.sort_by_cached_key(|&i| items[i].title.to_lowercase()),
             LibSort::Creator => order.sort_by_cached_key(|&i| (items[i].by.to_lowercase(), items[i].title.to_lowercase())),
         }
@@ -202,19 +207,18 @@ impl App {
         // View switches fade the list out, swap, then fade it in; reversing mid-fade just reverses the fade.
         let target = if self.lib_open { self.lib_view } else { LibView::List };
         let settled = self.lib_shown == target;
-        let va = ui.ctx().animate_bool_with_time(egui::Id::new("lib-view-fade"), settled, 0.12);
+        let va = ui.ctx().animate_bool_with_time(egui::Id::unique("lib-view-fade"), settled, 0.12);
         if !settled && va <= 0. {
             self.lib_shown = target;
         }
         let view = self.lib_shown;
         // Grids lay out against the open width so they don't reflow while the sidebar animates.
         let inner = if view == LibView::List || view == LibView::Compact { x1 - x0 } else { self.lib_w - 16. };
-        let (cols, gap) = match view {
-            LibView::Grid => (3, 8.),
-            LibView::Grid2 => (2, 4.),
-            _ => (1, 0.),
+        let ((cols, cw), gap) = match view {
+            LibView::Grid => (grid(inner - 6., 72., 8.), 8.),
+            LibView::Grid2 => (grid(inner, 110., 4.), 4.),
+            _ => ((1, inner), 0.),
         };
-        let cw = if cols == 1 { inner } else { (inner - if view == LibView::Grid { 6. } else { 0. } - gap * (cols - 1) as f32) / cols as f32 };
         let row_h = match view {
             LibView::Compact => 30.,
             LibView::List => 50.,
@@ -224,11 +228,13 @@ impl App {
         let cur = self.lib_current;
         let on_item = matches!(self.route, Route::Album | Route::Artist);
         let mut open_item: Option<(Route, &'static str, String)> = None;
+        let mut menu_at: Option<(egui::Pos2, Target)> = None;
         let list = Rect::from_min_max(pos2(rect.min.x, y), rect.max);
         let mut lui = App::region(ui, list);
         lui.spacing_mut().item_spacing = vec2(0., 0.);
         lui.set_opacity(va);
-        ScrollArea::vertical().id_salt("lib-list").auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+        let bar = if self.lib_open { egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded } else { egui::scroll_area::ScrollBarVisibility::AlwaysHidden };
+        ScrollArea::vertical().id_salt("lib-list").auto_shrink(false).scroll_bar_visibility(bar)
             .show_rows(&mut lui, row_h, order.len().div_ceil(cols), |ui, range| {
                 for r in range {
                     let (_, row) = ui.allocate_space(vec2(list.width(), row_h));
@@ -236,12 +242,18 @@ impl App {
                         let Some(&ix) = order.get(r * cols + c) else { break };
                         let it = &self.lib_items[ix];
                         let on = ix == cur && on_item;
-                        let ax = if cols == 1 { x0 } else { x0 + if view == LibView::Grid { 3. } else { 0. } + c as f32 * (cw + gap) };
+                        let ax = x0 + if view == LibView::Grid { 3. } else { 0. } + c as f32 * (cw + gap);
                         let cell = Rect::from_min_size(pos2(ax, row.min.y), vec2(cw, if view == LibView::Grid { cw } else { row_h }));
                         let hit = tonal(ui, &t, ("li", ix), cell, if view == LibView::Grid { 6. } else { 10. }, (on && view != LibView::Grid).then_some(t.axc));
+                        if hit.hovered() {
+                            self.data.detail(ui.ctx(), it.endpoint(), &it.id);
+                        }
                         if hit.clicked() {
                             self.lib_current = ix;
                             open_item = Some((it.route(), it.endpoint(), it.id.clone()));
+                        }
+                        if let (true, Some(pos)) = (hit.secondary_clicked(), hit.interact_pointer_pos()) {
+                            menu_at = Some((pos, Target::Item(it.item())));
                         }
                         let tp = ui.painter().clone();
                         let (tx, ty, tw) = match view {
@@ -272,14 +284,16 @@ impl App {
                             let dy = if view == LibView::List { 8. } else { 9. };
                             let fade = if view == LibView::List { ta } else { 1. };
                             trunc(&tp, pos2(tx, ty - if view == LibView::List { dy } else { 0. }), tw, &it.title, font_w(13., Weight::Medium), t.tx.gamma_multiply(fade));
-                            trunc(&tp, pos2(tx, ty + if view == LibView::List { 9. } else { 17. }), tw, &it.sub, font(12.), t.tm);
+                            trunc(&tp, pos2(tx, ty + if view == LibView::List { 9. } else { 17. }), tw, &it.sub, font(12.), t.tm.gamma_multiply(fade));
                         }
                     }
                 }
             });
         if let Some((r, kind, id)) = open_item {
-            self.sel = Some((kind, id));
-            self.go(r);
+            self.open(r, Some((kind, id)));
+        }
+        if let Some(m) = menu_at {
+            self.ctx_menu = Some(m);
         }
         fade_down(&p, Rect::from_min_max(pos2(rect.min.x, rect.max.y - 40.), rect.max), t.s0);
     }

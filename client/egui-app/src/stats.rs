@@ -2,8 +2,9 @@
 
 use crate::app::App;
 use crate::backend;
-use crate::data::{Item, State};
+use crate::data::{Item, State, Track};
 use crate::gfx::*;
+use crate::menu::Target;
 use eframe::egui::{self, pos2, vec2, Align2, Rect, ScrollArea};
 
 const GAP: f32 = 8.;
@@ -32,13 +33,16 @@ impl App {
             _ => return self.note(ui, card, top, "Loading…"),
         };
         let spotify = match &*d.spotify.lock() {
-            State::Ready(n) => format!("{} playlists synced · Spotify doesn't share its play history", n.len()),
+            State::Ready(n) => format!("{} Spotify playlists · no play history", n.len()),
             State::Failed(e) => e.clone(),
             _ => "Loading…".into(),
         };
 
         let area = Rect::from_min_max(pos2(card.min.x, top), card.max);
         let mut lui = App::region(ui, area);
+        // A row click queues that list from the clicked song, once the scroll area is done with `self`.
+        let mut play: Option<(Vec<Track>, usize)> = None;
+        let mut menu: Option<(egui::Pos2, Target)> = None;
         ScrollArea::vertical().id_salt("stats").auto_shrink(false).show(&mut lui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
             let p = ui.painter().clone();
@@ -46,7 +50,7 @@ impl App {
             ui.add_space(8.);
 
             // Totals.
-            let tiles = [("Plays", st.plays.to_string()), ("Songs", st.songs.to_string()), ("Artists", st.artists.to_string()), ("Listening time", duration(st.secs))];
+            let tiles = [("Plays", st.plays.to_string()), ("Songs", st.songs.to_string()), ("Artists", st.artists.to_string()), ("≈ Listening time", duration(st.secs))];
             let cols = if w >= 560. { 4 } else { 2 };
             let tw = (w - GAP * (cols - 1) as f32) / cols as f32;
             let (_, r) = ui.allocate_space(vec2(area.width(), (4 / cols) as f32 * (84. + GAP)));
@@ -84,8 +88,16 @@ impl App {
                 p.rect_filled(Rect::from_min_size(bar.min, vec2(tw * *n as f32 / most, 3.)), rad(2.), t.ax);
                 p.text(pos2(row.max.x - 16., cy), Align2::RIGHT_CENTER, format!("{n} plays"), font(12.), t.tm);
             }
+            let top_list: Vec<Track> = st.top_songs.iter().map(|(i, _)| i.track()).collect();
             for (i, (row, (it, n))) in rows(b, "Top songs", st.top_songs.is_empty()).zip(&st.top_songs).enumerate() {
                 let cy = row.center().y;
+                let hit = tonal(ui, &t, ("top-song", i), row, 0., None);
+                if hit.clicked() {
+                    play = Some((top_list.clone(), i));
+                }
+                if let (true, Some(pos)) = (hit.secondary_clicked(), hit.interact_pointer_pos()) {
+                    menu = Some((pos, Target::Track(it.track())));
+                }
                 p.text(pos2(row.min.x + 22., cy), Align2::CENTER_CENTER, i + 1, font(13.), t.tf);
                 self.thumb(ui, it.thumbnail.as_deref(), Rect::from_center_size(pos2(row.min.x + 62., cy), vec2(36., 36.)), 6.);
                 let (tx, tw) = (row.min.x + 90., row.width() - 90. - 60.);
@@ -95,15 +107,11 @@ impl App {
             }
 
             // Sources.
-            let (_, r) = ui.allocate_space(vec2(area.width(), 52. + 3. * 52. + 12. + GAP));
+            let (_, r) = ui.allocate_space(vec2(area.width(), 52. + 2. * 52. + 12. + GAP));
             let panel = Rect::from_min_size(pos2(l, r.min.y), vec2(w, r.height() - GAP));
             p.rect_filled(panel, rad(16.), t.s2);
             trunc(&p, pos2(panel.min.x + 16., panel.min.y + 26.), w - 32., "Sources", font_w(15., Weight::Bold), t.tx);
-            let sources = [
-                ("YouTube Music", format!("{} plays in your history", st.plays)),
-                ("Spotify", spotify),
-                ("Metrolist", "Plays from this app will be counted here once playback lands".to_string()),
-            ];
+            let sources = [("YouTube Music", format!("{} plays in your history", st.plays)), ("Spotify", spotify)];
             for (i, (name, line)) in sources.iter().enumerate() {
                 let cy = panel.min.y + 52. + i as f32 * 52. + 26.;
                 p.circle_filled(pos2(panel.min.x + 36., cy), 18., t.s3);
@@ -116,18 +124,31 @@ impl App {
             let (_, hd) = ui.allocate_space(vec2(area.width(), 44.));
             trunc(&p, pos2(l + 8., hd.center().y + 6.), w - 16., "Recently played", font_w(17., Weight::Bold), t.tx);
             let mut left = RECENT_MAX;
+            let mut shelves: Vec<(&str, Vec<&Item>)> = vec![];
             for s in st.sections.iter().filter(|s| !s.items.is_empty()) {
                 if left == 0 {
                     break;
                 }
                 let items: Vec<&Item> = s.items.iter().take(RECENT_PER_DAY.min(left)).collect();
                 left -= items.len();
+                shelves.push((s.title.as_str(), items));
+            }
+            let recent: Vec<Track> = shelves.iter().flat_map(|(_, items)| items.iter().map(|i| i.track())).collect();
+            let mut n = 0;
+            for (title, items) in &shelves {
                 let (_, h) = ui.allocate_space(vec2(area.width(), 28.));
-                trunc(&p, pos2(l + 8., h.center().y + 4.), w - 16., &s.title.to_uppercase(), font_w(10.5, Weight::Semi), t.tf);
+                trunc(&p, pos2(l + 8., h.center().y + 4.), w - 16., &title.to_uppercase(), font_w(10.5, Weight::Semi), t.tf);
                 for it in items {
                     let (_, row) = ui.allocate_space(vec2(area.width(), 44.));
                     let row = Rect::from_min_size(pos2(l, row.min.y), vec2(w, 44.));
-                    tonal(ui, &t, ("recent", row.min.y as i32), row, 8., None);
+                    let hit = tonal(ui, &t, ("recent", row.min.y as i32), row, 8., None);
+                    if hit.clicked() {
+                        play = Some((recent.clone(), n));
+                    }
+                    if let (true, Some(pos)) = (hit.secondary_clicked(), hit.interact_pointer_pos()) {
+                        menu = Some((pos, Target::Track(it.track())));
+                    }
+                    n += 1;
                     let cy = row.center().y;
                     self.thumb(ui, it.thumbnail.as_deref(), Rect::from_center_size(pos2(row.min.x + 26., cy), vec2(34., 34.)), 6.);
                     let avail = w - 56. - 64.;
@@ -139,5 +160,11 @@ impl App {
             }
             ui.add_space(70.);
         });
+        if let Some((list, i)) = play {
+            self.pl.play_tracks(ui.ctx(), &list, i, false);
+        }
+        if let Some(m) = menu {
+            self.ctx_menu = Some(m);
+        }
     }
 }

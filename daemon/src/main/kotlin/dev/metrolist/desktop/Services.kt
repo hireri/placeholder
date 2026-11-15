@@ -13,6 +13,14 @@ import com.metrolist.music.constants.AudioQuality
 import com.metrolist.music.lyrics.LyricsProviderRegistry
 import com.metrolist.music.lyrics.LyricsUtils
 import com.metrolist.music.utils.InnerTubeXPlayer
+import com.metrolist.innertubex.extraction.AudioQuality as InnerTubeXAudioQuality
+import com.metrolist.innertubex.extraction.ContentHints
+import com.metrolist.innertubex.extraction.InnerTubeExtractor
+import com.metrolist.innertubex.extraction.generateClientPlaybackNonce
+import com.metrolist.innertubex.sabr.SabrBootstrap
+import com.metrolist.innertubex.sabr.SabrVideoStream
+import kotlinx.coroutines.flow.Flow
+import java.util.concurrent.ConcurrentHashMap
 import com.music.bitchord.data.spotify.SpotifyLibrary
 import kotlinx.coroutines.CancellationException
 
@@ -44,7 +52,7 @@ object Services {
 
     suspend fun spotifyTracks(id: String): List<TrackDto> =
         SpotifyLibrary.tracks(id).map {
-            TrackDto(it.id, it.title, it.artist.split(", ").filter(String::isNotBlank), it.album, it.durationMs / 1000, it.imageUrl, "spotify")
+            TrackDto(it.id, it.title, it.artist.split(", ").filter(String::isNotBlank), it.album, it.durationMs.takeIf { it > 0 }?.div(1000), it.imageUrl, "spotify")
         }
 
     /** The stream URL plus the headers the player must send with it (upstream InnerTubeXPlayer, unmodified). */
@@ -59,7 +67,48 @@ object Services {
             requireBoundedRange = data.requireBoundedRange,
             rangeChunkSizeBytes = data.rangeChunkSizeBytes,
             useRangeChunks = data.useRangeChunks,
+            durationSec = data.videoDetails?.lengthSeconds?.toIntOrNull()?.takeIf { it > 0 }
+                ?: data.format.approxDurationMs?.toLongOrNull()?.div(1000)?.toInt(),
         )
+    }
+
+    private val videoBootstraps = ConcurrentHashMap<String, Pair<Long, SabrBootstrap>>()
+
+    /**
+     * SABR session for a song's video track, cached ten minutes so seeks don't re-extract. YouTube serves video only over SABR here.
+     * Upstream's `InnerTubeXPlayer` keeps its extractor private and drops video, so it is read by reflection after `prewarm()` builds it.
+     * ponytail: reflection on upstream internals; breaks loudly if they are renamed, swap for an upstream API if one appears.
+     */
+    suspend fun videoBootstrap(videoId: String, maxHeight: Int): SabrBootstrap {
+        val key = "$videoId/$maxHeight"
+        videoBootstraps[key]?.takeIf { System.currentTimeMillis() - it.first < 10 * 60_000 }?.let { return it.second }
+        InnerTubeXPlayer.prewarm()
+        val bundle = InnerTubeXPlayer::class.java.getDeclaredField("currentBundle").apply { isAccessible = true }.get(InnerTubeXPlayer)
+            ?: error("extractor not ready")
+        val extractor = bundle.javaClass.getDeclaredField("extractor").apply { isAccessible = true }.get(bundle) as InnerTubeExtractor
+        val hints = ContentHints(wantVideo = true, maxVideoHeight = maxHeight).withStreamCapabilities(allowHls = false, allowSabr = true, allowBoundedRange = true)
+        val s = extractor.extract(videoId, hints, emptySet(), InnerTubeXAudioQuality.LOW, generateClientPlaybackNonce()) ?: error("no stream for $videoId")
+        val b = s.sabrVideoBootstrap ?: error("no video stream for $videoId")
+        // The desktop client decodes with stock GStreamer: prefer H.264, then VP9 (AV1 decoders are rarely installed), tallest within the cap.
+        val pick = b.videoVariants.filter { it.height <= maxHeight && !it.mimeType.contains("av01") }
+            .maxWithOrNull(compareBy({ it.mimeType.contains("avc1") }, { it.height }))
+        val chosen = pick?.let {
+            b.copy(selectedVideoFormat = it.format, selectedVideoWidth = it.width, selectedVideoHeight = it.height,
+                selectedVideoMimeType = it.mimeType, selectedVideoContentLengthBytes = it.contentLengthBytes, selectedVideoBitrate = it.bitrate)
+        } ?: b
+        videoBootstraps[key] = System.currentTimeMillis() to chosen
+        return chosen
+    }
+
+    /** The video track as one progressive stream from `startMs`. The HTTP response's backpressure paces it to the client. */
+    fun videoBytes(b: SabrBootstrap, startMs: Long): Flow<ByteArray> {
+        val t0 = System.currentTimeMillis()
+        return SabrVideoStream(
+            httpClient = YouTube.extractionTransport().httpClient,
+            bootstrap = b,
+            playbackPositionMs = { startMs + System.currentTimeMillis() - t0 },
+            initialPlayerTimeMs = startMs,
+        ).bytes()
     }
 
     /** First provider (in upstream's default order) that has lyrics. Upstream's LyricsHelper is DB-bound, so this is the thin desktop equivalent. */
@@ -81,7 +130,7 @@ object Services {
     }
 
     private fun YTItem.toItem(): ItemDto? = when (this) {
-        is SongItem -> ItemDto("song", id, title, artists.joinToString { it.name }, thumbnail, duration)
+        is SongItem -> ItemDto("song", id, title, artists.joinToString { it.name }, thumbnail, duration, artistId = artists.firstOrNull()?.id)
         is AlbumItem -> ItemDto("album", browseId, title, listOfNotNull(artists?.joinToString { it.name }, year?.toString()).joinToString(" · "), thumbnail)
         is PlaylistItem -> ItemDto("playlist", id, title, author?.name, thumbnail)
         is ArtistItem -> ItemDto("artist", id, title, null, thumbnail)
@@ -121,6 +170,22 @@ object Services {
         ).filter { it.items.isNotEmpty() }
     }
 
+    /** Likes or unlikes a song on YouTube Music. */
+    suspend fun like(videoId: String, on: Boolean) {
+        YouTube.likeVideo(videoId, on).getOrThrow()
+    }
+
+    /** Saves or removes an album or playlist. Albums are saved through their playlist id, which the album page carries. */
+    suspend fun save(kind: String, id: String, on: Boolean) {
+        val playlistId = if (kind == "albums") YouTube.album(id).getOrThrow().album.playlistId else id
+        YouTube.likePlaylist(playlistId, on).getOrThrow()
+    }
+
+    /** Subscribes or unsubscribes a channel (artist). */
+    suspend fun subscribe(channelId: String, on: Boolean) {
+        YouTube.subscribeChannel(channelId, on).getOrThrow()
+    }
+
     suspend fun history(): List<SectionDto> =
         YouTube.musicHistory().getOrThrow().sections.orEmpty().map { s -> SectionDto(s.title, s.songs.mapNotNull { it.toItem() }) }
 
@@ -154,9 +219,12 @@ object Services {
         return PageDto(
             p.artist.toItem()!!.copy(subtitle = p.subscriberCountText),
             description = p.description,
+            channelId = p.artist.channelId,
+            subscribed = p.isSubscribed,
+            monthlyListeners = p.monthlyListenerCount,
             sections = p.sections.map { s -> SectionDto(s.title, s.items.mapNotNull { it.toItem() }) }.filter { it.items.isNotEmpty() },
         )
     }
 
-    private fun SongItem.toDto() = TrackDto(id, title, artists.map { it.name }, album?.name, duration, thumbnail, "youtube")
+    private fun SongItem.toDto() = TrackDto(id, title, artists.map { it.name }, album?.name, duration, thumbnail, "youtube", artists.firstOrNull()?.id, album?.id)
 }

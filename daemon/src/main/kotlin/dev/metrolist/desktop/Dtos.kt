@@ -23,6 +23,8 @@ data class TrackDto(
     val durationSec: Int? = null,
     val thumbnail: String? = null,
     val source: String,
+    val artistId: String? = null,
+    val albumId: String? = null,
 )
 
 @Serializable
@@ -38,6 +40,8 @@ data class StreamDto(
     val requireBoundedRange: Boolean,
     val rangeChunkSizeBytes: Long,
     val useRangeChunks: Boolean,
+    /** Track length from the player response; catalogue entries for videos often carry none. */
+    val durationSec: Int? = null,
 )
 
 @Serializable data class LyricsDto(val provider: String, val lrc: String)
@@ -51,8 +55,9 @@ data class ItemDto(
     val subtitle: String? = null,
     val thumbnail: String? = null,
     val durationSec: Int? = null,
+    val artistId: String? = null,
 )
 
 @Serializable data class SectionDto(val title: String, val items: List<ItemDto>)
 
-@Serializable data class PageDto(val item: ItemDto, val description: String? = null, val tracks: List<TrackDto> = emptyList(), val sections: List<SectionDto> = emptyList())
+@Serializable data class PageDto(val item: ItemDto, val description: String? = null, val tracks: List<TrackDto> = emptyList(), val sections: List<SectionDto> = emptyList(), val channelId: String? = null, val subscribed: Boolean = false, val monthlyListeners: String? = null)

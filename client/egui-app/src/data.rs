@@ -54,6 +54,25 @@ pub struct Item {
     pub subtitle: Option<String>,
     pub thumbnail: Option<String>,
     pub duration_sec: Option<u32>,
+    /// Browse id of the song's first artist.
+    pub artist_id: Option<String>,
+}
+
+impl Item {
+    /// A song item as a playable track; the subtitle holds the artists.
+    pub fn track(&self) -> Track {
+        Track {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            artists: self.subtitle.as_deref().unwrap_or("").split(", ").filter(|a| !a.is_empty()).map(String::from).collect(),
+            album: None,
+            duration_sec: self.duration_sec,
+            thumbnail: self.thumbnail.clone(),
+            source: "youtube".into(),
+            artist_id: self.artist_id.clone(),
+            album_id: None,
+        }
+    }
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -72,6 +91,12 @@ pub struct Track {
     pub album: Option<String>,
     pub duration_sec: Option<u32>,
     pub thumbnail: Option<String>,
+    /// youtube | spotify
+    pub source: String,
+    /// Browse id of the first artist (YouTube only).
+    pub artist_id: Option<String>,
+    /// Browse id of the album (YouTube only).
+    pub album_id: Option<String>,
 }
 
 impl Track {
@@ -81,12 +106,16 @@ impl Track {
 }
 
 #[derive(Deserialize, Clone, Default)]
-#[serde(default)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Detail {
     pub item: Item,
     pub description: Option<String>,
     pub tracks: Vec<Track>,
     pub sections: Vec<Section>,
+    /// Artists only: the channel subscriptions go through, whether the user is subscribed, and e.g. "1.2M monthly audience".
+    pub channel_id: Option<String>,
+    pub subscribed: bool,
+    pub monthly_listeners: Option<String>,
 }
 
 /// YouTube Music history plus aggregates, computed once on load.
@@ -135,6 +164,10 @@ pub struct Data {
     pub library: Remote<Vec<(usize, Item)>>,
     /// Song search results by query.
     pub searches: Mutex<HashMap<String, Arc<Remote<Vec<Track>>>>>,
+    /// Album and artist search results by `type/query`.
+    pub item_searches: Mutex<HashMap<String, Arc<Remote<Vec<Item>>>>>,
+    /// Error from the last library save, shown on the album page.
+    pub notice: Mutex<Option<String>>,
     pub details: Mutex<HashMap<String, Arc<Remote<Detail>>>>,
     /// Set while a sign-in/out is in flight (the login window blocks), with the last error.
     pub busy: Arc<Mutex<(Option<&'static str>, Option<String>)>>,
@@ -149,6 +182,8 @@ impl Data {
             spotify: Remote::new(),
             library: Remote::new(),
             searches: Default::default(),
+            item_searches: Default::default(),
+            notice: Default::default(),
             details: Default::default(),
             busy: Default::default(),
         }
@@ -159,7 +194,12 @@ impl Data {
         let r = self.details.lock().unwrap().entry(format!("{kind}/{id}")).or_insert_with(|| Arc::new(Remote::new())).clone();
         if kind == "spotify" {
             let path = format!("/spotify/playlists/{id}/tracks");
-            r.ensure(ctx, move || Ok(Detail { item: Item { title: "Spotify playlist".into(), ..Default::default() }, tracks: backend::get(&path)?, ..Default::default() }));
+            let item = match &*self.spotify.lock() {
+                State::Ready(v) => v.iter().find(|i| i.id == id).cloned(),
+                _ => None,
+            };
+            let item = item.unwrap_or(Item { title: "Spotify playlist".into(), ..Default::default() });
+            r.ensure(ctx, move || Ok(Detail { item, tracks: backend::get(&path)?, ..Default::default() }));
         } else {
             let path = format!("/youtube/{kind}/{id}");
             r.ensure(ctx, move || backend::get(&path));
@@ -170,6 +210,14 @@ impl Data {
     pub fn search(&self, ctx: &Context, q: &str) -> Arc<Remote<Vec<Track>>> {
         let r = self.searches.lock().unwrap().entry(q.to_string()).or_insert_with(|| Arc::new(Remote::new())).clone();
         let path = format!("/youtube/search?q={}", backend::enc(q));
+        r.ensure(ctx, move || backend::get(&path));
+        r
+    }
+
+    /// Albums or artists (`kind` is the search filter: album | artist) matching `q`.
+    pub fn search_items(&self, ctx: &Context, q: &str, kind: &'static str) -> Arc<Remote<Vec<Item>>> {
+        let r = self.item_searches.lock().unwrap().entry(format!("{kind}/{q}")).or_insert_with(|| Arc::new(Remote::new())).clone();
+        let path = format!("/youtube/search/items?q={}&type={kind}", backend::enc(q));
         r.ensure(ctx, move || backend::get(&path));
         r
     }
@@ -207,7 +255,44 @@ impl Data {
         self.spotify.reset();
         self.library.reset();
         self.searches.lock().unwrap().clear();
+        self.item_searches.lock().unwrap().clear();
         self.details.lock().unwrap().clear();
+    }
+
+    /// Adds or removes an album (`kind` albums) or playlist from the YouTube Music library; the sidebar reloads on success.
+    pub fn save(self: &Arc<Self>, ctx: &Context, kind: &'static str, id: &str, on: bool) {
+        let (me, ctx) = (self.clone(), ctx.clone());
+        let path = format!("/youtube/save/{kind}/{id}?on={on}");
+        *me.notice.lock().unwrap() = None;
+        std::thread::spawn(move || {
+            let r = backend::post(&path);
+            if r.is_ok() {
+                me.library.reset();
+            }
+            *me.notice.lock().unwrap() = r.err();
+            ctx.request_repaint();
+        });
+    }
+
+    /// Subscribes to (or leaves) an artist's channel; on success the cached artist page (`artists/{artist_id}`) is updated in place.
+    pub fn subscribe(self: &Arc<Self>, ctx: &Context, artist_id: &str, channel_id: &str, on: bool) {
+        let (me, ctx) = (self.clone(), ctx.clone());
+        let (path, key) = (format!("/youtube/subscribe/{channel_id}?on={on}"), format!("artists/{artist_id}"));
+        *me.notice.lock().unwrap() = None;
+        std::thread::spawn(move || {
+            let r = backend::post(&path);
+            if r.is_ok() {
+                let page = me.details.lock().unwrap().get(&key).cloned();
+                if let Some(d) = page {
+                    if let State::Ready(d) = &mut *d.lock() {
+                        d.subscribed = on;
+                    }
+                }
+                me.library.reset();
+            }
+            *me.notice.lock().unwrap() = r.err();
+            ctx.request_repaint();
+        });
     }
 
     /// Runs the blocking sign-in/out on a worker, then drops every cached result so pages refetch.
