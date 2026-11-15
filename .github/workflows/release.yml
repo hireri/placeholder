@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-22.04, name: linux-x64, cargo_flags: "" }
+          - { os: ubuntu-24.04, name: linux-x64, cargo_flags: "" }
           - { os: windows-latest, name: windows-x64, cargo_flags: "--no-default-features" } # no GStreamer on Windows: no music videos yet
     runs-on: ${{ matrix.os }}
     defaults:
