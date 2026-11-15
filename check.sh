@@ -4,4 +4,4 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 metrolist/gradlew -p . test :daemon:installDist
-(cd client && cargo build --workspace)
+(cd client && cargo check --workspace)

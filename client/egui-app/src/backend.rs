@@ -14,14 +14,30 @@ pub struct Lyrics {
     pub synced: bool,
 }
 
-fn daemon_path() -> String {
-    std::env::var("METROLIST_DAEMON").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../daemon/build/install/daemon/bin/daemon").into())
+/// Release layout: `daemon/` (installDist) and `jre/` sit next to the executable; dev falls back to the Gradle build tree.
+fn exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(Into::into))
+}
+
+fn daemon_command() -> Command {
+    let script = if cfg!(windows) { "daemon.bat" } else { "daemon" };
+    let bundled = exe_dir().map(|d| d.join("daemon/bin").join(script)).filter(|p| p.exists());
+    let path = std::env::var_os("METROLIST_DAEMON").map(Into::into).or(bundled).unwrap_or_else(|| {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daemon/build/install/daemon/bin").join(script)
+    });
+    let mut cmd = Command::new(path);
+    if let Some(jre) = exe_dir().map(|d| d.join("jre")).filter(|p| p.exists()) {
+        cmd.env("JAVA_HOME", jre);
+    }
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // CREATE_NO_WINDOW
+    cmd
 }
 
 /// Blocking on first call: starts the daemon and reads its `{"port":..,"token":..}` handshake line.
 fn conn() -> Result<&'static (String, String), String> {
     CONN.get_or_init(|| {
-        let mut child = Command::new(daemon_path()).stdout(Stdio::piped()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
+        let mut child = daemon_command().stdout(Stdio::piped()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).map_err(|e| e.to_string())?;
         *DAEMON.lock().unwrap() = Some(child);
@@ -146,7 +162,7 @@ pub struct Status {
 /// Blocking: opens the login helper window (the credentials go straight from it to the daemon).
 pub fn sign_in(svc: &str) -> Result<(), String> {
     let (url, token) = conn()?;
-    let helper = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("metrolist-login"))).unwrap_or_else(|| "metrolist-login".into());
+    let helper = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("metrolist-login{}", std::env::consts::EXE_SUFFIX)))).unwrap_or_else(|| "metrolist-login".into());
     let st = Command::new(helper).arg(svc).env("METROLIST_URL", url).env("METROLIST_TOKEN", token).status().map_err(|e| format!("cannot start login helper: {e}"))?;
     if st.success() { Ok(()) } else { Err("sign-in cancelled".into()) }
 }

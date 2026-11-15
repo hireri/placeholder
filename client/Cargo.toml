@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["login", "app", "egui-app"]
+members = ["login", "egui-app"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

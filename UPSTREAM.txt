@@ -14,12 +14,12 @@ Layout
   shims/                source-compatible stand-ins for Android/Timber/DataStore symbols.
   daemon/               our code: Ktor HTTP API on 127.0.0.1 (random port + per-run token),
                         credential store, YouTube/Spotify auth, services.
-  client/               Rust: metrolist-login (wry popup) and metrolist-app (gpui).
+  client/               Rust: metrolist-login (wry popup) and metrolist-egui (the app).
   metrolist/, vendor/bitchord  git submodules, pinned commits. Dependabot opens a PR when either moves.
 
 Updating
   1. Merge the Dependabot submodule PR (or: git submodule update --remote metrolist vendor/bitchord).
-  2. Clone with --recurse-submodules (or git submodule update --init).
+  2. Clone with --recurse-submodules (or git submodule update --init), then ./sparse.sh to trim them to what the build reads.
   3. ./check.sh
      A compile error means upstream changed something a shim or adapter relies on. Extend the
      shim (or the adapter in upstream/src, daemon/) - never edit the upstream file.
@@ -27,7 +27,6 @@ Updating
      compile, add shims for whatever the compiler reports.
 
 Known pins / gaps
-  - client/Cargo.lock pins libc 0.2.186: newer libc breaks xattr 0.2.3 (pulled in by gpui).
   - Not ported yet: Room database + SyncUtils (library sync/history), listen-together,
     scrobbling manager, Discord presence. Music recognition is intentionally dropped.
   - PoToken: upstream mints it in an Android WebView; the stub returns none. Streams resolve

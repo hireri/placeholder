@@ -1,0 +1,73 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, name: linux-x64, cargo_flags: "" }
+          - { os: windows-latest, name: windows-x64, cargo_flags: "--no-default-features" } # no GStreamer on Windows: no music videos yet
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Submodules (sparse)
+        run: |
+          git submodule update --init --depth 1 --filter=blob:none
+          ./sparse.sh
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: client }
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libxkbcommon-dev libwayland-dev libssl-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - name: Daemon
+        run: metrolist/gradlew -p . :daemon:installDist
+      - name: Bundled JRE
+        run: jlink --add-modules java.se,jdk.unsupported,jdk.crypto.ec,jdk.charsets --strip-debug --no-header-files --no-man-pages --compress zip-6 --output dist/jre
+      - name: Client
+        run: cargo build --release --manifest-path client/Cargo.toml --workspace ${{ matrix.cargo_flags }}
+      - name: Package
+        run: |
+          pkg=metrolist-desktop-${{ github.ref_name }}-${{ matrix.name }}
+          mkdir -p "dist/daemon"
+          cp -r daemon/build/install/daemon/. dist/daemon/
+          cp client/target/release/metrolist-egui* client/target/release/metrolist-login* dist/
+          rm -f dist/*.d dist/*.pdb
+          mv dist "$pkg"
+          if [ "$RUNNER_OS" = Windows ]; then 7z a "$pkg.zip" "$pkg" >/dev/null; else tar czf "$pkg.tar.gz" "$pkg"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            metrolist-desktop-*.zip
+            metrolist-desktop-*.tar.gz
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }} # v1.2.3-anything is a prerelease

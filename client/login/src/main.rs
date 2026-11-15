@@ -6,10 +6,13 @@ use std::path::PathBuf;
 use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
-    platform::unix::WindowExtUnix,
     window::WindowBuilder,
 };
-use wry::{PageLoadEvent, WebContext, WebViewBuilder, WebViewBuilderExtUnix};
+#[cfg(unix)]
+use tao::platform::unix::WindowExtUnix;
+#[cfg(unix)]
+use wry::WebViewBuilderExtUnix;
+use wry::{PageLoadEvent, WebContext, WebViewBuilder};
 
 const YT_START: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F";
 const SP_START: &str = "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F";
@@ -33,7 +36,7 @@ fn post(path: &str, body: serde_json::Value) -> Result<(), String> {
 /// Where the webview keeps its cookies; the app deletes this directory on sign-out.
 fn data_dir(service: &str) -> PathBuf {
     let base = std::env::var("METROLIST_DATA").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/metrolist-desktop")
+        PathBuf::from(std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default()).join(".config/metrolist-desktop")
     });
     base.join("webview").join(service)
 }
@@ -58,15 +61,18 @@ fn main() {
         .unwrap();
     let mut ctx = WebContext::new(Some(data_dir(&service)));
     let p = proxy.clone();
-    let webview = WebViewBuilder::new_with_web_context(&mut ctx)
+    let builder = WebViewBuilder::new_with_web_context(&mut ctx)
         .with_url(start)
         .with_on_page_load_handler(move |ev, url| {
             if matches!(ev, PageLoadEvent::Finished) {
                 let _ = p.send_event(Ev::Loaded(url));
             }
-        })
-        .build_gtk(window.default_vbox().unwrap())
-        .unwrap();
+        });
+    #[cfg(windows)]
+    let webview = builder.build(&window);
+    #[cfg(unix)]
+    let webview = builder.build_gtk(window.default_vbox().unwrap());
+    let webview = webview.unwrap();
 
     let mut ok = false;
     event_loop.run(move |event, _, flow| {
