@@ -1,0 +1,38 @@
+Metrolist desktop: how this stays in sync with upstream
+=======================================================
+
+Rule: nothing outside desktop/ is edited. Upstream (Metrolist) and vendored (BitChord) code is
+compiled in place; every difference lives in desktop/shims, desktop/upstream/src, desktop/daemon.
+
+Layout
+  settings.gradle.kts   separate Gradle build; reuses ../gradle/libs.versions.toml, so upstream
+                        version bumps (innertubex, ktor, kotlin...) arrive with each merge.
+  innertube/            upstream :innertube, unmodified (srcDir ../innertube).
+  upstream/             subset of upstream :app, unmodified. THE list of ported files is the
+                        fileTree in upstream/build.gradle.kts. Own adapters: upstream/src/.
+  bitchord/             BitChord's Spotify library from vendor/bitchord, unmodified.
+  shims/                source-compatible stand-ins for Android/Timber/DataStore symbols.
+  daemon/               our code: Ktor HTTP API on 127.0.0.1 (random port + per-run token),
+                        credential store, YouTube/Spotify auth, services.
+  client/               Rust: metrolist-login (wry popup) and metrolist-app (gpui).
+  vendor.lock           pinned third-party commits; ./sync-vendor.sh fetches them.
+
+Updating
+  1. git merge upstream main (conflicts can only come from files we never touch).
+  2. Bump a commit in vendor.lock if wanted.
+  3. ./check.sh
+     A compile error means upstream changed something a shim or adapter relies on. Extend the
+     shim (or the adapter in upstream/src, daemon/) - never edit the upstream file.
+  4. Bringing another upstream package over: add it to the fileTree in upstream/build.gradle.kts,
+     compile, add shims for whatever the compiler reports.
+
+Known pins / gaps
+  - client/Cargo.lock pins libc 0.2.186: newer libc breaks xattr 0.2.3 (pulled in by gpui).
+  - Not ported yet: Room database + SyncUtils (library sync/history), listen-together,
+    scrobbling manager, Discord presence. Music recognition is intentionally dropped.
+  - PoToken: upstream mints it in an Android WebView; the stub returns none. Streams resolve
+    through clients that do not need one; bridge to the login helper's webview if that stops working.
+  - Spotify: sign-in uses the web-player sp_dc/TOTP route (BitChord's). BitChord's constants
+    (query hashes) drift; the daemon reads fresh values from the live bundle for the token and
+    profile, but SpotifyLibrary (vendored) uses its own hard-coded hashes until vendor.lock is bumped.
+  - Credentials are stored in ~/.config/metrolist-desktop/credentials.json (mode 0600).

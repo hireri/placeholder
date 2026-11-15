@@ -1,0 +1,1554 @@
+<meta charset="utf-8">
+<title>Metrolist Desktop Design</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout concept: a reading column for decisions, then one live app shell the reader can re-theme. */
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --fg: #14161a; --muted: #5a606b; --line: #dfe2e8;
+  --accent: #3b55d0; --accent-soft: #e6eafc; --code: #eef0f4;
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f1115; --surface: #161a20; --fg: #e8eaee; --muted: #98a0ad; --line: #262a33;
+  --accent: #93a6ff; --accent-soft: #1d2440; --code: #1a1e26; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0f1115; --surface: #161a20; --fg: #e8eaee; --muted: #98a0ad; --line: #262a33;
+  --accent: #93a6ff; --accent-soft: #1d2440; --code: #1a1e26; color-scheme: dark; }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 400 15px/1.6 var(--sans); margin: 0;
+  padding-block: 56px 96px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.wrap { max-width: 920px; margin-inline: auto; display: flex; flex-direction: column; gap: 72px; }
+.wide { max-width: 1160px; margin-inline: auto; width: 100%; }
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.05; letter-spacing: -0.03em; font-weight: 650; }
+h2 { font-size: 26px; line-height: 1.15; letter-spacing: -0.02em; font-weight: 650; }
+h3 { font-size: 15px; line-height: 1.3; font-weight: 600; letter-spacing: 0; }
+p { margin: 0; max-width: 66ch; }
+.lede { font-size: 17px; color: var(--muted); max-width: 62ch; }
+.eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+section { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+code, .mono { font-family: var(--mono); font-size: 0.88em; }
+:not(pre) > code { background: var(--code); padding: 1px 6px; border-radius: 5px; }
+pre { background: var(--code); border-radius: 10px; padding: 16px 18px; margin: 0; overflow-x: auto; font: 400 12.5px/1.6 var(--mono); }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 24px 32px; }
+.grid2 > * { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.grid2 p { color: var(--muted); }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th { text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 8px 14px 8px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 10px 14px 10px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+td:first-child { white-space: nowrap; }
+td.num, th.num { font-variant-numeric: tabular-nums; }
+.diagram { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 12px; overflow-x: auto; }
+.diagram svg { display: block; min-width: 640px; width: 100%; height: auto; }
+.diagram .box { fill: none; stroke: var(--line); stroke-width: 1.2; }
+.diagram .chip { fill: var(--code); }
+.diagram text { fill: var(--fg); font: 500 12px var(--sans); }
+.diagram .t-h { font-weight: 650; font-size: 13px; }
+.diagram .t-m { fill: var(--muted); font-size: 11px; font-weight: 400; }
+.diagram .edge { stroke: var(--accent); stroke-width: 1.6; fill: none; }
+.diagram .edge.dash { stroke: var(--muted); stroke-dasharray: 4 4; stroke-width: 1.2; }
+.diagram .ah { fill: var(--accent); }
+.diagram .ah.m { fill: var(--muted); }
+.note { border-left: 2px solid var(--accent); padding: 2px 0 2px 16px; color: var(--muted); max-width: 66ch; }
+.note strong { color: var(--fg); font-weight: 600; }
+ol.q { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; max-width: 66ch; }
+ol.q li::marker { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Live theme controls */
+.ctl { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.ctl label { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+.ctl input[type=color] { width: 36px; height: 28px; border: 1px solid var(--line); border-radius: 8px; background: none; padding: 2px; cursor: pointer; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+button { font: inherit; }
+.chip-b { font-size: 12.5px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; }
+.chip-b[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.chip-b:focus-visible, .mock button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- App shell mock: tokens derive from --h (hue) and --ac (accent chroma) ---------- */
+.mockwrap { overflow-x: auto; border-radius: 16px; border: 1px solid var(--line); }
+.mock {
+  --h: 265; --ac: 0.14; --nc: 0.014; --lib-open: 264px; --pl-open: 308px; --lib-w: var(--lib-open); --pl-w: calc(var(--pl-open) + 10px);
+  --s0: oklch(0.17 var(--nc) var(--h)); --s1: oklch(0.205 var(--nc) var(--h)); --s2: oklch(0.25 var(--nc) var(--h)); --s3: oklch(0.30 var(--nc) var(--h));
+  --tx: oklch(0.96 0.008 var(--h)); --tm: oklch(0.72 0.02 var(--h)); --tf: oklch(0.56 0.02 var(--h));
+  --ax: oklch(0.78 var(--ac) var(--h)); --on-ax: oklch(0.2 0.03 var(--h)); --axc: oklch(0.32 calc(var(--ac) * 0.55) var(--h));
+  --art-r: 6px; --ctl-r: 8px;
+  display: grid; grid-template-columns: var(--lib-w) minmax(0, 1fr) var(--pl-w); grid-template-rows: 52px minmax(0, 1fr);
+  height: 720px; min-width: 960px; background: var(--s0); color: var(--tx); font: 400 13px/1.45 var(--sans);
+  transition: grid-template-columns 320ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.mock.lib-c { --lib-w: 68px; }
+.mock.pl-c { --pl-w: 56px; }
+.mock { overflow: hidden; position: relative; }
+.mock[data-mode="light"] {
+  --s0: oklch(0.975 var(--nc) var(--h)); --s1: oklch(0.95 var(--nc) var(--h)); --s2: oklch(0.925 var(--nc) var(--h)); --s3: oklch(0.89 var(--nc) var(--h));
+  --tx: oklch(0.22 0.02 var(--h)); --tm: oklch(0.46 0.02 var(--h)); --tf: oklch(0.6 0.015 var(--h));
+  --ax: oklch(0.5 var(--ac) var(--h)); --on-ax: oklch(0.98 0.01 var(--h)); --axc: oklch(0.9 calc(var(--ac) * 0.5) var(--h)); }
+.mock :where(button, input) { font: inherit; color: inherit; }
+.mock :where(button) { background: none; border: 0; cursor: pointer; padding: 0; }
+.mock svg { width: 16px; height: 16px; fill: currentColor; flex: none; }
+.mock svg.s { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ib { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 999px; color: var(--tm); transition: background-color 90ms ease-out, color 90ms ease-out; }
+.ib:hover { background: var(--s2); color: var(--tx); }
+.ib:active { background: var(--s3); }
+.art { border-radius: var(--art-r); background: linear-gradient(140deg, oklch(0.66 0.16 calc(var(--h) + var(--o, 50))), oklch(0.34 0.1 calc(var(--h) + var(--o, 50) - 90))); flex: none; }
+
+/* Titlebar */
+.tb { grid-column: 1 / -1; display: grid; grid-template-columns: var(--lib-w) minmax(0, 1fr) auto; align-items: center; padding-right: 12px; transition: grid-template-columns 320ms cubic-bezier(0.32, 0.72, 0, 1); }
+.mock.lib-c .brand span { opacity: 0; }
+.brand { font-weight: 650; letter-spacing: -0.01em; font-size: 14px; padding-left: 26px; display: flex; gap: 12px; align-items: center; white-space: nowrap; overflow: hidden; }
+.brand span { transition: opacity 160ms ease-out; }
+.brand i { width: 16px; height: 16px; border-radius: 5px; background: var(--ax); display: block; }
+.tb .mid { display: flex; align-items: center; gap: 6px; justify-self: center; width: min(100%, 560px); }
+.srch { flex: 1; display: flex; align-items: center; gap: 8px; background: var(--s2); border-radius: 999px; padding: 0 14px; height: 34px; color: var(--tm); transition: background-color 90ms ease-out; }
+.srch:focus-within { background: var(--s3); outline: 2px solid var(--ax); }
+.srch input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; color: var(--tx); }
+.srch input::placeholder { color: var(--tm); }
+.srch kbd { font: 500 10.5px var(--mono); color: var(--tf); }
+.tb .rt { display: flex; align-items: center; gap: 6px; }
+.imp { display: flex; align-items: center; gap: 8px; color: var(--tm); font-size: 12px; padding: 0 10px; height: 28px; border-radius: 999px; background: var(--s1); font-variant-numeric: tabular-nums; }
+.imp b { width: 44px; height: 3px; border-radius: 2px; background: var(--s3); position: relative; display: block; }
+.imp b::after { content: ""; position: absolute; inset: 0 34% 0 0; background: var(--ax); border-radius: 2px; }
+.me { display: flex; align-items: center; gap: 8px; padding: 3px 10px 3px 3px; border-radius: 999px; }
+.me:hover { background: var(--s2); }
+.me i { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: var(--axc); color: var(--tx); font-style: normal; font-weight: 600; font-size: 11px; }
+
+/* Player (left) */
+.pl { width: var(--pl-open); justify-self: end; grid-column: 3; grid-row: 2; margin: 0 10px 10px 0; background: var(--s1); border-radius: 18px; box-shadow: 0 10px 32px oklch(0 0 0 / 0.24), 0 1px 0 oklch(1 0 0 / 0.04) inset; padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; min-height: 0; overflow: hidden; }
+.id { display: flex; align-items: center; gap: 10px; flex: none; min-height: 46px; }
+.id .art.th { width: 46px; height: 46px; }
+.id .tt { min-width: 0; flex: 1; line-height: 1.3; }
+.id .tt b { display: block; font-size: 15px; font-weight: 650; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.id .tt span { color: var(--tm); }
+.id .ib { background: var(--s3); }
+.id .ib:hover { background: var(--s2); }
+.pl { transition: transform 320ms cubic-bezier(0.32, 0.72, 0, 1); }
+.mock.pl-c .pl { transform: translateX(calc(var(--pl-open) - 46px)); }
+.mock.pl-c .pl > :not(.ps):not(.peek), .mock.pl-c .ps > :not(.cover) { opacity: 0; visibility: hidden; transition: opacity 160ms ease-out, visibility 0s 160ms; }
+.pl[data-view="art"] .th, .pl:not([data-view="art"]) .cover { display: none; }
+.pl[data-view="art"] .body { display: none; }
+.body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; animation: in 180ms ease-out; }
+@keyframes in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.v-ly { display: contents; }
+.pl:not([data-view="lyrics"]) .v-ly, .pl:not([data-view="queue"]) .v-q { display: none; }
+.ly { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 14px; font-size: 21px; line-height: 1.22; font-weight: 650; letter-spacing: -0.015em; padding: 10px 2px; -webkit-mask-image: linear-gradient(transparent, #000 12%, #000 80%, transparent); mask-image: linear-gradient(transparent, #000 12%, #000 80%, transparent); }
+.ly span { color: var(--tf); }
+.ly span.cur { color: var(--tx); }
+.src { display: flex; justify-content: space-between; align-items: center; color: var(--tm); font-size: 12px; }
+.src u { text-underline-offset: 3px; }
+.tr { height: 28px; padding: 0 8px; border-radius: 999px; background: var(--s3); color: var(--tm); font-size: 11px; font-weight: 600; }
+.q { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 2px; -webkit-mask-image: linear-gradient(#000 80%, transparent); mask-image: linear-gradient(#000 80%, transparent); }
+.q h5 { margin: 0 0 6px; font-size: 20px; letter-spacing: -0.015em; font-weight: 650; }
+.q .lb { font-size: 10.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--tf); padding: 8px 0 4px; }
+.qi { display: grid; grid-template-columns: 14px 38px minmax(0, 1fr) 24px; gap: 10px; align-items: center; height: 52px; border-radius: var(--ctl-r); padding: 0 4px; }
+.qi:hover { background: var(--s2); }
+.qi .art { width: 38px; height: 38px; }
+.qi div { min-width: 0; line-height: 1.3; }
+.qi b { display: block; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qi span { color: var(--tm); font-size: 12px; }
+.qi svg { color: var(--tf); width: 14px; height: 14px; }
+.qi.on b { color: var(--ax); }
+.qi.on, .qi.endl { grid-template-columns: 38px minmax(0, 1fr) 24px; }
+.scrub { flex: none; display: flex; flex-direction: column; gap: 6px; color: var(--tf); font-size: 11px; font-variant-numeric: tabular-nums; }
+.scrub .bar { height: 4px; border-radius: 2px; background: var(--s3); position: relative; transition: height 120ms ease-out; }
+.scrub:hover .bar { height: 6px; }
+.scrub .bar i { position: absolute; inset: 0 62% 0 0; background: var(--tx); border-radius: 2px; }
+.scrub div:last-child { display: flex; justify-content: space-between; }
+.tport { flex: none; display: flex; justify-content: space-between; align-items: center; padding: 0 14px; }
+.tport button { color: var(--tx); width: 52px; height: 52px; display: grid; place-items: center; border-radius: 999px; transition: transform 100ms ease-out, background-color 90ms ease-out; }
+.tport button:hover { background: var(--s2); }
+.tport button:active { transform: scale(0.94); background: var(--s3); }
+.tport svg { width: 26px; height: 26px; }
+.tport .pp svg { width: 34px; height: 34px; }
+.vol { flex: none; display: flex; align-items: center; gap: 10px; color: var(--tm); }
+.vol .bar { flex: 1; height: 4px; border-radius: 2px; background: var(--s3); position: relative; }
+.vol .bar i { position: absolute; inset: 0 30% 0 0; background: var(--tm); border-radius: 2px; }
+.mode { flex: none; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; justify-items: center; gap: 12px; }
+.mode > button { width: 44px; height: 38px; border-radius: 11px; color: var(--tm); display: grid; place-items: center; }
+.mode > button:hover { color: var(--tx); background: var(--s2); }
+.mode > button[aria-pressed="true"] { background: var(--s3); color: var(--tx); }
+.mid-slot { width: 100%; }
+.dev { flex: none; text-align: center; color: var(--tf); font-size: 11px; }
+
+/* Content */
+.mn { grid-column: 2; grid-row: 2; overflow: hidden; position: relative; display: flex; flex-direction: column; min-width: 0; margin: 0 10px 10px 0; background: var(--s1); border-radius: 18px; box-shadow: 0 10px 32px oklch(0 0 0 / 0.24), 0 1px 0 oklch(1 0 0 / 0.04) inset; }
+.mn::after { content: ""; position: absolute; inset: auto 0 0; height: 56px; background: linear-gradient(transparent, var(--s1)); pointer-events: none; }
+.wash { border-radius: 18px; background: radial-gradient(120% 160% at 0% 0%, color-mix(in oklch, var(--ax) 24%, transparent), transparent 64%); padding: 24px 22px 20px; display: flex; gap: 22px; align-items: flex-end; }
+.wash .art { width: 148px; height: 148px; box-shadow: 0 6px 22px oklch(0 0 0 / 0.28); }
+.meta { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.meta .k { font-size: 10.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--tm); }
+.meta h4 { margin: 0; font-size: 30px; line-height: 1.05; letter-spacing: -0.025em; font-weight: 650; }
+.meta p { color: var(--tm); }
+.acts { display: flex; gap: 8px; align-items: center; padding: 14px 22px 8px; }
+.play { background: var(--ax); color: var(--on-ax); border-radius: 999px; padding: 8px 18px 8px 14px; font-weight: 600; display: flex; gap: 8px; align-items: center; transition: transform 100ms ease-out; }
+.play:active { transform: scale(0.97); }
+.ghost { border-radius: var(--ctl-r); padding: 8px 12px; color: var(--tm); }
+.ghost:hover { background: var(--s2); color: var(--tx); }
+.tbl { padding: 0 6px; overflow: hidden; flex: 1; }
+.row { display: grid; grid-template-columns: var(--cols, 36px minmax(0, 1.6fr) minmax(0, 1fr) 52px); align-items: center; height: 44px; padding: 0 12px; border-radius: var(--ctl-r); gap: 8px; }
+.row.h { height: 28px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--tf); }
+.row:not(.h):hover { background: var(--s2); }
+.row:not(.h):active { background: var(--s3); }
+.row .n, .row .d { font-variant-numeric: tabular-nums; color: var(--tm); }
+.row .d { text-align: right; }
+.row .t, .row .a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .a { color: var(--tm); }
+.row.on .t { color: var(--ax); font-weight: 550; }
+.eq { display: flex; gap: 2px; align-items: flex-end; height: 12px; }
+.eq b { width: 2px; background: var(--ax); border-radius: 1px; height: 100%; transform-origin: bottom; animation: eq 900ms ease-in-out infinite alternate; }
+.eq b:nth-child(2) { animation-delay: -300ms; } .eq b:nth-child(3) { animation-delay: -600ms; }
+@keyframes eq { from { transform: scaleY(0.25); } to { transform: scaleY(1); } }
+.mock[data-density="compact"] .row { height: 34px; }
+/* Pages: each is a .page inside .mn; only .on shows. Rows take their columns from --cols. */
+.page { display: none; flex: 1; min-height: 0; flex-direction: column; overflow-y: auto; scrollbar-width: none; padding-bottom: 64px; }
+.page::-webkit-scrollbar { display: none; }
+.page.on { display: flex; animation: in 180ms ease-out; }
+.page > * { flex: none; }
+.mock [hidden] { display: none !important; }
+.wash .art.rd { border-radius: 50%; }
+.kk { font-size: 10.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--tm); }
+.row.two { height: 52px; }
+.mock[data-density="compact"] .row.two { height: 44px; }
+.row .r { text-align: right; font-variant-numeric: tabular-nums; color: var(--tm); }
+.row .c { display: flex; gap: 10px; align-items: center; }
+.row .c .art { width: 32px; height: 32px; }
+.row.two .c .art { width: 38px; height: 38px; }
+.st { min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
+.st b, .st small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st b { font-weight: 450; }
+.st small { color: var(--tm); font-size: 12px; }
+.row.on .st b { color: var(--ax); font-weight: 550; }
+.pgh { padding: 24px 22px 12px; display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.pgh h4 { margin: 0; font-size: 30px; line-height: 1.05; letter-spacing: -0.025em; font-weight: 650; }
+.pgh p { color: var(--tm); margin-top: 6px; }
+.ha { display: flex; align-items: center; gap: 4px; flex: none; }
+.ha .ghost, .acts .ghost { display: inline-flex; gap: 6px; align-items: center; }
+.cp { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 22px 12px; }
+.cp button { height: 30px; padding: 0 14px; border-radius: 999px; background: var(--s2); color: var(--tm); font-size: 12.5px; transition: background-color 90ms ease-out, color 90ms ease-out; }
+.cp button:hover { color: var(--tx); }
+.cp button[aria-pressed="true"] { background: var(--tx); color: var(--s0); font-weight: 550; }
+.seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--s2); }
+.seg button { height: 28px; padding: 0 12px; border-radius: 999px; color: var(--tm); font-size: 12.5px; display: inline-flex; align-items: center; }
+.seg button:hover { color: var(--tx); }
+.seg button[aria-pressed="true"] { background: var(--s3); color: var(--tx); font-weight: 550; }
+.sh { padding: 12px 22px 4px; }
+.sh h5 { margin: 0 0 8px; font-size: 19px; line-height: 24px; letter-spacing: -0.015em; font-weight: 650; display: flex; justify-content: space-between; align-items: baseline; }
+.sh h5 button { font-size: 12px; font-weight: 500; color: var(--tm); }
+.sh h5 button:hover { color: var(--tx); }
+.cards { display: flex; gap: 4px; margin: 0 -8px; overflow-x: auto; scrollbar-width: none; }
+.card { width: 148px; flex: none; padding: 8px; border-radius: 12px; display: flex; flex-direction: column; gap: 8px; text-align: left; transition: background-color 90ms ease-out; }
+.card:hover { background: var(--s2); }
+.card:active { background: var(--s3); }
+.card .art { width: 100%; aspect-ratio: 1; box-shadow: 0 4px 14px oklch(0 0 0 / 0.22); }
+.card.rd .art { border-radius: 50%; }
+.card.rd { text-align: center; }
+.ct { min-width: 0; line-height: 1.3; }
+.ct b { display: block; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ct span { display: block; color: var(--tm); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gridc { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 4px; padding: 4px 14px; }
+.gridc .card { width: auto; }
+.mn { container-type: inline-size; }
+@container (min-width: 820px) { .qp { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.qp { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 0 22px 8px; }
+.qk { display: flex; gap: 12px; align-items: center; height: 56px; border-radius: var(--ctl-r); background: var(--s2); padding-right: 12px; overflow: hidden; text-align: left; font-weight: 550; transition: background-color 90ms ease-out; }
+.qk:hover { background: var(--s3); }
+.qk:active { background: var(--s3); }
+.qk .art { width: 56px; height: 56px; border-radius: 0; }
+.qk span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr { display: grid; grid-template-columns: minmax(0, 240px) minmax(0, 1fr); gap: 20px; padding: 0 16px 8px 22px; align-items: start; }
+.sr .tbl { padding: 0; }
+.top { background: var(--s2); border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.top .art { width: 96px; height: 96px; box-shadow: 0 6px 18px oklch(0 0 0 / 0.26); }
+.top h6 { margin: 0; font-size: 24px; line-height: 1.1; letter-spacing: -0.02em; font-weight: 650; }
+.top p { color: var(--tm); margin-top: 4px; }
+.top .ft { display: flex; justify-content: space-between; align-items: flex-end; gap: 8px; }
+.pbtn { width: 44px; height: 44px; border-radius: 999px; background: var(--tx); color: var(--s0); display: grid; place-items: center; transition: transform 100ms ease-out; }
+.pbtn:active { transform: scale(0.94); }
+.pbtn svg { width: 20px; height: 20px; }
+/* Home feature cards: a label says why it is here, art fills the card under a dark wash, a small cover and title sit on top, who else is on it at the bottom. */
+.fx { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px 10px; padding: 4px 22px 8px; }
+.fl2 { display: block; font-size: 12px; color: var(--tm); padding: 0 2px 8px; }
+.fk { --c: radial-gradient(60% 45% at 25% 28%, oklch(0.82 0.15 calc(var(--h) + 120 + var(--o, 50))), transparent), radial-gradient(70% 55% at 78% 62%, oklch(0.45 0.14 calc(var(--h) - 60 + var(--o, 50))), transparent), linear-gradient(140deg, oklch(0.66 0.16 calc(var(--h) + var(--o, 50))), oklch(0.34 0.1 calc(var(--h) + var(--o, 50) - 90)));
+  position: relative; isolation: isolate; width: 100%; aspect-ratio: 3 / 4; border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; padding: 14px; text-align: left; color: oklch(0.96 0.008 var(--h)); }
+.fk::before { content: ""; position: absolute; inset: 0; z-index: -2; background: var(--c); transition: transform 320ms cubic-bezier(0.32, 0.72, 0, 1); }
+.fk::after { content: ""; position: absolute; inset: 0; z-index: -1; background: linear-gradient(oklch(0 0 0 / 0.3), oklch(0 0 0 / 0.18) 38%, oklch(0 0 0 / 0.78)); }
+.fk:hover::before { transform: scale(1.04); }
+.fh { display: flex; gap: 12px; align-items: center; }
+.fh .art { width: 56px; height: 56px; box-shadow: 0 4px 14px oklch(0 0 0 / 0.35); }
+.fm { min-width: 0; line-height: 1.25; }
+.fm b { display: block; font-size: 17px; font-weight: 650; letter-spacing: -0.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fm span, .fk p { color: oklch(0.86 0.01 var(--h)); font-size: 12px; }
+.fk p { margin: 0; font-size: 12.5px; line-height: 1.45; }
+/* History & stats */
+.page[data-p="history"][data-src="yt"] [data-s]:not([data-s~="yt"]), .page[data-p="history"][data-src="sp"] [data-s]:not([data-s~="sp"]), .page[data-p="history"][data-src="app"] [data-s]:not([data-s~="app"]) { display: none; }
+.hs { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; padding: 4px 22px 8px; }
+.pn { background: var(--s2); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.pn h6 { margin: 0; font-size: 14px; line-height: 20px; font-weight: 650; letter-spacing: -0.01em; }
+.sbar { display: flex; height: 8px; gap: 2px; border-radius: 4px; overflow: hidden; }
+.lg2 { display: flex; flex-wrap: wrap; gap: 8px 24px; color: var(--tm); }
+.lg2 span { display: flex; flex-direction: column; padding-left: 16px; position: relative; }
+.lg2 span i { position: absolute; left: 0; top: 6px; width: 8px; height: 8px; border-radius: 50%; }
+.lg2 small { color: var(--tf); font-size: 11.5px; }
+.bars { display: flex; align-items: flex-end; gap: 8px; height: 96px; }
+.bars i { flex: 1; height: var(--v); border-radius: 6px 6px 3px 3px; background: var(--s3); transition: background-color 90ms ease-out; }
+.bars i:hover { background: var(--tf); }
+.bars i.on, .bars i.on:hover { background: var(--ax); }
+.bl { display: flex; gap: 8px; color: var(--tf); font-size: 11px; }
+.bl span { flex: 1; text-align: center; }
+.rk { display: grid; grid-template-columns: 18px 32px minmax(0, 1fr) auto; gap: 10px; align-items: center; min-height: 44px; }
+.rk .nb { color: var(--tf); font-variant-numeric: tabular-nums; }
+.rk > .art { width: 32px; height: 32px; border-radius: 50%; }
+.rk b { display: block; font-weight: 550; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rk .m { height: 3px; border-radius: 2px; background: var(--s3); margin-top: 3px; }
+.rk .m i { display: block; height: 100%; width: var(--w); border-radius: 2px; background: var(--ax); }
+.rk .pc2 { color: var(--tm); font-size: 12px; font-variant-numeric: tabular-nums; }
+.sb { display: inline-grid; place-items: center; height: 18px; padding: 0 6px; border-radius: 5px; background: var(--s3); color: var(--tm); font-size: 10px; font-weight: 650; font-style: normal; letter-spacing: 0.04em; }
+.stats { display: grid; grid-template-columns: repeat(var(--n, 3), minmax(0, 1fr)); gap: 8px; padding: 4px 22px 8px; }
+.stats div { background: var(--s2); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; min-width: 0; }
+.stats b { font-size: 22px; line-height: 28px; letter-spacing: -0.015em; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stats span { color: var(--tm); font-size: 12px; }
+.stor { padding: 4px 22px 8px; display: flex; flex-direction: column; gap: 10px; }
+.stor .bar { height: 8px; border-radius: 4px; background: var(--s2); display: flex; gap: 2px; overflow: hidden; }
+.stor .bar i { display: block; }
+.lg { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--tm); font-size: 12px; }
+.lg span { display: flex; gap: 6px; align-items: center; }
+.lg i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+.dl { display: grid; grid-template-columns: 38px minmax(0, 1fr) 120px 40px 28px; gap: 12px; align-items: center; height: 56px; padding: 0 12px; border-radius: var(--ctl-r); }
+.dl:hover { background: var(--s2); }
+.dl .art { width: 38px; height: 38px; }
+.dl .bar { height: 4px; border-radius: 2px; background: var(--s3); position: relative; }
+.dl .bar i { position: absolute; inset: 0 auto 0 0; width: var(--p); background: var(--tx); border-radius: 2px; }
+.dl .pc { text-align: right; color: var(--tm); font-variant-numeric: tabular-nums; font-size: 12px; }
+.bn { margin: 0 22px 8px; padding: 8px 8px 8px 16px; border-radius: 12px; background: var(--s2); color: var(--tm); display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.bn b { color: var(--tx); font-weight: 550; }
+.set { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 20px; padding: 4px 22px 0; }
+.sc { display: flex; flex-direction: column; gap: 1px; }
+.sc button { height: 36px; border-radius: 10px; padding: 0 12px; text-align: left; color: var(--tm); transition: background-color 90ms ease-out, color 90ms ease-out; }
+.sc button:hover { color: var(--tx); background: var(--s2); }
+.sc button[aria-current="true"] { background: var(--axc); color: var(--tx); font-weight: 550; }
+.sp { display: none; flex-direction: column; gap: 10px; min-width: 0; }
+.sp.on { display: flex; animation: in 180ms ease-out; }
+.sp h5 { margin: 0; font-size: 19px; line-height: 24px; letter-spacing: -0.015em; font-weight: 650; }
+.grp { background: var(--s2); border-radius: 14px; padding: 4px 16px; display: flex; flex-direction: column; }
+.sg { display: flex; justify-content: space-between; align-items: center; gap: 16px; min-height: 56px; padding: 8px 0; }
+.sg > div:first-child, .sg > .tile + div { min-width: 0; }
+.sg b { display: block; font-weight: 550; }
+.sg span.d { display: block; color: var(--tm); font-size: 12px; }
+.sg .ctl2 { display: flex; gap: 8px; align-items: center; flex: none; }
+.grp .seg { background: var(--s1); }
+.grp .seg button[aria-pressed="true"] { background: var(--s3); }
+.sw { width: 40px; height: 24px; border-radius: 999px; background: var(--s3); position: relative; flex: none; transition: background-color 120ms ease-out; }
+.sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--tm); transition: transform 160ms cubic-bezier(0.32, 0.72, 0, 1), background-color 120ms ease-out; }
+.sw[aria-checked="true"] { background: var(--tx); }
+.sw[aria-checked="true"]::after { transform: translateX(16px); background: var(--s0); }
+.swa { display: flex; gap: 10px; }
+.swa button { width: 26px; height: 26px; border-radius: 50%; box-shadow: inset 0 0 0 1px oklch(1 0 0 / 0.14); }
+.swa button[aria-pressed="true"] { outline: 2px solid var(--tx); outline-offset: 2px; }
+.rng { width: 150px; display: flex; align-items: center; gap: 10px; color: var(--tm); font-variant-numeric: tabular-nums; }
+.rng .bar { flex: 1; height: 4px; border-radius: 2px; background: var(--s3); position: relative; }
+.rng .bar i { position: absolute; inset: 0 var(--r) 0 0; background: var(--tx); border-radius: 2px; }
+.sel { height: 32px; padding: 0 10px 0 12px; border-radius: var(--ctl-r); background: var(--s3); display: inline-flex; gap: 8px; align-items: center; }
+.btn2 { height: 30px; padding: 0 12px; border-radius: var(--ctl-r); background: var(--s3); font-weight: 550; }
+.btn2:hover { background: var(--s1); }
+.tile { width: 40px; height: 40px; border-radius: 10px; background: var(--s3); display: grid; place-items: center; font-weight: 650; font-size: 12px; flex: none; }
+.sg .tile { margin-right: -2px; }
+.sg:has(.tile) { justify-content: flex-start; }
+.sg:has(.tile) .ctl2 { margin-left: auto; }
+.grp kbd { font: 500 11px var(--mono); background: var(--s3); border-radius: 6px; padding: 3px 7px; color: var(--tx); }
+.rv { display: grid; grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 60px; padding: 6px 12px; border-radius: var(--ctl-r); }
+.rv:not(.h):hover { background: var(--s2); }
+.rv.h { min-height: 28px; padding-block: 0; font-size: 10.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--tf); }
+.rv .pr { display: flex; gap: 10px; align-items: center; min-width: 0; }
+.rv .art { width: 38px; height: 38px; }
+.rv > svg { color: var(--tf); }
+.rv .ac { display: flex; gap: 2px; }
+.pal { display: none; position: absolute; inset: 0; z-index: 5; background: oklch(0 0 0 / 0.42); justify-content: center; align-items: flex-start; padding-top: 72px; }
+.pal.o { display: flex; }
+.pbox { width: min(560px, calc(100% - 48px)); max-height: 480px; background: var(--s2); border-radius: 16px; box-shadow: 0 24px 64px oklch(0 0 0 / 0.45); display: flex; flex-direction: column; overflow: hidden; animation: in 140ms ease-out; }
+.pin { display: flex; align-items: center; gap: 10px; padding: 0 16px; height: 52px; color: var(--tm); flex: none; }
+.pin input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; color: var(--tx); font-size: 15px; }
+.pin input::placeholder { color: var(--tm); }
+.pres { overflow-y: auto; scrollbar-width: none; padding: 0 8px 8px; }
+.pgr .kk { display: block; padding: 10px 10px 4px; color: var(--tf); }
+.pi { display: flex; align-items: center; gap: 12px; width: 100%; height: 40px; padding: 0 10px; border-radius: var(--ctl-r); text-align: left; color: var(--tx); }
+.pi svg { color: var(--tm); width: 18px; height: 18px; }
+.pi span { flex: 1; }
+.pi kbd { font: 500 10.5px var(--mono); color: var(--tf); }
+.pi:hover, .pi.sel { background: var(--s3); }
+.menu { position: absolute; z-index: 4; top: 48px; right: 12px; width: 220px; background: var(--s2); border-radius: 14px; padding: 6px; box-shadow: 0 16px 40px oklch(0 0 0 / 0.4); display: flex; flex-direction: column; gap: 1px; animation: in 140ms ease-out; }
+.menu .mh { padding: 8px 10px 10px; line-height: 1.3; }
+.menu .mh span { display: block; color: var(--tm); font-size: 12px; }
+.menu button { height: 34px; padding: 0 10px; border-radius: var(--ctl-r); text-align: left; display: flex; align-items: center; justify-content: space-between; color: var(--tx); }
+.menu button:hover { background: var(--s3); }
+.menu button.mut { color: var(--tm); }
+/* Library list views. Collapsed library always shows the icon list. */
+.mock:not(.lib-c) .items[data-lv="compact"] { gap: 0; }
+.mock:not(.lib-c) .items[data-lv="compact"] .li { padding: 0 10px; height: 30px; border-radius: 8px; }
+.mock:not(.lib-c) .items[data-lv="compact"] .art { display: none; }
+.mock:not(.lib-c) .items[data-lv="compact"] .li div:not(.art) { width: auto; flex: 1; min-width: 0; display: flex; gap: 6px; }
+.mock:not(.lib-c) .items[data-lv="compact"] .li b { flex: 0 1 auto; min-width: 0; }
+.mock:not(.lib-c) .items[data-lv="compact"] .li span { flex: 1 1 0; min-width: 0; }
+.mock:not(.lib-c) .items[data-lv="compact"] .li span::before { content: "·"; margin-right: 6px; }
+.mock:not(.lib-c) .items[data-lv="grid"], .mock:not(.lib-c) .items[data-lv="grid2"] { display: grid; align-content: start; grid-auto-rows: max-content; }
+.mock:not(.lib-c) .items[data-lv="grid"] { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 3px; }
+.mock:not(.lib-c) .items[data-lv="grid"] .li { padding: 0; width: auto; border-radius: var(--art-r); }
+.mock:not(.lib-c) .items[data-lv="grid"] .li .art { width: 100%; height: auto; aspect-ratio: 1; }
+.mock:not(.lib-c) .items[data-lv="grid"] .li div:not(.art) { display: none; }
+.mock:not(.lib-c) .items[data-lv="grid"] .li[aria-current="true"] { background: none; outline: 2px solid var(--tx); outline-offset: 2px; }
+.mock:not(.lib-c) .items[data-lv="grid2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+.mock:not(.lib-c) .items[data-lv="grid2"] .li { flex-direction: column; align-items: stretch; gap: 8px; padding: 8px; }
+.mock:not(.lib-c) .items[data-lv="grid2"] .li .art { width: 100%; height: auto; aspect-ratio: 1; }
+.mock:not(.lib-c) .items[data-lv="grid2"] .li div:not(.art) { width: 100%; }
+.vm { right: auto; left: 8px; width: 232px; }
+.menu .kk { display: block; padding: 8px 10px 4px; color: var(--tf); }
+.menu [role="menuitemradio"][aria-checked="false"] svg { visibility: hidden; }
+.menu [role="menuitemradio"][aria-checked="true"] { font-weight: 550; }
+.vseg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; padding: 3px; border-radius: 12px; background: var(--s1); margin: 2px 4px 4px; }
+.menu .vseg button { height: 34px; justify-content: center; color: var(--tm); }
+.menu .vseg button[aria-pressed="true"] { background: var(--s3); color: var(--tx); }
+/* Listening party */
+.tb .rt .ib { position: relative; }
+.live { display: none; position: absolute; top: 5px; right: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--ax); box-shadow: 0 0 0 2px var(--s0); }
+.mock[data-party="on"] .live { display: block; }
+.mock[data-party="on"] .pt-off, .mock:not([data-party="on"]) .pt-on { display: none; }
+.pty { position: absolute; z-index: 4; top: 48px; right: 12px; width: 320px; background: var(--s2); border-radius: 16px; padding: 14px; box-shadow: 0 16px 40px oklch(0 0 0 / 0.4); display: flex; flex-direction: column; gap: 12px; animation: in 140ms ease-out; }
+.pty > div { display: flex; flex-direction: column; gap: 12px; }
+.pty .top2 { flex-direction: row; justify-content: space-between; align-items: center; }
+.pty .top2 b { font-size: 15px; letter-spacing: -0.01em; font-weight: 650; }
+.pty .top2 span { display: flex; gap: 6px; align-items: center; color: var(--tm); font-size: 12px; }
+.pty .top2 span::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ax); }
+.pty p { color: var(--tm); }
+.pty .code { flex-direction: row; justify-content: space-between; align-items: center; background: var(--s1); border-radius: 12px; padding: 10px 10px 10px 14px; }
+.pty .code b { display: block; font: 500 16px/22px var(--mono); letter-spacing: 0.04em; }
+.pty .btn2 { background: var(--s3); }
+.pty .btn2:hover { background: var(--s1); }
+.pty .wide { height: 36px; background: var(--tx); color: var(--s0); }
+.pty .wide:hover { background: var(--tx); }
+.pty .ppl { gap: 0; }
+.pty .pp2 { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.pty .av { width: 32px; height: 32px; border-radius: 50%; background: var(--axc); display: grid; place-items: center; font-size: 11px; font-weight: 600; flex: none; }
+.pty .pp2 .st { flex: 1; }
+.pty .pp2 em { font-style: normal; color: var(--tm); font-size: 12px; }
+.pty .sg { min-height: 40px; padding: 2px 0; }
+.pty .jn { flex-direction: row; gap: 6px; }
+.pty .jn input { flex: 1; min-width: 0; height: 32px; border-radius: var(--ctl-r); background: var(--s1); border: 0; outline: 0; padding: 0 12px; color: var(--tx); }
+.pty .jn input:focus-visible { outline: 2px solid var(--ax); }
+.pty .jn input::placeholder { color: var(--tm); }
+.pty .end { color: var(--tm); }
+/* Player card: the cover runs full width and fades into a blurred copy of itself. The card is always dark so text stays legible on any art. */
+.mock[data-mode="light"] .pl {
+  --s0: oklch(0.17 var(--nc) var(--h)); --s1: oklch(0.205 var(--nc) var(--h)); --s2: oklch(0.25 var(--nc) var(--h)); --s3: oklch(0.30 var(--nc) var(--h));
+  --tx: oklch(0.96 0.008 var(--h)); --tm: oklch(0.72 0.02 var(--h)); --tf: oklch(0.56 0.02 var(--h));
+  --ax: oklch(0.78 var(--ac) var(--h)); --on-ax: oklch(0.2 0.03 var(--h)); --axc: oklch(0.32 calc(var(--ac) * 0.55) var(--h)); color: var(--tx); }
+.pl { position: relative; isolation: isolate; color: var(--tx);
+  --cv: radial-gradient(60% 45% at 25% 28%, oklch(0.82 0.15 calc(var(--h) + 120)), transparent), radial-gradient(70% 55% at 78% 62%, oklch(0.45 0.14 calc(var(--h) - 60)), transparent), linear-gradient(140deg, oklch(0.66 0.16 calc(var(--h) + 50)), oklch(0.34 0.1 calc(var(--h) - 40))); }
+.pl::before { content: ""; position: absolute; inset: -48px; z-index: -2; background: var(--cv); filter: blur(40px) saturate(1.3); }
+.pl::after { content: ""; position: absolute; inset: 0; z-index: -1; background: linear-gradient(oklch(0.17 var(--nc) var(--h) / 0.1), oklch(0.17 var(--nc) var(--h) / 0.72) 60%); }
+.pl > :not(.peek), .ps > :not(.cover) { position: relative; }
+.pl > .ph { z-index: 2; }
+.cover { width: calc(100% + 32px); margin: -60px -16px -70px; flex: 1 1 0; min-height: 0; background: var(--cv); -webkit-mask-image: linear-gradient(#000 calc(100% - 140px), transparent); mask-image: linear-gradient(#000 calc(100% - 140px), transparent); }
+.pl:not([data-view="art"]) > .ph { order: -2; }
+.pl:not([data-view="art"]) .id { order: -1; }
+.pl[data-view="art"] .ph b { text-shadow: 0 1px 10px oklch(0 0 0 / 0.5); }
+.pl[data-view="art"] .ph .ib { background: oklch(0 0 0 / 0.28); color: oklch(0.98 0 0); }
+.pl[data-view="art"] .ph .ib:hover { background: oklch(0 0 0 / 0.4); }
+.pill { display: flex; width: 100%; height: 42px; border-radius: 999px; overflow: hidden; background: var(--s2); }
+.pill button { flex: 1; position: relative; display: grid; place-items: center; color: var(--tm); transition: background-color 90ms ease-out, color 90ms ease-out; }
+.pill button + button::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--s0); }
+.pill button:hover { color: var(--tx); background: var(--s3); }
+.pill button:active { background: var(--s3); }
+.pill button[aria-pressed="true"] { background: color-mix(in oklch, var(--tx) 24%, var(--s2)); color: var(--tx); }
+.pill svg { width: 20px; height: 20px; }
+/* The card scrolls in every view: the cover (or title row plus lyrics/queue), then the controls, then info cards underneath. In the cover view the header floats over the cover. */
+.ps { display: flex; flex-direction: column; gap: 14px; flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none; overscroll-behavior: contain; padding-bottom: 4px; }
+.ps::-webkit-scrollbar { display: none; }
+.ps > * { flex: none; }
+.ps > .body { flex: 1 0 380px; }
+.pl[data-view="art"] .ps { margin: -14px -16px; padding: 14px 16px 18px; }
+.pl[data-view="art"] .cover { height: auto; aspect-ratio: 1; margin: -14px -16px -70px; }
+.pl[data-view="art"] > .ph { position: absolute; top: 14px; left: 16px; right: 16px; }
+/* The floating header gets a blurred strip once the card has scrolled under it (scroll-driven; without support it simply stays clear). */
+.pl { timeline-scope: --ps; }
+.pl[data-view="art"] .ps { scroll-timeline: --ps block; }
+.pl[data-view="art"] > .ph::before { content: ""; position: absolute; z-index: -1; inset: -14px -16px -12px; opacity: 0; background: oklch(0.17 var(--nc) var(--h) / 0.6); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); animation: phin linear both; animation-timeline: --ps; animation-range: 0 140px; }
+@keyframes phin { to { opacity: 1; } }
+.mock.pl-c .info { display: none; }
+.mock.pl-c .pl[data-view="art"] .cover { flex: 1 1 0; aspect-ratio: auto; margin-bottom: -18px; }
+.info { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.ic { background: color-mix(in oklch, var(--s1) 72%, transparent); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.ic h6 { margin: 0; font-size: 14px; line-height: 20px; font-weight: 650; letter-spacing: -0.01em; display: flex; justify-content: space-between; align-items: baseline; }
+.ic h6 button { font-size: 12px; font-weight: 600; color: var(--tm); }
+.ic h6 button:hover { color: var(--tx); }
+.ic .ab { width: 80px; height: 80px; }
+.ic .nm { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
+.ic .lr { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--tm); }
+.ic p { margin: 0; color: var(--tm); font-size: 12.5px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.fb { height: 32px; padding: 0 16px; border-radius: 999px; border: 1px solid color-mix(in oklch, var(--tm) 55%, transparent); color: var(--tx); font-size: 12.5px; font-weight: 600; white-space: nowrap; transition: background-color 90ms ease-out, border-color 90ms ease-out; }
+.fb:hover { border-color: var(--tx); }
+.fb[aria-pressed="true"] { background: var(--tx); color: var(--s0); border-color: var(--tx); }
+.cr { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; }
+.cr > div { min-width: 0; line-height: 1.35; }
+.cr b { display: block; font-size: 13.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cr span { color: var(--tm); font-size: 12px; }
+.pl:not([data-endless="on"]) .endl { display: none; }
+.q .endl { opacity: 0.65; }
+/* Sidebar resize handles */
+.rz { position: absolute; z-index: 2; top: 52px; bottom: 10px; width: 12px; cursor: col-resize; touch-action: none; outline: 0; }
+.rz-l { left: calc(var(--lib-w) - 10px); transition: left 320ms cubic-bezier(0.32, 0.72, 0, 1); }
+.rz-r { right: calc(var(--pl-w) - 1px); transition: right 320ms cubic-bezier(0.32, 0.72, 0, 1); }
+.rz::after { content: ""; position: absolute; top: 12px; bottom: 12px; left: 5px; width: 2px; border-radius: 1px; background: var(--tx); opacity: 0; transition: opacity 120ms ease-out; }
+.rz:hover::after, .rz:focus-visible::after, .rz.on::after { opacity: 0.4; }
+.mock.lib-c .rz-l, .mock.pl-c .rz-r { display: none; }
+/* Collapsed player: a 56px sliver of the card stays at the window edge under a fade that is solid on the left and see-through on the right. */
+.mock { --win: var(--s0); }
+.peek { position: absolute; z-index: 3; top: 0; bottom: 0; left: 0; width: 56px; border-radius: 18px 0 0 18px; display: grid; place-items: center; color: oklch(0.98 0 0); visibility: hidden; opacity: 0;
+  background: linear-gradient(90deg, var(--win) 4%, color-mix(in oklch, var(--win) 62%, transparent)); transition: opacity 200ms ease-out, visibility 0s 200ms; }
+.mock.pl-c .peek { visibility: visible; opacity: 1; transition: opacity 260ms ease-out; }
+.peek:hover { background: linear-gradient(90deg, var(--win) 4%, color-mix(in oklch, var(--win) 78%, transparent)); }
+.peek svg { width: 22px; height: 22px; filter: drop-shadow(0 1px 4px oklch(0 0 0 / 0.5)); transition: transform 120ms ease-out; }
+.peek:hover svg { transform: translateX(-2px); }
+.peek:focus-visible { outline: 2px solid var(--ax); outline-offset: -2px; }
+.mock.rzing { transition: none; user-select: none; cursor: col-resize; }
+.mock.rzing .tb, .mock.rzing .rz { transition: none; }
+.pbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+
+/* Library (right) */
+/* Library rows share one 40px icon slot (centre 26px from the inner edge) so nothing moves when it collapses; only text is clipped. */
+.lib { grid-column: 1; grid-row: 2; margin: 0 0 10px; background: none; padding: 12px 8px 0; display: flex; flex-direction: column; gap: 8px; overflow: hidden; min-width: 0; }
+.lib .hd { display: flex; align-items: center; gap: 14px; padding-left: 10px; height: 32px; flex: none; }
+.lib .hd b { font-weight: 650; font-size: 14px; letter-spacing: -0.01em; white-space: nowrap; transition: opacity 160ms ease-out; }
+.lrow { display: flex; gap: 4px; flex: none; }
+.lrow .lsrch { flex: 1; min-width: 0; overflow: hidden; }
+.lrow .ib { border-radius: var(--ctl-r); background: var(--s2); }
+.lrow .ib:hover { background: var(--s3); }
+.mock.lib-c .lrow .ib { display: none; }
+.lsrch { display: flex; align-items: center; gap: 21px; background: var(--s2); border-radius: var(--ctl-r); padding: 0 10px 0 17px; height: 32px; flex: none; color: var(--tm); transition: background-color 120ms ease-out; }
+.lsrch input { flex: none; width: calc(var(--lib-open) - 118px); background: none; border: 0; outline: 0; color: var(--tx); font-size: 12.5px; transition: opacity 160ms ease-out; }
+.lsrch input::placeholder { color: var(--tm); }
+.lsrch:focus-within { background: var(--s3); outline: 2px solid var(--ax); }
+.fl { display: flex; gap: 4px; padding: 2px 6px; flex-wrap: nowrap; overflow: hidden; flex: none; max-height: 30px; transition: max-height 320ms cubic-bezier(0.32, 0.72, 0, 1), opacity 200ms ease-out, margin-top 320ms cubic-bezier(0.32, 0.72, 0, 1), padding 320ms cubic-bezier(0.32, 0.72, 0, 1); }
+.fl button { height: 26px; padding: 0 10px; border-radius: 999px; background: var(--s2); color: var(--tm); font-size: 12px; white-space: nowrap; }
+.fl button:hover { color: var(--tx); }
+.fl button[aria-pressed="true"] { background: var(--tx); color: var(--s0); font-weight: 550; }
+.li { display: flex; gap: 10px; align-items: center; padding: 5px 6px; border-radius: 10px; width: 100%; text-align: left; overflow: hidden; transition: background-color 90ms ease-out; }
+.li:hover { background: var(--s2); }
+.li:active { background: var(--s3); }
+.li[aria-current="true"] { background: var(--axc); }
+.li .art { width: 40px; height: 40px; }
+.li.rd .art { border-radius: 50%; }
+.li div { flex: none; width: calc(var(--lib-open) - 78px); line-height: 1.3; transition: opacity 160ms ease-out; }
+.li b { display: block; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.li span { color: var(--tm); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.items { display: flex; flex-direction: column; gap: 1px; overflow-y: auto; scrollbar-width: none; flex: 1; min-height: 0; -webkit-mask-image: linear-gradient(#000 88%, transparent); mask-image: linear-gradient(#000 88%, transparent); }
+.nav { display: flex; flex-direction: column; gap: 1px; padding-bottom: 6px; flex: none; }
+.nv { display: flex; gap: 21px; align-items: center; height: 38px; padding: 0 0 0 17px; border-radius: 10px; color: var(--tm); width: 100%; text-align: left; white-space: nowrap; overflow: hidden; transition: background-color 90ms ease-out, color 90ms ease-out; }
+.nv span { transition: opacity 160ms ease-out; }
+.nv:hover { background: var(--s2); color: var(--tx); }
+.nv:active { background: var(--s3); }
+.nv[aria-current="page"] { color: var(--tx); background: var(--axc); font-weight: 550; }
+.mock.lib-c .hd b, .mock.lib-c .lsrch input, .mock.lib-c .li div, .mock.lib-c .nv span { opacity: 0; pointer-events: none; }
+.mock.lib-c .lsrch { background: none; cursor: pointer; }
+.mock.lib-c .lsrch:hover { background: var(--s2); }
+.mock.lib-c .fl { max-height: 0; opacity: 0; margin-top: -8px; padding-block: 0; visibility: hidden; transition: max-height 320ms cubic-bezier(0.32, 0.72, 0, 1), opacity 160ms ease-out, margin-top 320ms cubic-bezier(0.32, 0.72, 0, 1), padding 320ms cubic-bezier(0.32, 0.72, 0, 1), visibility 0s 320ms; }
+.mock.lib-c .collapse svg { transform: scaleX(-1); }
+.nv svg, .lsrch svg { width: 18px; height: 18px; }
+/* Player header */
+.ph { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 32px; flex: none; padding-left: 4px; }
+.ph b { font-size: 13px; font-weight: 600; letter-spacing: -0.005em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Mini player: a compact chip that replaces the player column when it is collapsed */
+.mini { position: absolute; z-index: 3; left: 0; right: 0; margin-inline: auto; bottom: 14px; width: max-content; max-width: calc(100% - 24px); background: var(--s2); border-radius: 999px; padding: 8px 14px 12px 8px; display: flex; align-items: center; gap: 10px; box-shadow: 0 10px 28px oklch(0 0 0 / 0.32); transform: translateY(calc(100% + 24px)); opacity: 0; visibility: hidden; transition: transform 320ms cubic-bezier(0.32, 0.72, 0, 1), opacity 200ms ease-out, visibility 0s 320ms; }
+.mock.pl-c .mini { transform: none; opacity: 1; visibility: visible; transition: transform 320ms cubic-bezier(0.32, 0.72, 0, 1), opacity 200ms ease-out; }
+.mini .art { width: 40px; height: 40px; border-radius: 50%; }
+.mini .who { display: flex; align-items: center; gap: 10px; border-radius: 999px; padding-right: 8px; text-align: left; }
+.mini .who:hover .tt b { color: var(--ax); }
+.mini .tt { width: 132px; min-width: 0; line-height: 1.3; }
+.mini .tt b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mini .tt span { color: var(--tm); font-size: 12px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mini .mb { display: flex; align-items: center; gap: 2px; }
+.mini .ib { color: var(--tx); }
+.mini .pp { width: 36px; height: 36px; background: var(--tx); color: var(--s0); }
+.mini .pp:hover { background: var(--tx); }
+.mini .sep { width: 1px; height: 22px; background: var(--s3); }
+.mini .ib[data-mv] { color: var(--tm); }
+.mini .ib[data-mv]:hover { color: var(--tx); }
+.mini .pg { position: absolute; left: 24px; right: 24px; bottom: 5px; height: 2px; border-radius: 1px; background: var(--s3); }
+.mini .pg i { position: absolute; inset: 0 62% 0 0; background: var(--tx); border-radius: 1px; }
+@media (prefers-reduced-motion: reduce) { .mini, .mock.pl-c .mini { transition: none; } .eq b { animation: none; transform: scaleY(0.6); } .body { animation: none; } .mock { transition: none; } .scrub .bar, .play, .li, .ib, .tport button, .sw, .sw::after, .card, .qk, .pill button, .rz, .rz::after { transition: none; } .page.on, .sp.on, .pbox, .menu, .pty { animation: none; } }
+</style>
+
+<div class="wrap">
+  <header style="display:flex;flex-direction:column;gap:16px">
+    <span class="eyebrow">Metrolist · desktop client</span>
+    <h1>Architecture, design language and shell layout for the GPUI app</h1>
+    <p class="lede">Three processes, one set of tokens that every theme maps onto, and one window layout built around keyboard use and cover art. Everything here is a proposal to push on; open questions are at the bottom.</p>
+  </header>
+
+  <section id="architecture">
+    <span class="eyebrow">1 · Architecture</span>
+    <h2>The UI is Rust. Everything that talks to YouTube or Spotify stays in Kotlin.</h2>
+    <p>The Kotlin backend already works and breaks whenever YouTube changes, so it stays a separate daemon that the app spawns. The GPUI process only renders, plays audio and stores credentials. Login runs in its own small window because the wry spikes worked in a separate process on Wayland, while the webview embedded in gpui does not support native Wayland.</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 760 330" role="img" aria-label="The GPUI app talks to the Kotlin daemon over JSON-RPC on stdio. A login helper process hands cookies to the app. The daemon talks to YouTube Music, Spotify and lyrics providers. The app fetches audio and artwork directly from the CDNs.">
+        <defs>
+          <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="ah"/></marker>
+          <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="ah m"/></marker>
+        </defs>
+        <rect class="box" x="20" y="40" width="210" height="190" rx="12"/>
+        <text class="t-h" x="36" y="64">metrolist-ui</text><text class="t-m" x="118" y="64">Rust · GPUI</text>
+        <rect class="chip" x="40" y="80" width="170" height="26" rx="6"/><text x="52" y="97">Views · virtual lists</text>
+        <rect class="chip" x="40" y="112" width="170" height="26" rx="6"/><text x="52" y="129">State store · RPC client</text>
+        <rect class="chip" x="40" y="144" width="170" height="26" rx="6"/><text x="52" y="161">Theme engine</text>
+        <rect class="chip" x="40" y="176" width="170" height="26" rx="6"/><text x="52" y="193">Audio output · keyring</text>
+
+        <rect class="box" x="330" y="40" width="190" height="190" rx="12"/>
+        <text class="t-h" x="346" y="64">metrolist-daemon</text><text class="t-m" x="450" y="64">Kotlin</text>
+        <rect class="chip" x="350" y="80" width="150" height="26" rx="6"/><text x="362" y="97">InnerTube client</text>
+        <rect class="chip" x="350" y="112" width="150" height="26" rx="6"/><text x="362" y="129">Lyrics providers</text>
+        <rect class="chip" x="350" y="144" width="150" height="26" rx="6"/><text x="362" y="161">Spotify import + match</text>
+        <rect class="chip" x="350" y="176" width="150" height="26" rx="6"/><text x="362" y="193">Library database</text>
+
+        <rect class="box" x="580" y="40" width="160" height="190" rx="12"/>
+        <text class="t-h" x="596" y="64">Network</text>
+        <rect class="chip" x="596" y="80" width="128" height="26" rx="6"/><text x="608" y="97">YouTube Music</text>
+        <rect class="chip" x="596" y="112" width="128" height="26" rx="6"/><text x="608" y="129">Spotify</text>
+        <rect class="chip" x="596" y="144" width="128" height="26" rx="6"/><text x="608" y="161">Lyrics sources</text>
+        <rect class="chip" x="596" y="176" width="128" height="26" rx="6"/><text x="608" y="193">Art + audio CDNs</text>
+
+        <path class="edge" d="M232 120 H328" marker-start="url(#a1)" marker-end="url(#a1)"/>
+        <text class="t-m" x="249" y="112">JSON-RPC</text><text class="t-m" x="263" y="140">stdio</text>
+        <path class="edge" d="M522 120 H578" marker-end="url(#a1)"/><text class="t-m" x="534" y="112">HTTPS</text>
+
+        <rect class="box" x="20" y="262" width="170" height="52" rx="12"/>
+        <text class="t-h" x="36" y="284">login-helper</text><text class="t-m" x="36" y="302">wry window · short-lived</text>
+        <path class="edge" d="M105 260 V232" marker-end="url(#a1)"/><text class="t-m" x="116" y="250">cookies via stdout</text>
+
+        <path class="edge dash" d="M222 232 V300 H660 V232" marker-end="url(#a2)"/>
+        <text class="t-m" x="440" y="292" text-anchor="middle">audio and artwork are fetched by the client directly</text>
+      </svg>
+    </div>
+
+    <div class="grid2">
+      <div><h3>Transport: JSON-RPC over stdio</h3><p>The app spawns the daemon and talks newline-delimited JSON-RPC on its stdin and stdout. There is no port to pick, no auth to design and it behaves the same on Linux, Windows and macOS. Streaming results (search, playlist pages) and events (queue changed, token refreshed) come back as notifications on the same pipe.</p></div>
+      <div><h3>Credentials stay with the client</h3><p>The login helper returns YouTube cookies and the Spotify <code>sp_dc</code> cookie to the app. The app stores them in the OS keyring and sends them to the daemon on start. The daemon mints Spotify tokens itself, since that logic already lives behind a Kotlin interface.</p></div>
+      <div><h3>The daemon resolves, the client plays</h3><p>Playback asks the daemon for a stream URL with its headers and expiry. The client then streams it directly, so audio never passes through the pipe, and a daemon crash does not stop the song that is playing.</p></div>
+      <div><h3>Pin everything</h3><p>gpui is pre-1.0. <code>gpui-component</code> pins an exact gpui snapshot, so the app should pin that exact pair and treat upgrades as planned work.</p></div>
+    </div>
+
+    <div class="scroll"><table>
+      <thead><tr><th>Method group</th><th>Examples</th><th>Returns</th></tr></thead>
+      <tbody>
+        <tr><td><code>auth.*</code></td><td><code>auth.set</code>, <code>auth.status</code></td><td>Account state; emits <code>auth.expired</code></td></tr>
+        <tr><td><code>browse.*</code></td><td><code>home</code>, <code>album</code>, <code>artist</code>, <code>playlist</code></td><td>Sections of typed items, with continuation tokens</td></tr>
+        <tr><td><code>search.*</code></td><td><code>suggest</code>, <code>query</code></td><td>Streamed result pages</td></tr>
+        <tr><td><code>play.*</code></td><td><code>resolve</code>, <code>next</code>, <code>radio</code></td><td>Stream URL, headers, expiry; queue seeds</td></tr>
+        <tr><td><code>lyrics.*</code></td><td><code>get</code></td><td>Timed lines, provider, translation flag</td></tr>
+        <tr><td><code>library.*</code></td><td><code>list</code>, <code>like</code>, <code>save</code></td><td>Rows plus change events</td></tr>
+        <tr><td><code>import.spotify</code></td><td><code>start</code>, <code>progress</code>, <code>review</code></td><td>Progress events and a list of uncertain matches</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section id="language">
+    <span class="eyebrow">2 · Design language</span>
+    <h2>Quiet tonal surfaces. The cover art supplies the colour.</h2>
+    <p>Spotify leads with dense dark cards and a loud accent; Apple Music leads with large white art and red. Metrolist takes neither. It uses flat tonal surfaces that are tinted by the theme, one restrained accent that only marks what is playing or focused, and a single header wash taken from the artwork. Type does the work that borders and shadows do elsewhere.</p>
+    <div class="grid2">
+      <div><h3>Tone separates, lines don't</h3><p>Regions are four steps of one tinted ramp: window, sidebar, panel, hover. There are no 1px dividers between regions. The only soft edge is a short fade where lists scroll out of view.</p></div>
+      <div><h3>One accent job</h3><p>Accent means "this is playing" or "this has focus". Buttons, links and tabs stay in neutral tones, so the accent is always meaningful.</p></div>
+      <div><h3>Art is the only decoration</h3><p>Artwork has a 6px radius and a soft shadow. Album and artist headers get a faint wash from the accent hue, and the player card fades its cover into a blurred copy of itself. Nothing else gets a gradient.</p></div>
+      <div><h3>Keyboard first</h3><p>The app is a desktop tool. <code>Ctrl/⌘ K</code> opens a palette for search, navigation and commands. Space, arrows and <code>/</code> behave as in a file manager. Every row can be reached without a pointer.</p></div>
+      <div><h3>Press responds, release commits</h3><p>Rows and buttons change on pointer-down with a 90 to 100ms tonal shift. Hover is instant. Nothing waits on a transition before it accepts input.</p></div>
+      <div><h3>Without blur</h3><p>I'm assuming GPUI has no backdrop blur on all platforms, so no surface depends on it. The player's blurred backdrop is not one: the app blurs the cover once per track (shrink to about 32px, scale back up) and draws that as an ordinary image. Layers are opaque tonal steps; only the content and the player float, each as a card with a shadow; the library sits directly on the window background.</p></div>
+    </div>
+
+    <div class="scroll"><table>
+      <thead><tr><th>Token</th><th>Value</th><th>Use</th></tr></thead>
+      <tbody>
+        <tr><td>Display</td><td class="num">30 / 32 · 650 · −0.025em</td><td>Album, artist, playlist titles</td></tr>
+        <tr><td>Title</td><td class="num">19 / 24 · 650 · −0.015em</td><td>Section heads, lyrics</td></tr>
+        <tr><td>Body</td><td class="num">13 / 20 · 400 · 0</td><td>Rows, menus, forms</td></tr>
+        <tr><td>Meta</td><td class="num">12 / 16 · 400 · +0.005em</td><td>Artist under title, durations (tabular figures)</td></tr>
+        <tr><td>Label</td><td class="num">10.5 / 14 · 600 · +0.07em caps</td><td>Column heads, sidebar groups</td></tr>
+        <tr><td>Space</td><td class="num">4 · 8 · 12 · 16 · 24 · 32</td><td>Everything is a multiple of 4</td></tr>
+        <tr><td>Radius</td><td class="num">art 6 · control 8 · panel 18</td><td>Themes may override art and control</td></tr>
+        <tr><td>Row</td><td class="num">44 comfortable · 34 compact</td><td>Track rows; compact is a setting</td></tr>
+        <tr><td>Motion</td><td class="num">spring, damping 1.0, response 0.3</td><td>Panels, sheets, scrubber. Damping 0.8 only after a flick or a drag release.</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note"><strong>Reduced motion</strong> swaps springs for a 150ms cross-fade and stops the playing-row bars. I haven't confirmed GPUI ships a spring primitive; if it only has easing tweens, we write a small spring driven by frame ticks so drags can hand their velocity over.</p>
+  </section>
+
+  <section id="theming">
+    <span class="eyebrow">3 · Theming</span>
+    <h2>A theme is a source colour, a mode and optional overrides.</h2>
+    <p>The engine turns the source colour into every role in the table above, so a theme can be one line. A JSON preset is the same thing written to disk, with the right to override any role or radius. The shell below is built from exactly these roles; change the colour or pick a preset to see it move.</p>
+
+    <div class="ctl">
+      <label for="src">Source colour <input type="color" id="src" value="#6a82ff"></label>
+      <div class="chips" id="presets" role="group" aria-label="Presets"></div>
+      <div class="chips" role="group" aria-label="Mode">
+        <button class="chip-b" id="m-dark" aria-pressed="true" type="button">Dark</button>
+        <button class="chip-b" id="m-light" aria-pressed="false" type="button">Light</button>
+        <button class="chip-b" id="m-dens" aria-pressed="false" type="button">Compact rows</button>
+      </div>
+    </div>
+
+    <div class="grid2" style="align-items:start">
+      <div><h3>Derivation</h3>
+        <p>Hue comes from the source. Neutrals borrow it at very low chroma (about 0.014 in OKLCH), so surfaces feel related to the accent without looking tinted. The accent keeps the source chroma at a fixed lightness per mode. Any text role below 4.5:1 against its surface is nudged until it passes, and the nudge is logged so a preset author sees it.</p>
+        <p>The roles map onto <code>gpui-component</code>'s theme colours instead of replacing them; it already loads themes from JSON, which I'd verify before settling the schema.</p>
+      </div>
+      <div><h3>Preset file</h3><pre id="json"></pre></div>
+    </div>
+  </section>
+
+  <section id="layout">
+    <span class="eyebrow">4 · Layout</span>
+    <h2>A titlebar, a collapsible library on the left, content in the middle and the player on the right.</h2>
+    <p>The player is the phone player from your screenshots, kept as a column: cover and controls by default, with the cover swapping for lyrics or the queue while the transport stays put. That removes the need for a separate bottom bar and for any now-playing side panel. Try the three buttons at the bottom of the player and the collapse button on the library. Drag the edge of either sidebar to resize it (double-click resets, arrow keys nudge): the library goes from 200 to 360px, the player from 260 to 400px, and the content never drops below 380px, so the player card always keeps its right edge and margin on screen. The buttons above the shell jump between pages; the left-hand page buttons, library items, the account menu, the import chip, <code>Enter</code> in the search box and <code>Ctrl K</code> all navigate too.</p>
+  </section>
+</div>
+
+<div class="wide" style="margin-top:24px">
+  <div class="pbar" role="group" aria-label="Jump to page">
+    <button class="chip-b" type="button" data-go="album" aria-pressed="true">Playlist</button>
+    <button class="chip-b" type="button" data-go="home" aria-pressed="false">Home</button>
+    <button class="chip-b" type="button" data-go="search" aria-pressed="false">Search</button>
+    <button class="chip-b" type="button" data-go="artist" aria-pressed="false">Artist</button>
+    <button class="chip-b" type="button" data-go="downloads" aria-pressed="false">Downloads</button>
+    <button class="chip-b" type="button" data-go="local" aria-pressed="false">Local music</button>
+    <button class="chip-b" type="button" data-go="history" aria-pressed="false">History &amp; stats</button>
+    <button class="chip-b" type="button" data-go="settings" aria-pressed="false">Settings</button>
+    <button class="chip-b" type="button" data-go="import" aria-pressed="false">Spotify import</button>
+    <button class="chip-b" type="button" data-cmd="palette">Command palette</button>
+  </div>
+  <div class="mockwrap">
+    <div class="mock" id="mock" data-mode="dark" data-density="comfortable" data-party="on">
+      <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+        <symbol id="i-back" viewBox="0 0 16 16"><path d="M10 3 5 8l5 5"/></symbol>
+        <symbol id="i-fwd" viewBox="0 0 16 16"><path d="m6 3 5 5-5 5"/></symbol>
+        <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.500 10.500 3.500 3.500"/></symbol>
+        <symbol id="i-bell" viewBox="0 0 16 16"><path d="M4 6.500a4 4 0 0 1 8 0c0 3 1.500 4 1.500 4h-11S4 9.500 4 6.500M6.500 13a1.500 1.500 0 0 0 3 0"/></symbol>
+        <symbol id="i-star" viewBox="0 0 16 16"><path d="m8 1.800 1.900 3.900 4.200.6-3 3 .7 4.200L8 11.500l-3.800 2 .7-4.200-3-3 4.200-.6z"/></symbol>
+        <symbol id="i-more" viewBox="0 0 16 16"><circle cx="3.500" cy="8" r="1.300"/><circle cx="8" cy="8" r="1.300"/><circle cx="12.500" cy="8" r="1.300"/></symbol>
+        <symbol id="i-rw" viewBox="0 0 16 16"><path d="M7.500 3v10L1 8zM15 3v10L8.500 8z"/></symbol>
+        <symbol id="i-ff" viewBox="0 0 16 16"><path d="M8.500 3v10L15 8zM1 3v10l6.500-5z"/></symbol>
+        <symbol id="i-play" viewBox="0 0 16 16"><path d="M4 2.500v11L13 8z"/></symbol>
+        <symbol id="i-vlo" viewBox="0 0 16 16"><path d="M2 6h3l4-3v10l-4-3H2z"/></symbol>
+        <symbol id="i-vhi" viewBox="0 0 16 16"><path d="M2 6h3l4-3v10l-4-3H2zM11.500 5.500a3.500 3.500 0 0 1 0 5M13 3.500a6.500 6.500 0 0 1 0 9" /></symbol>
+        <symbol id="i-lyr" viewBox="0 0 16 16"><path d="M2.500 2.500h11v8h-5L5 13.500v-3H2.500zM6 5.500v2m4-2v2"/></symbol>
+        <symbol id="i-cast" viewBox="0 0 16 16"><path d="M2 11a3 3 0 0 1 3 3M2 8a6 6 0 0 1 6 6m6-1h-.5M2 5a9 9 0 0 1 9 9M2 3h12v10"/></symbol>
+        <symbol id="i-que" viewBox="0 0 16 16"><path d="M2 4h12M2 8h12M2 12h7"/></symbol>
+        <symbol id="i-shuf" viewBox="0 0 16 16"><path d="M2 4h2c4 0 4 8 8 8h2M2 12h2c1 0 1.800-.8 2.500-1.800M9.500 5.800C10.200 4.800 11 4 12 4h2M12 2l2 2-2 2M12 10l2 2-2 2"/></symbol>
+        <symbol id="i-rep" viewBox="0 0 16 16"><path d="M3 7V6a2 2 0 0 1 2-2h8M11 2l2 2-2 2M13 9v1a2 2 0 0 1-2 2H3M5 14l-2-2 2-2"/></symbol>
+        <symbol id="i-x" viewBox="0 0 16 16"><path d="m4 4 8 8m0-8-8 8"/></symbol>
+        <symbol id="i-grip" viewBox="0 0 16 16"><path d="M2 6h12M2 10h12"/></symbol>
+        <symbol id="i-col" viewBox="0 0 16 16"><path d="M2.500 3h11v10h-11zM6 3v10"/></symbol>
+        <symbol id="i-song" viewBox="0 0 16 16"><path d="M6 2v8.300A2.500 2.500 0 1 0 7.500 12.500V5.500L12 4.500v4.800a2.500 2.500 0 1 0 1.500 2.200V2z"/></symbol>
+        <symbol id="i-alb" viewBox="0 0 16 16"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1m0 5a2 2 0 1 1 0 4 2 2 0 0 1 0-4"/></symbol>
+        <symbol id="i-art" viewBox="0 0 16 16"><path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6m0 1.500c-3 0-5.500 1.500-5.500 3.500V14h11v-1c0-2-2.500-3.500-5.500-3.500"/></symbol>
+        <symbol id="i-pl" viewBox="0 0 16 16"><path d="M2 3h12v1.500H2zm0 4h12v1.500H2zm0 4h7v1.500H2z"/></symbol>
+        <symbol id="i-home" viewBox="0 0 16 16"><path d="M8 1.500 1.500 7v7h4.200V9.500h4.600V14h4.200V7z"/></symbol>
+        <symbol id="i-lib" viewBox="0 0 16 16"><path d="M2 2h2.500v12H2zm4 0h2.500v12H6zm4 1 2.300-.6 2.700 10.600-2.300.6z"/></symbol>
+        <symbol id="i-dir" viewBox="0 0 16 16"><path d="M2 4.500h4l1.500 1.500H14v7H2z"/></symbol>
+        <symbol id="i-hist" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 4.500V8l2.500 1.500"/></symbol>
+        <symbol id="i-colr" viewBox="0 0 16 16"><path d="M2.500 3h11v10h-11zM10 3v10"/></symbol>
+        <symbol id="i-imp" viewBox="0 0 16 16"><path d="M8 1v8.600l2.800-2.800 1.100 1.100L8 12 4.100 7.900l1.100-1.100L7 9.600V1zM2 13h12v1.500H2z"/></symbol>
+        <symbol id="i-vc" viewBox="0 0 16 16"><path d="M2 4h12M2 8h12M2 12h12"/></symbol>
+        <symbol id="i-vl" viewBox="0 0 16 16"><path d="M2 3h3.200v3.200H2zM7.500 4.600H14M2 9.800h3.200V13H2zM7.500 11.400H14"/></symbol>
+        <symbol id="i-vg" viewBox="0 0 16 16"><path d="M2 2h3v3h-3zM6.5 2h3v3h-3zM11 2h3v3h-3zM2 6.5h3v3h-3zM6.5 6.5h3v3h-3zM11 6.5h3v3h-3zM2 11h3v3h-3zM6.5 11h3v3h-3zM11 11h3v3h-3z"/></symbol>
+        <symbol id="i-party" viewBox="0 0 16 16"><path d="M6 7.500a2.500 2.500 0 1 0 0-5 2.500 2.500 0 0 0 0 5M1.500 13.500c0-2.500 2-4 4.500-4s4.500 1.500 4.500 4M10.800 3a2.300 2.300 0 0 1 0 4.500M12 9.700c1.600.4 2.500 1.700 2.500 3.800"/></symbol>
+        <symbol id="i-inf" viewBox="0 0 16 16"><path d="M8 8c1.500-2 2.500-2.500 3.600-2.500 1.400 0 2.400 1 2.400 2.500s-1 2.500-2.400 2.500C10.500 10.500 9.500 10 8 8S5.500 5.500 4.400 5.500C3 5.500 2 6.500 2 8s1 2.500 2.400 2.500C5.500 10.500 6.500 10 8 8"/></symbol>
+        <symbol id="i-gear" viewBox="0 0 16 16"><path d="M2 4.500h7m3 0h2M2 11.500h2m3 0h7"/><circle cx="10.500" cy="4.500" r="1.500"/><circle cx="5.500" cy="11.500" r="1.500"/></symbol>
+        <symbol id="i-pause" viewBox="0 0 16 16"><path d="M4 3h2.500v10H4zM9.500 3H12v10H9.500z"/></symbol>
+        <symbol id="i-chev" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></symbol>
+        <symbol id="i-grid" viewBox="0 0 16 16"><path d="M2.500 2.500H7V7H2.500zM9 2.500h4.500V7H9zM2.500 9H7v4.500H2.500zM9 9h4.500v4.500H9z"/></symbol>
+        <symbol id="i-arrow" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></symbol>
+        <symbol id="i-check" viewBox="0 0 16 16"><path d="m3 8.500 3.200 3L13 4.500"/></symbol>
+      </svg>
+
+      <header class="tb">
+        <div class="brand"><i></i><span>Metrolist</span></div>
+        <div class="mid">
+          <button class="ib" id="bk" type="button" aria-label="Back"><svg class="s"><use href="#i-back"/></svg></button>
+          <button class="ib" type="button" aria-label="Forward"><svg class="s"><use href="#i-fwd"/></svg></button>
+          <label class="srch"><svg class="s"><use href="#i-search"/></svg><input id="gs" type="search" placeholder="Search songs, albums, artists" aria-label="Search YouTube Music"><kbd data-cmd="palette" title="Command palette">Ctrl K</kbd></label>
+        </div>
+        <div class="rt">
+          <button class="imp" type="button" data-go="import" title="Spotify import"><svg><use href="#i-imp"/></svg>Importing 412 / 640<b></b></button>
+          <button class="ib" type="button" aria-label="Notifications"><svg class="s"><use href="#i-bell"/></svg></button>
+          <button class="ib" id="pt" type="button" aria-label="Listening party" aria-haspopup="dialog" aria-expanded="false"><svg class="s"><use href="#i-party"/></svg><i class="live"></i></button>
+          <button class="me" id="me" type="button" aria-haspopup="menu" aria-expanded="false"><i>HY</i>Hireri</button>
+        </div>
+      </header>
+
+      <aside class="pl" id="pl" data-view="art" data-endless="on" aria-label="Player">
+        <div class="ph"><b>Night Bus Home</b><button class="ib" id="pc" type="button" aria-label="Hide player" aria-expanded="true"><svg class="s"><use href="#i-colr"/></svg></button></div>
+        <div class="ps">
+        <div class="cover" role="img" aria-label="Album art"></div>
+        <div class="body">
+          <div class="v-ly">
+            <div class="ly"><span>Fogged glass, the city blurs</span><span>I trace your name along the pane</span><span class="cur">Every light we pass is yours</span><span>Every light I count again</span><span>Driver, take the long way round</span><span>Past the depot, past the sea</span></div>
+            <div class="src"><u>Lyrics by YouTube Music</u><button class="tr" type="button">文A Translate</button></div>
+          </div>
+          <div class="v-q q">
+            <h5>Queue</h5>
+            <div class="lb">Now playing</div>
+            <div class="qi on"><div class="art" style="--o:50"></div><div><b>Window Seat, Rain</b><span>Hoshi Yume</span></div><span class="eq" style="margin:0"><b></b><b></b><b></b></span></div>
+            <div class="lb">Next from Night Bus Home</div>
+            <div class="qi"><svg class="s"><use href="#i-grip"/></svg><div class="art" style="--o:50"></div><div><b>Transfer at Midnight</b><span>Hoshi Yume, Aoi Tsuru</span></div><button class="ib" style="width:24px;height:24px" type="button" aria-label="Remove"><svg class="s"><use href="#i-x"/></svg></button></div>
+            <div class="qi"><svg class="s"><use href="#i-grip"/></svg><div class="art" style="--o:50"></div><div><b>Fare Card Blue</b><span>Hoshi Yume</span></div><button class="ib" style="width:24px;height:24px" type="button" aria-label="Remove"><svg class="s"><use href="#i-x"/></svg></button></div>
+            <div class="qi"><svg class="s"><use href="#i-grip"/></svg><div class="art" style="--o:50"></div><div><b>Depot</b><span>Hoshi Yume</span></div><button class="ib" style="width:24px;height:24px" type="button" aria-label="Remove"><svg class="s"><use href="#i-x"/></svg></button></div>
+            <div class="qi"><svg class="s"><use href="#i-grip"/></svg><div class="art" style="--o:50"></div><div><b>Everyone Gets Off Here, Eventually</b><span>Hoshi Yume</span></div><button class="ib" style="width:24px;height:24px" type="button" aria-label="Remove"><svg class="s"><use href="#i-x"/></svg></button></div>
+            <div class="lb endl">Endless · more like this</div>
+            <div class="qi endl"><div class="art" style="--o:90"></div><div><b>Platform Nine</b><span>Aoi Tsuru</span></div></div>
+            <div class="qi endl"><div class="art" style="--o:-20"></div><div><b>Slow Ferry</b><span>Mirrorlake</span></div></div>
+          </div>
+        </div>
+        <div class="id">
+          <div class="art th"></div>
+          <div class="tt"><b>Window Seat, Rain</b><span>Hoshi Yume</span></div>
+          <button class="ib" type="button" aria-label="Favourite"><svg class="s"><use href="#i-star"/></svg></button>
+          <button class="ib" type="button" aria-label="More"><svg><use href="#i-more"/></svg></button>
+        </div>
+        <div class="scrub"><div class="bar"><i></i></div><div><span>1:34</span><span>−2:34</span></div></div>
+        <div class="tport">
+          <button type="button" aria-label="Previous"><svg><use href="#i-rw"/></svg></button>
+          <button class="pp" type="button" aria-label="Play"><svg><use href="#i-play"/></svg></button>
+          <button type="button" aria-label="Next"><svg><use href="#i-ff"/></svg></button>
+        </div>
+        <div class="vol"><svg><use href="#i-vlo"/></svg><div class="bar"><i></i></div><svg><use href="#i-vhi"/></svg></div>
+        <div class="mode" role="group" aria-label="Player view">
+          <button type="button" data-v="lyrics" aria-pressed="false" aria-label="Lyrics"><svg class="s"><use href="#i-lyr"/></svg></button>
+          <div class="mid-slot">
+            <div class="pill" role="group" aria-label="Playback mode">
+              <button type="button" data-pm="shuffle" aria-pressed="false" aria-label="Shuffle" title="Shuffle"><svg class="s"><use href="#i-shuf"/></svg></button>
+              <button type="button" data-pm="repeat" aria-pressed="false" aria-label="Repeat" title="Repeat"><svg class="s"><use href="#i-rep"/></svg></button>
+              <button type="button" data-pm="endless" aria-pressed="true" aria-label="Endless" title="Endless: keep adding recommendations when the queue ends"><svg class="s"><use href="#i-inf"/></svg></button>
+            </div>
+          </div>
+          <button type="button" data-v="queue" aria-pressed="false" aria-label="Queue"><svg class="s"><use href="#i-que"/></svg></button>
+        </div>
+        <div class="dev">This computer</div>
+        <div class="info">
+          <section class="ic" aria-label="About the artist">
+            <h6>About the artist</h6>
+            <div class="art ab" style="--o:120"></div>
+            <b class="nm">Hoshi Yume</b>
+            <div class="lr"><span>184,203 monthly listeners</span><button class="fb" type="button" data-a="hy" aria-pressed="false">Follow</button></div>
+            <p>Writes and produces late-night city pop from a bedroom studio. Mostly songs about trains, rain and the last stop on the line.</p>
+          </section>
+          <section class="ic" aria-label="Credits">
+            <h6>Credits<button type="button">Show all</button></h6>
+            <div class="cr"><div><b>Hoshi Yume</b><span>Main Artist · Producer</span></div><button class="fb" type="button" data-a="hy" aria-pressed="false">Follow</button></div>
+            <div class="cr"><div><b>Mika Sorano</b><span>Lyricist · Composer</span></div></div>
+            <div class="cr"><div><b>Ren Okabe</b><span>Mixing · Mastering</span></div></div>
+          </section>
+        </div>
+        </div>
+        <button class="peek" id="pk" type="button" aria-label="Show player"><svg class="s"><use href="#i-back"/></svg></button>
+      </aside>
+
+      <main class="mn">
+        <div class="page on" data-p="album">
+        <div class="wash">
+          <div class="art"></div>
+          <div class="meta"><span class="k">Album · 2024</span><h4>Night Bus Home</h4><p>Hoshi Yume · 11 songs · 41 min</p></div>
+        </div>
+        <div class="acts">
+          <button class="play" type="button"><svg><use href="#i-play"/></svg>Play</button>
+          <button class="ghost" type="button">Shuffle</button><button class="ghost" type="button">Save</button><button class="ghost" type="button">Download</button>
+        </div>
+        <div class="tbl" role="table" aria-label="Tracks">
+          <div class="row h" role="row"><span>#</span><span>Title</span><span>Artist</span><span style="text-align:right">Time</span></div>
+          <div class="row" role="row"><span class="n">1</span><span class="t">Last Stop Is Mine</span><span class="a">Hoshi Yume</span><span class="d">3:42</span></div>
+          <div class="row on" role="row"><span class="n"><span class="eq" aria-label="Playing"><b></b><b></b><b></b></span></span><span class="t">Window Seat, Rain</span><span class="a">Hoshi Yume</span><span class="d">4:08</span></div>
+          <div class="row" role="row"><span class="n">3</span><span class="t">Transfer at Midnight</span><span class="a">Hoshi Yume, Aoi Tsuru</span><span class="d">3:15</span></div>
+          <div class="row" role="row"><span class="n">4</span><span class="t">Fare Card Blue</span><span class="a">Hoshi Yume</span><span class="d">2:57</span></div>
+          <div class="row" role="row"><span class="n">5</span><span class="t">Depot</span><span class="a">Hoshi Yume</span><span class="d">5:21</span></div>
+          <div class="row" role="row"><span class="n">6</span><span class="t">Everyone Gets Off Here, Eventually</span><span class="a">Hoshi Yume</span><span class="d">3:39</span></div>
+          <div class="row" role="row"><span class="n">7</span><span class="t">Terminus</span><span class="a">Hoshi Yume</span><span class="d">4:44</span></div>
+          <div class="row" role="row"><span class="n">8</span><span class="t">Paper Lantern</span><span class="a">Hoshi Yume</span><span class="d">3:20</span></div>
+        </div>
+        </div>
+
+        <!-- HOME -->
+        <div class="page" data-p="home">
+          <div class="pgh"><div><h4>Good evening, Hireri</h4><p>Picked from what you played this week</p></div></div>
+          <div class="cp" role="group" aria-label="Mood"><button type="button" aria-pressed="true">All</button><button type="button" aria-pressed="false">Energize</button><button type="button" aria-pressed="false">Relax</button><button type="button" aria-pressed="false">Focus</button><button type="button" aria-pressed="false">Commute</button><button type="button" aria-pressed="false">Workout</button><button type="button" aria-pressed="false">Sleep</button></div>
+          <div class="qp">
+            <button class="qk" type="button"><div class="art" style="--o:-20"></div><span>Liked songs</span></button>
+            <button class="qk" type="button"><div class="art"></div><span>Night Bus Home</span></button>
+            <button class="qk" type="button"><div class="art" style="--o:160"></div><span>Train windows</span></button>
+            <button class="qk" type="button"><div class="art" style="--o:210"></div><span>Night shift</span></button>
+            <button class="qk" type="button"><div class="art" style="--o:80"></div><span>Paper Lantern EP</span></button>
+            <button class="qk" type="button"><div class="art" style="--o:-130"></div><span>Quiet hours</span></button>
+            <button class="qk" type="button"><div class="art" style="--o:30"></div><span>Salt Lamp</span></button>
+            <button class="qk" type="button"><div class="art" style="--o:-70"></div><span>Aoi Tsuru radio</span></button>
+          </div>
+          <div class="sh"><h5>Listen again<button type="button">Show all</button></h5><div class="cards">
+            <button class="card" type="button"><div class="art"></div><div class="ct"><b>Night Bus Home</b><span>Hoshi Yume</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:160"></div><div class="ct"><b>Train windows</b><span>Playlist · 42 songs</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:210"></div><div class="ct"><b>Night shift</b><span>Playlist · from Spotify</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:80"></div><div class="ct"><b>Paper Lantern EP</b><span>Hoshi Yume</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:-130"></div><div class="ct"><b>Quiet hours</b><span>Playlist · 30 songs</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:30"></div><div class="ct"><b>Salt Lamp</b><span>Mirrorlake</span></div></button>
+          </div></div>
+          <div class="sh"><h5>Made for you</h5><div class="cards">
+            <button class="card" type="button"><div class="art" style="--o:-60"></div><div class="ct"><b>Daily mix 1</b><span>Hoshi Yume, Aoi Tsuru and more</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:100"></div><div class="ct"><b>Daily mix 2</b><span>Mirrorlake, Vesper Line and more</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:190"></div><div class="ct"><b>Discovery mix</b><span>New finds, refreshed Monday</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:20"></div><div class="ct"><b>Supermix</b><span>Your favourites, shuffled</span></div></button>
+          </div></div>
+          <div class="sh"><h5>New releases<button type="button">Show all</button></h5><div class="cards">
+            <button class="card" type="button"><div class="art" style="--o:-100"></div><div class="ct"><b>Moth Hours</b><span>Album · Vesper Line</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:140"></div><div class="ct"><b>Low Tide Radio</b><span>Single · Tomo Arata</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:60"></div><div class="ct"><b>Kintsugi</b><span>Album · Aoi Tsuru</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:-40"></div><div class="ct"><b>Static Bloom</b><span>EP · Mirrorlake</span></div></button>
+          </div></div>
+          <div class="sh"><h5>More like what you play</h5></div>
+          <div class="fx">
+            <div><span class="fl2">More like Hoshi Yume</span><button class="fk" type="button" style="--o:150"><div class="fh"><div class="art" style="--o:150"></div><div class="fm"><b>Slow Ferry</b><span>Album · Mirrorlake</span></div></div><p>With Aoi Tsuru, Vesper Line, Tomo Arata and more</p></button></div>
+            <div><span class="fl2">For fans of Aoi Tsuru</span><button class="fk" type="button" style="--o:60"><div class="fh"><div class="art" style="--o:60"></div><div class="fm"><b>This is Aoi Tsuru</b><span>Playlist · Metrolist</span></div></div><p>With Kintsugi, Gold Seam, Paper Crane and more</p></button></div>
+            <div><span class="fl2">Because you played Night Bus Home</span><button class="fk" type="button" style="--o:-20"><div class="fh"><div class="art" style="--o:-20"></div><div class="fm"><b>Night Bus Radio</b><span>Radio · Metrolist</span></div></div><p>With Hoshi Yume, Mirrorlake, Salt Lamp and more</p></button></div>
+            <div><span class="fl2">For fans of Mirrorlake</span><button class="fk" type="button" style="--o:210"><div class="fh"><div class="art" style="--o:210"></div><div class="fm"><b>Static Bloom</b><span>EP · Mirrorlake</span></div></div><p>With Kitsune Radio, Vesper Line and more</p></button></div>
+          </div>
+        </div>
+
+        <!-- SEARCH -->
+        <div class="page" data-p="search">
+          <div class="pgh"><div><span class="kk">Results for</span><h4 id="sq">night bus</h4></div></div>
+          <div class="cp" role="group" aria-label="Result type"><button type="button" aria-pressed="true">All</button><button type="button" aria-pressed="false">Songs</button><button type="button" aria-pressed="false">Albums</button><button type="button" aria-pressed="false">Artists</button><button type="button" aria-pressed="false">Playlists</button><button type="button" aria-pressed="false">Videos</button></div>
+          <div class="sr">
+            <div class="top">
+              <div class="art"></div>
+              <div><h6>Night Bus Home</h6><p>Album · Hoshi Yume · 2024</p></div>
+              <div class="ft"><span class="kk">Top result</span><button class="pbtn" type="button" aria-label="Play"><svg><use href="#i-play"/></svg></button></div>
+            </div>
+            <div class="tbl" role="table" aria-label="Songs" style="--cols: minmax(0, 1fr) 52px">
+              <div class="row h" role="row"><span>Songs</span><span style="text-align:right">Time</span></div>
+              <div class="row two on" role="row"><span class="t c"><i class="art"></i><span class="st"><b>Window Seat, Rain</b><small>Hoshi Yume · Night Bus Home</small></span></span><span class="d">4:08</span></div>
+              <div class="row two" role="row"><span class="t c"><i class="art" style="--o:100"></i><span class="st"><b>Night Bus</b><small>Mirrorlake</small></span></span><span class="d">3:31</span></div>
+              <div class="row two" role="row"><span class="t c"><i class="art" style="--o:140"></i><span class="st"><b>Last Night Bus to Kamome</b><small>Tomo Arata</small></span></span><span class="d">5:02</span></div>
+              <div class="row two" role="row"><span class="t c"><i class="art" style="--o:-70"></i><span class="st"><b>Night Bus Home (Piano)</b><small>Aoi Tsuru</small></span></span><span class="d">2:48</span></div>
+            </div>
+          </div>
+          <div class="sh"><h5>Albums</h5><div class="cards">
+            <button class="card" type="button"><div class="art"></div><div class="ct"><b>Night Bus Home</b><span>Hoshi Yume · 2024</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:-100"></div><div class="ct"><b>Night Bus Sessions</b><span>Live · Mirrorlake</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:150"></div><div class="ct"><b>Nightbus</b><span>Single · Vesper Line</span></div></button>
+          </div></div>
+          <div class="sh"><h5>Artists</h5><div class="cards">
+            <button class="card rd" type="button"><div class="art" style="--o:120"></div><div class="ct"><b>Hoshi Yume</b><span>Artist</span></div></button>
+            <button class="card rd" type="button"><div class="art" style="--o:150"></div><div class="ct"><b>Mirrorlake</b><span>Artist</span></div></button>
+            <button class="card rd" type="button"><div class="art" style="--o:20"></div><div class="ct"><b>Tomo Arata</b><span>Artist</span></div></button>
+          </div></div>
+        </div>
+
+        <!-- ARTIST -->
+        <div class="page" data-p="artist">
+          <div class="wash"><div class="art rd" style="--o:120"></div><div class="meta"><span class="k">Artist</span><h4>Hoshi Yume</h4><p>184,203 monthly listeners · 3 albums</p></div></div>
+          <div class="acts"><button class="play" type="button"><svg><use href="#i-play"/></svg>Play</button><button class="ghost" type="button">Shuffle</button><button class="ghost" type="button">Start radio</button><button class="ghost" type="button">Follow</button></div>
+          <div class="sh"><h5>Popular</h5></div>
+          <div class="tbl" role="table" aria-label="Popular songs">
+            <div class="row h" role="row"><span>#</span><span>Title</span><span>Plays</span><span style="text-align:right">Time</span></div>
+            <div class="row on" role="row"><span class="n"><span class="eq" aria-label="Playing"><b></b><b></b><b></b></span></span><span class="t c"><i class="art"></i><span class="st"><b>Window Seat, Rain</b></span></span><span class="a">2.1M</span><span class="d">4:08</span></div>
+            <div class="row" role="row"><span class="n">2</span><span class="t c"><i class="art"></i><span class="st"><b>Last Stop Is Mine</b></span></span><span class="a">1.4M</span><span class="d">3:42</span></div>
+            <div class="row" role="row"><span class="n">3</span><span class="t c"><i class="art"></i><span class="st"><b>Transfer at Midnight</b></span></span><span class="a">980K</span><span class="d">3:15</span></div>
+            <div class="row" role="row"><span class="n">4</span><span class="t c"><i class="art"></i><span class="st"><b>Fare Card Blue</b></span></span><span class="a">760K</span><span class="d">2:57</span></div>
+            <div class="row" role="row"><span class="n">5</span><span class="t c"><i class="art" style="--o:80"></i><span class="st"><b>Paper Lantern</b></span></span><span class="a">612K</span><span class="d">3:20</span></div>
+          </div>
+          <div class="sh"><h5>Albums<button type="button">Show all</button></h5><div class="cards">
+            <button class="card" type="button"><div class="art"></div><div class="ct"><b>Night Bus Home</b><span>2024 · Album</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:80"></div><div class="ct"><b>Paper Lantern EP</b><span>2023 · EP</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:-30"></div><div class="ct"><b>Small Hours</b><span>2021 · Album</span></div></button>
+            <button class="card" type="button"><div class="art" style="--o:110"></div><div class="ct"><b>First Light, Last Train</b><span>2019 · Single</span></div></button>
+          </div></div>
+          <div class="sh"><h5>Fans also like</h5><div class="cards">
+            <button class="card rd" type="button"><div class="art" style="--o:-70"></div><div class="ct"><b>Aoi Tsuru</b><span>Artist</span></div></button>
+            <button class="card rd" type="button"><div class="art" style="--o:150"></div><div class="ct"><b>Mirrorlake</b><span>Artist</span></div></button>
+            <button class="card rd" type="button"><div class="art" style="--o:-110"></div><div class="ct"><b>Vesper Line</b><span>Artist</span></div></button>
+            <button class="card rd" type="button"><div class="art" style="--o:20"></div><div class="ct"><b>Tomo Arata</b><span>Artist</span></div></button>
+          </div></div>
+        </div>
+
+        <!-- DOWNLOADS -->
+        <div class="page" data-p="downloads">
+          <div class="pgh"><div><h4>Downloads</h4><p>96 songs · 2.4 GB on this device</p></div>
+            <div class="ha"><button class="ghost" type="button">Quality: High<svg class="s"><use href="#i-chev"/></svg></button><button class="ghost" type="button">Remove all</button></div></div>
+          <div class="stor">
+            <div class="bar" role="img" aria-label="2.4 GB songs, 0.3 GB cache, 0.1 GB artwork, 38 GB free"><i style="flex:0 0 5.7%;background:var(--tx)"></i><i style="flex:0 0 0.7%;background:var(--tm)"></i><i style="flex:0 0 0.3%;background:var(--tf)"></i></div>
+            <div class="lg"><span style="--c:var(--tx)"><i></i>Songs 2.4 GB</span><span style="--c:var(--tm)"><i></i>Cache 0.3 GB</span><span style="--c:var(--tf)"><i></i>Artwork 0.1 GB</span><span style="--c:var(--s3)"><i></i>38 GB free</span></div>
+          </div>
+          <div class="sh"><h5>Downloading · 3</h5></div>
+          <div class="tbl">
+            <div class="dl"><div class="art" style="--o:-100"></div><div class="st"><b>Moth Hours</b><small>Vesper Line · 9 songs</small></div><div class="bar" style="--p:72%"></div><span class="pc">72%</span><button class="ib" style="width:28px;height:28px" type="button" aria-label="Pause"><svg><use href="#i-pause"/></svg></button></div>
+            <div class="dl"><div class="art" style="--o:140"></div><div class="st"><b>Low Tide Radio</b><small>Tomo Arata · 1 song</small></div><div class="bar" style="--p:38%"></div><span class="pc">38%</span><button class="ib" style="width:28px;height:28px" type="button" aria-label="Pause"><svg><use href="#i-pause"/></svg></button></div>
+            <div class="dl"><div class="art" style="--o:60"></div><div class="st"><b>Kintsugi</b><small>Aoi Tsuru · 11 songs</small></div><div class="bar" style="--p:0%"></div><span class="pc">Queued</span><button class="ib" style="width:28px;height:28px" type="button" aria-label="Cancel"><svg class="s"><use href="#i-x"/></svg></button></div>
+          </div>
+          <div class="sh"><h5>On this device</h5></div>
+          <div class="tbl" role="table" aria-label="Downloaded songs" style="--cols: minmax(0, 1fr) 84px 64px 52px">
+            <div class="row h" role="row"><span>Title</span><span>Quality</span><span class="r">Size</span><span style="text-align:right">Time</span></div>
+            <div class="row two on" role="row"><span class="t c"><i class="art"></i><span class="st"><b>Window Seat, Rain</b><small>Hoshi Yume</small></span></span><span class="a">Opus 160</span><span class="r">4.9 MB</span><span class="d">4:08</span></div>
+            <div class="row two" role="row"><span class="t c"><i class="art"></i><span class="st"><b>Last Stop Is Mine</b><small>Hoshi Yume</small></span></span><span class="a">AAC 256</span><span class="r">7.1 MB</span><span class="d">3:42</span></div>
+            <div class="row two" role="row"><span class="t c"><i class="art" style="--o:-100"></i><span class="st"><b>Salt Lamp</b><small>Mirrorlake</small></span></span><span class="a">AAC 256</span><span class="r">5.8 MB</span><span class="d">3:02</span></div>
+            <div class="row two" role="row"><span class="t c"><i class="art"></i><span class="st"><b>Depot</b><small>Hoshi Yume</small></span></span><span class="a">Opus 160</span><span class="r">6.4 MB</span><span class="d">5:21</span></div>
+            <div class="row two" role="row"><span class="t c"><i class="art"></i><span class="st"><b>Terminus</b><small>Hoshi Yume</small></span></span><span class="a">AAC 256</span><span class="r">9.1 MB</span><span class="d">4:44</span></div>
+          </div>
+        </div>
+
+        <!-- LOCAL MUSIC -->
+        <div class="page" data-p="local">
+          <div class="pgh"><div><h4>Local Music</h4><p>1,284 files · 3 folders · scanned 2 minutes ago</p></div></div>
+          <div class="acts" style="padding-top:2px"><button class="play" type="button"><svg><use href="#i-play"/></svg>Play</button><button class="ghost" type="button">Shuffle</button><button class="ghost" type="button">Add folder</button><button class="ghost" type="button">Rescan</button></div>
+          <div class="cp" role="group" aria-label="Folder" style="padding-top:10px"><button type="button" aria-pressed="true">All folders · 1,284</button><button type="button" aria-pressed="false">~/Music · 1,102</button><button type="button" aria-pressed="false">/mnt/media/flac · 160</button><button type="button" aria-pressed="false">~/Downloads/rips · 22</button></div>
+          <div class="bn"><span><b>244 files</b> aren't matched to YouTube Music yet. They play fine, but have no synced lyrics.</span><button class="btn2" type="button">Match now</button></div>
+          <div class="tbl" role="table" aria-label="Local files" style="--cols: minmax(0, 1.4fr) minmax(0, 1fr) 88px 52px">
+            <div class="row h" role="row"><span>Title</span><span>Album</span><span>Format</span><span style="text-align:right">Time</span></div>
+            <div class="row two" role="row"><span class="t c"><i class="art" style="--o:140"></i><span class="st"><b>Kamome</b><small>Tomo Arata</small></span></span><span class="a">Harbor Lights</span><span class="a">FLAC 24/96</span><span class="d">5:12</span></div>
+            <div class="row two" role="row"><span class="t c"><i class="art" style="--o:-110"></i><span class="st"><b>Echoes</b><small>Vesper Line</small></span></span><span class="a">Moth Hours</span><span class="a">FLAC 16/44</span><span class="d">4:20</span></div>
+            <div class="row two" role="row"><span class="t c"><i class="art" style="--o:30"></i><span class="st"><b>Untitled 07</b><small>Unknown artist</small></span></span><span class="a">Unknown album</span><span class="a">MP3 320</span><span class="d">2:41</span></div>
+            <div class="row two" role="row"><span class="t c"><i class="art" style="--o:-100"></i><span class="st"><b>Salt Lamp</b><small>Mirrorlake</small></span></span><span class="a">Static Bloom</span><span class="a">Opus 128</span><span class="d">3:02</span></div>
+            <div class="row two" role="row"><span class="t c"><i class="art" style="--o:60"></i><span class="st"><b>Gold Seam</b><small>Aoi Tsuru</small></span></span><span class="a">Kintsugi</span><span class="a">FLAC 24/96</span><span class="d">4:03</span></div>
+            <div class="row two" role="row"><span class="t c"><i class="art" style="--o:190"></i><span class="st"><b>Lanterns, Slowly</b><small>Kitsune Radio</small></span></span><span class="a">Rips 2019</span><span class="a">MP3 256</span><span class="d">3:36</span></div>
+          </div>
+        </div>
+
+        <!-- HISTORY & STATS -->
+        <div class="page" data-p="history" data-src="all">
+          <div class="pgh"><div><h4>History &amp; stats</h4><p>Everything you've played, across your accounts</p></div><div class="ha"><button class="ghost" type="button">This week<svg class="s"><use href="#i-chev"/></svg></button><button class="ghost" type="button">Clear history</button></div></div>
+          <div class="cp" role="group" aria-label="Source" id="hsrc"><button type="button" data-src="all" aria-pressed="true">All sources</button><button type="button" data-src="yt" aria-pressed="false">YouTube Music</button><button type="button" data-src="sp" aria-pressed="false">Spotify</button><button type="button" data-src="app" aria-pressed="false">This app</button></div>
+          <div class="stats" style="--n:4" id="hst">
+            <div><b data-all="14.2 h" data-yt="8.8 h" data-sp="4.4 h" data-app="1.0 h">14.2 h</b><span>Listened this week</span></div>
+            <div><b data-all="311" data-yt="193" data-sp="96" data-app="22">311</b><span>Songs played</span></div>
+            <div><b data-all="86" data-yt="54" data-sp="41" data-app="9">86</b><span>Artists</span></div>
+            <div><b data-all="12 days" data-yt="9 days" data-sp="5 days" data-app="3 days">12 days</b><span>Listening streak</span></div>
+          </div>
+          <div class="hs">
+            <div class="pn" style="grid-column: 1 / -1" data-s="all">
+              <h6>Where you listen</h6>
+              <div class="sbar" role="img" aria-label="62% YouTube Music, 31% Spotify, 7% this app"><i style="flex:62;background:var(--ax)"></i><i style="flex:31;background:var(--tm)"></i><i style="flex:7;background:var(--tf)"></i></div>
+              <div class="lg2"><span><i style="background:var(--ax)"></i>YouTube Music · 62%<small>from your account history</small></span><span><i style="background:var(--tm)"></i>Spotify · 31%<small>from your account, last 50 plays</small></span><span><i style="background:var(--tf)"></i>This app · 7%<small>counted here, incl. local files and offline</small></span></div>
+            </div>
+            <div class="pn">
+              <h6>Listening by day</h6>
+              <div class="bars" role="img" aria-label="Minutes per day this week"><i style="--v:38%" title="Mon"></i><i style="--v:62%" title="Tue"></i><i style="--v:45%" title="Wed"></i><i style="--v:80%" title="Thu"></i><i style="--v:55%" title="Fri"></i><i style="--v:30%" title="Sat"></i><i class="on" style="--v:92%" title="Today"></i></div>
+              <div class="bl"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Today</span></div>
+            </div>
+            <div class="pn">
+              <h6>Top artists</h6>
+              <div class="rk" data-s="yt sp app"><span class="nb">1</span><i class="art" style="--o:120"></i><div><b>Hoshi Yume</b><div class="m"><i style="--w:100%"></i></div></div><span class="pc2">94 plays</span></div><div class="rk" data-s="yt sp"><span class="nb">2</span><i class="art" style="--o:-70"></i><div><b>Aoi Tsuru</b><div class="m"><i style="--w:65%"></i></div></div><span class="pc2">61 plays</span></div><div class="rk" data-s="yt app"><span class="nb">3</span><i class="art" style="--o:150"></i><div><b>Mirrorlake</b><div class="m"><i style="--w:51%"></i></div></div><span class="pc2">48 plays</span></div><div class="rk" data-s="sp"><span class="nb">4</span><i class="art" style="--o:-110"></i><div><b>Vesper Line</b><div class="m"><i style="--w:35%"></i></div></div><span class="pc2">33 plays</span></div><div class="rk" data-s="app"><span class="nb">5</span><i class="art" style="--o:140"></i><div><b>Tomo Arata</b><div class="m"><i style="--w:29%"></i></div></div><span class="pc2">27 plays</span></div>
+            </div>
+          </div>
+          <div class="sh"><h5>Top songs</h5></div>
+          <div class="tbl" role="table" aria-label="Top songs" style="--cols: 36px minmax(0, 1.6fr) minmax(0, 1fr) 40px 64px">
+            <div class="row" role="row" data-s="yt"><span class="n">1</span><span class="t c"><i class="art" style="--o:50"></i><span class="st"><b>Window Seat, Rain</b></span></span><span class="a">Hoshi Yume</span><span><i class="sb">YT</i></span><span class="d">18 plays</span></div><div class="row" role="row" data-s="sp"><span class="n">2</span><span class="t c"><i class="art" style="--o:50"></i><span class="st"><b>Last Stop Is Mine</b></span></span><span class="a">Hoshi Yume</span><span><i class="sb">SP</i></span><span class="d">14 plays</span></div><div class="row" role="row" data-s="yt"><span class="n">3</span><span class="t c"><i class="art" style="--o:60"></i><span class="st"><b>Gold Seam</b></span></span><span class="a">Aoi Tsuru</span><span><i class="sb">YT</i></span><span class="d">11 plays</span></div><div class="row" role="row" data-s="app"><span class="n">4</span><span class="t c"><i class="art" style="--o:-100"></i><span class="st"><b>Salt Lamp</b></span></span><span class="a">Mirrorlake</span><span><i class="sb">ML</i></span><span class="d">9 plays</span></div><div class="row" role="row" data-s="app"><span class="n">5</span><span class="t c"><i class="art" style="--o:140"></i><span class="st"><b>Kamome</b></span></span><span class="a">Tomo Arata</span><span><i class="sb">ML</i></span><span class="d">8 plays</span></div>
+          </div>
+          <div class="sh"><h5>Recently played</h5></div>
+          <div class="sh" style="padding-top:0"><span class="kk">Today</span></div>
+          <div class="tbl" role="table" aria-label="Played today" style="--cols: 56px minmax(0, 1.6fr) minmax(0, 1fr) 40px 52px">
+            <div class="row on" role="row" data-s="app"><span class="n">Now</span><span class="t c"><i class="art" style="--o:50"></i><span class="st"><b>Window Seat, Rain</b></span></span><span class="a">Hoshi Yume</span><span><i class="sb">ML</i></span><span class="d">4:08</span></div><div class="row" role="row" data-s="sp"><span class="n">21:10</span><span class="t c"><i class="art" style="--o:50"></i><span class="st"><b>Last Stop Is Mine</b></span></span><span class="a">Hoshi Yume</span><span><i class="sb">SP</i></span><span class="d">3:42</span></div><div class="row" role="row" data-s="yt"><span class="n">20:52</span><span class="t c"><i class="art" style="--o:-100"></i><span class="st"><b>Salt Lamp</b></span></span><span class="a">Mirrorlake</span><span><i class="sb">YT</i></span><span class="d">3:02</span></div><div class="row" role="row" data-s="app"><span class="n">20:44</span><span class="t c"><i class="art" style="--o:140"></i><span class="st"><b>Kamome</b></span></span><span class="a">Tomo Arata</span><span><i class="sb">ML</i></span><span class="d">5:12</span></div>
+          </div>
+          <div class="sh" style="padding-top:12px"><span class="kk">Yesterday</span></div>
+          <div class="tbl" role="table" aria-label="Played yesterday" style="--cols: 56px minmax(0, 1.6fr) minmax(0, 1fr) 40px 52px">
+            <div class="row" role="row" data-s="yt"><span class="n">23:18</span><span class="t c"><i class="art" style="--o:60"></i><span class="st"><b>Gold Seam</b></span></span><span class="a">Aoi Tsuru</span><span><i class="sb">YT</i></span><span class="d">4:03</span></div><div class="row" role="row" data-s="sp"><span class="n">23:11</span><span class="t c"><i class="art" style="--o:-110"></i><span class="st"><b>Echoes</b></span></span><span class="a">Vesper Line</span><span><i class="sb">SP</i></span><span class="d">4:20</span></div><div class="row" role="row" data-s="yt"><span class="n">22:57</span><span class="t c"><i class="art" style="--o:50"></i><span class="st"><b>Terminus</b></span></span><span class="a">Hoshi Yume</span><span><i class="sb">YT</i></span><span class="d">4:44</span></div>
+          </div>
+        </div>
+
+        <!-- SETTINGS -->
+        <div class="page" data-p="settings">
+          <div class="pgh"><div><h4>Settings</h4></div></div>
+          <div class="set">
+            <nav class="sc" aria-label="Settings sections">
+              <button type="button" data-s="appearance" aria-current="true">Appearance</button>
+              <button type="button" data-s="playback" aria-current="false">Playback</button>
+              <button type="button" data-s="accounts" aria-current="false">Accounts</button>
+              <button type="button" data-s="shortcuts" aria-current="false">Shortcuts</button>
+            </nav>
+            <div>
+              <div class="sp on" data-s="appearance"><h5>Appearance</h5><div class="grp">
+                <div class="sg"><div><b>Theme</b><span class="d">One source colour drives every surface</span></div><div class="swa" id="swatches" role="group" aria-label="Theme"></div></div>
+                <div class="sg"><div><b>Mode</b></div><div class="seg" role="group" aria-label="Mode"><button type="button" data-md="dark" aria-pressed="true">Dark</button><button type="button" data-md="light" aria-pressed="false">Light</button></div></div>
+                <div class="sg"><div><b>Row density</b><span class="d">Track rows are 44px or 34px</span></div><div class="seg" role="group" aria-label="Density"><button type="button" data-dn="comfortable" aria-pressed="true">Comfortable</button><button type="button" data-dn="compact" aria-pressed="false">Compact</button></div></div>
+                <div class="sg"><div><b>Tint headers from artwork</b><span class="d">The wash on album and artist pages</span></div><button class="sw" type="button" role="switch" aria-checked="true" aria-label="Tint headers from artwork"></button></div>
+                <div class="sg"><div><b>Reduce motion</b><span class="d">Cross-fades instead of springs</span></div><button class="sw" type="button" role="switch" aria-checked="false" aria-label="Reduce motion"></button></div>
+              </div></div>
+              <div class="sp" data-s="playback"><h5>Playback</h5><div class="grp">
+                <div class="sg"><div><b>Audio quality</b><span class="d">Streaming and new downloads</span></div><div class="seg" role="group" aria-label="Quality"><button type="button" aria-pressed="false">Low</button><button type="button" aria-pressed="false">Normal</button><button type="button" aria-pressed="true">High</button></div></div>
+                <div class="sg"><div><b>Normalise volume</b><span class="d">Evens out loud and quiet tracks</span></div><button class="sw" type="button" role="switch" aria-checked="true" aria-label="Normalise volume"></button></div>
+                <div class="sg"><div><b>Skip silence</b></div><button class="sw" type="button" role="switch" aria-checked="false" aria-label="Skip silence"></button></div>
+                <div class="sg"><div><b>Crossfade</b></div><div class="rng"><div class="bar" style="--r:67%"><i></i></div>4 s</div></div>
+                <div class="sg"><div><b>Output device</b></div><button class="sel" type="button">PipeWire · Built-in Audio<svg class="s"><use href="#i-chev"/></svg></button></div>
+              </div></div>
+              <div class="sp" data-s="accounts"><h5>Accounts</h5><div class="grp">
+                <div class="sg"><div class="tile">YT</div><div><b>YouTube Music</b><span class="d">Signed in as Hireri · cookies in the system keyring</span></div><div class="ctl2"><button class="btn2" type="button">Sign out</button></div></div>
+                <div class="sg"><div class="tile">SP</div><div><b>Spotify</b><span class="d">Importing 412 of 640 songs</span></div><div class="ctl2"><button class="btn2" type="button" data-go="import">View import</button><button class="btn2" type="button">Disconnect</button></div></div>
+              </div></div>
+              <div class="sp" data-s="shortcuts"><h5>Shortcuts</h5><div class="grp">
+                <div class="sg"><b>Command palette</b><kbd>Ctrl K</kbd></div>
+                <div class="sg"><b>Play or pause</b><kbd>Space</kbd></div>
+                <div class="sg"><b>Next or previous song</b><kbd>Ctrl →</kbd></div>
+                <div class="sg"><b>Focus search</b><kbd>/</kbd></div>
+                <div class="sg"><b>Lyrics or queue</b><kbd>L</kbd></div>
+                <div class="sg"><b>Collapse library</b><kbd>Ctrl B</kbd></div>
+                <div class="sg"><b>Back</b><kbd>Alt ←</kbd></div>
+              </div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SPOTIFY IMPORT -->
+        <div class="page" data-p="import">
+          <div class="pgh"><div><h4>Spotify import</h4><p>412 of 640 songs checked · 4 playlists</p></div><div class="ha"><button class="ghost" type="button">Pause</button><button class="ghost" type="button">Accept all ≥ 90%</button></div></div>
+          <div class="stor"><div class="bar" role="img" aria-label="64% checked"><i style="flex:0 0 64%;background:var(--tx)"></i></div></div>
+          <div class="stats" style="--n:3"><div><b>371</b><span>Matched</span></div><div><b>29</b><span>Needs review</span></div><div><b>12</b><span>Not found</span></div></div>
+          <div class="cp" role="group" aria-label="Filter" style="padding-top:8px"><button type="button" aria-pressed="true">Needs review · 29</button><button type="button" aria-pressed="false">Not found · 12</button><button type="button" aria-pressed="false">Matched · 371</button></div>
+          <div class="tbl" role="list" aria-label="Uncertain matches">
+            <div class="rv h"><span>From Spotify</span><span></span><span>Best match on YouTube Music</span><span style="width:68px"></span></div>
+            <div class="rv"><div class="pr"><i class="art" style="--o:140"></i><span class="st"><b>Weightless</b><small>Tomo Arata · 3:48</small></span></div><svg class="s"><use href="#i-arrow"/></svg><div class="pr"><i class="art" style="--o:140"></i><span class="st"><b>Weightless (Extended Mix)</b><small>64% · longer, 6:02</small></span></div><div class="ac"><button class="ib" type="button" aria-label="Use this match" title="Use this match"><svg class="s"><use href="#i-check"/></svg></button><button class="ib" type="button" aria-label="Skip" title="Skip"><svg class="s"><use href="#i-x"/></svg></button></div></div>
+            <div class="rv"><div class="pr"><i class="art" style="--o:80"></i><span class="st"><b>Paper Lantern</b><small>Hoshi Yume · 3:20</small></span></div><svg class="s"><use href="#i-arrow"/></svg><div class="pr"><i class="art" style="--o:80"></i><span class="st"><b>Paper Lantern (Live at Hall A)</b><small>71% · live version, 4:11</small></span></div><div class="ac"><button class="ib" type="button" aria-label="Use this match" title="Use this match"><svg class="s"><use href="#i-check"/></svg></button><button class="ib" type="button" aria-label="Skip" title="Skip"><svg class="s"><use href="#i-x"/></svg></button></div></div>
+            <div class="rv"><div class="pr"><i class="art" style="--o:-100"></i><span class="st"><b>Salt Lamp</b><small>Mirrorlake · 3:02</small></span></div><svg class="s"><use href="#i-arrow"/></svg><div class="pr"><i class="art" style="--o:-100"></i><span class="st"><b>Salt Lamp</b><small>88% · Mirrorlake, Ume</small></span></div><div class="ac"><button class="ib" type="button" aria-label="Use this match" title="Use this match"><svg class="s"><use href="#i-check"/></svg></button><button class="ib" type="button" aria-label="Skip" title="Skip"><svg class="s"><use href="#i-x"/></svg></button></div></div>
+            <div class="rv"><div class="pr"><i class="art" style="--o:-110"></i><span class="st"><b>Echoes (Remastered)</b><small>Vesper Line · 4:20</small></span></div><svg class="s"><use href="#i-arrow"/></svg><div class="pr"><i class="art" style="--o:-110"></i><span class="st"><b>Echoes</b><small>93% · original, 4:20</small></span></div><div class="ac"><button class="ib" type="button" aria-label="Use this match" title="Use this match"><svg class="s"><use href="#i-check"/></svg></button><button class="ib" type="button" aria-label="Skip" title="Skip"><svg class="s"><use href="#i-x"/></svg></button></div></div>
+          </div>
+        </div>
+      </main>
+
+      <aside class="lib" aria-label="Library">
+        <nav class="nav" aria-label="Pages">
+          <button class="nv" type="button" data-go="home"><svg><use href="#i-home"/></svg><span>Home</span></button>
+          <button class="nv" type="button" data-go="downloads"><svg><use href="#i-imp"/></svg><span>Downloads</span></button>
+          <button class="nv" type="button" data-go="local"><svg class="s"><use href="#i-dir"/></svg><span>Local Music</span></button>
+          <button class="nv" type="button" data-go="history"><svg class="s"><use href="#i-hist"/></svg><span>History &amp; stats</span></button>
+        </nav>
+        <div class="hd"><button class="ib collapse" id="col" type="button" aria-label="Collapse library" aria-expanded="true"><svg class="s"><use href="#i-col"/></svg></button><b>Your library</b></div>
+        <div class="lrow"><label class="lsrch"><svg class="s"><use href="#i-search"/></svg><input id="ls" type="search" placeholder="Search your library" aria-label="Search your library"></label><button class="ib" id="vb" type="button" aria-label="Sort and view" aria-haspopup="menu" aria-expanded="false"><svg class="s"><use href="#i-vl"/></svg></button></div>
+        <div class="fl" role="group" aria-label="Filter"><button type="button" aria-pressed="true">All</button><button type="button" aria-pressed="false">Playlists</button><button type="button" aria-pressed="false">Albums</button><button type="button" aria-pressed="false">Artists</button></div>
+        <div class="items" data-lv="list">
+          <button class="li" type="button" data-go="album" title="Liked songs" data-by="You"><div class="art" style="--o:-20"></div><div><b>Liked songs</b><span>Playlist · 812 songs</span></div></button>
+          <button class="li" type="button" data-go="album" aria-current="true" title="Night Bus Home" data-by="Hoshi Yume"><div class="art"></div><div><b>Night Bus Home</b><span>Album · Hoshi Yume</span></div></button>
+          <button class="li rd" type="button" data-go="artist" title="Hoshi Yume" data-by="Hoshi Yume"><div class="art" style="--o:120"></div><div><b>Hoshi Yume</b><span>Artist</span></div></button>
+          <button class="li" type="button" data-go="album" title="Train windows" data-by="You"><div class="art" style="--o:160"></div><div><b>Train windows</b><span>Playlist · 42 songs</span></div></button>
+          <button class="li" type="button" data-go="album" title="Night shift" data-by="You"><div class="art" style="--o:210"></div><div><b>Night shift</b><span>Playlist · from Spotify</span></div></button>
+          <button class="li rd" type="button" data-go="artist" title="Aoi Tsuru" data-by="Aoi Tsuru"><div class="art" style="--o:-70"></div><div><b>Aoi Tsuru</b><span>Artist</span></div></button>
+          <button class="li" type="button" data-go="album" title="Paper Lantern EP" data-by="Hoshi Yume"><div class="art" style="--o:80"></div><div><b>Paper Lantern EP</b><span>Album · Hoshi Yume</span></div></button>
+          <button class="li" type="button" data-go="album" title="Downloads" data-by="You"><div class="art" style="--o:30"></div><div><b>Downloads</b><span>Playlist · 96 songs</span></div></button>
+          <button class="li" type="button" data-go="album" title="Quiet hours" data-by="You"><div class="art" style="--o:-130"></div><div><b>Quiet hours</b><span>Playlist · 30 songs</span></div></button>
+        </div>
+      </aside>
+      <div class="menu" id="menu" role="menu" hidden>
+        <div class="mh"><b>Hireri</b><span>YouTube Music · Spotify</span></div>
+        <button type="button" role="menuitem" data-go="settings" data-set="appearance">Settings<svg class="s"><use href="#i-gear"/></svg></button>
+        <button type="button" role="menuitem" data-go="settings" data-set="accounts">Accounts</button>
+        <button type="button" role="menuitem" data-go="settings" data-set="shortcuts">Keyboard shortcuts</button>
+        <button type="button" role="menuitem" data-go="import">Spotify import</button>
+        <button type="button" role="menuitem" class="mut">Sign out</button>
+      </div>
+      <div class="menu vm" id="vm" role="menu" hidden>
+        <span class="kk">Sort by</span>
+        <button type="button" role="menuitemradio" aria-checked="true" data-sort="recents">Recents<svg class="s"><use href="#i-check"/></svg></button>
+        <button type="button" role="menuitemradio" aria-checked="false" data-sort="added">Recently added<svg class="s"><use href="#i-check"/></svg></button>
+        <button type="button" role="menuitemradio" aria-checked="false" data-sort="alpha">Alphabetical<svg class="s"><use href="#i-check"/></svg></button>
+        <button type="button" role="menuitemradio" aria-checked="false" data-sort="creator">Creator<svg class="s"><use href="#i-check"/></svg></button>
+        <span class="kk">View as</span>
+        <div class="vseg" role="group" aria-label="View as">
+          <button type="button" data-lv="compact" aria-pressed="false" aria-label="Compact list" title="Compact list"><svg class="s"><use href="#i-vc"/></svg></button>
+          <button type="button" data-lv="list" aria-pressed="true" aria-label="List" title="List"><svg class="s"><use href="#i-vl"/></svg></button>
+          <button type="button" data-lv="grid" aria-pressed="false" aria-label="Grid of covers" title="Grid of covers"><svg class="s"><use href="#i-vg"/></svg></button>
+          <button type="button" data-lv="grid2" aria-pressed="false" aria-label="Grid with titles" title="Grid with titles"><svg class="s"><use href="#i-grid"/></svg></button>
+        </div>
+      </div>
+      <div class="pty" id="party" role="dialog" aria-label="Listening party" hidden>
+        <div class="top2"><b>Listening party</b><span class="pt-on">Live · 3 listening</span></div>
+        <div class="pt-off">
+          <p>Listen in sync with friends. Everyone hears the same song at the same moment.</p>
+          <button class="btn2 wide" type="button" data-pt="on">Start a party</button>
+          <div class="jn"><input type="text" placeholder="Enter a party code" aria-label="Party code" autocomplete="off"><button class="btn2" type="button">Join</button></div>
+        </div>
+        <div class="pt-on">
+          <div class="code"><div><span class="kk">Party code</span><b>METRO-4F7K</b></div><button class="btn2" id="cl" type="button">Copy link</button></div>
+          <div class="ppl">
+            <span class="kk">Listeners</span>
+            <div class="pp2"><i class="av">HY</i><div class="st"><b>Hireri (you)</b><small>Host</small></div><em>Listening</em></div>
+            <div class="pp2"><i class="av">MK</i><div class="st"><b>Mika</b><small>Guest</small></div><em>Listening</em><button class="ib" style="width:28px;height:28px" type="button" aria-label="Remove Mika"><svg class="s"><use href="#i-x"/></svg></button></div>
+            <div class="pp2"><i class="av">RN</i><div class="st"><b>Ren</b><small>Guest</small></div><em>Syncing…</em><button class="ib" style="width:28px;height:28px" type="button" aria-label="Remove Ren"><svg class="s"><use href="#i-x"/></svg></button></div>
+          </div>
+          <div class="ppl">
+            <span class="kk">Guests can</span>
+            <div class="sg"><b>Control playback</b><button class="sw" type="button" role="switch" aria-checked="false" aria-label="Guests can control playback"></button></div>
+            <div class="sg"><b>Add to the queue</b><button class="sw" type="button" role="switch" aria-checked="true" aria-label="Guests can add to the queue"></button></div>
+          </div>
+          <button class="btn2 end" type="button" data-pt="off">End party</button>
+        </div>
+      </div>
+      <div class="pal" id="pal" role="dialog" aria-label="Command palette">
+        <div class="pbox">
+          <label class="pin"><svg class="s"><use href="#i-search"/></svg><input id="pq" type="text" placeholder="Search or type a command" aria-label="Command palette" autocomplete="off"></label>
+          <div class="pres">
+            <div class="pgr"><span class="kk">Go to</span>
+              <button class="pi sel" type="button" data-go="home"><svg><use href="#i-home"/></svg><span>Home</span></button>
+              <button class="pi" type="button" data-go="downloads"><svg><use href="#i-imp"/></svg><span>Downloads</span></button>
+              <button class="pi" type="button" data-go="local"><svg class="s"><use href="#i-dir"/></svg><span>Local Music</span></button>
+              <button class="pi" type="button" data-go="history"><svg class="s"><use href="#i-hist"/></svg><span>History &amp; stats</span></button>
+              <button class="pi" type="button" data-go="settings" data-set="appearance"><svg class="s"><use href="#i-gear"/></svg><span>Settings</span></button>
+            </div>
+            <div class="pgr"><span class="kk">Commands</span>
+              <button class="pi" type="button" data-cmd="player"><svg class="s"><use href="#i-colr"/></svg><span>Show or hide the player</span></button>
+              <button class="pi" type="button" data-cmd="party"><svg class="s"><use href="#i-party"/></svg><span>Listening party</span></button>
+              <button class="pi" type="button" data-cmd="lib"><svg class="s"><use href="#i-col"/></svg><span>Collapse or expand the library</span><kbd>Ctrl B</kbd></button>
+              <button class="pi" type="button" data-go="import"><svg><use href="#i-imp"/></svg><span>Review Spotify import</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="rz rz-l" id="rzl" role="separator" aria-orientation="vertical" aria-label="Resize library" aria-valuemin="200" aria-valuemax="360" aria-valuenow="264" tabindex="0"></div>
+      <div class="rz rz-r" id="rzr" role="separator" aria-orientation="vertical" aria-label="Resize player" aria-valuemin="260" aria-valuemax="400" aria-valuenow="308" tabindex="0"></div>
+      <div class="mini" aria-label="Mini player">
+        <button class="who" type="button" data-mv="art" aria-label="Open player"><div class="art"></div><div class="tt"><b>Window Seat, Rain</b><span>Hoshi Yume</span></div></button>
+        <div class="mb"><button class="ib" type="button" aria-label="Previous"><svg><use href="#i-rw"/></svg></button><button class="ib pp" type="button" aria-label="Play"><svg><use href="#i-play"/></svg></button><button class="ib" type="button" aria-label="Next"><svg><use href="#i-ff"/></svg></button></div>
+        <i class="sep"></i>
+        <button class="ib" type="button" data-mv="lyrics" aria-label="Lyrics"><svg class="s"><use href="#i-lyr"/></svg></button>
+        <button class="ib" type="button" data-mv="queue" aria-label="Queue"><svg class="s"><use href="#i-que"/></svg></button>
+        <div class="pg"><i></i></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap" style="margin-top:56px">
+  <section>
+    <div class="grid2">
+      <div><h3>Titlebar · 52px</h3><p>Brand at the left edge, aligned over the library. Back and forward sit beside one global search that reaches YouTube Music; the library has its own search for saved items only, so the two never compete. The right side holds the Spotify import progress, notifications, the listening party button and the account menu, which is also where the theme and settings live.</p></div>
+      <div><h3>Player · 308px card, right</h3><p>The player is its own card, like the content, with a 10px gap between them. The cover is the default view: it runs the full width of the card and its lower edge fades into a blurred copy of itself that fills the card, which is always dark so text stays legible on any art. Lyrics and Queue each replace it with a compact header (small cover, title, artist, favourite, more) and keep the scrubber, transport and volume in the same place, so nothing the thumb or cursor learned moves. The top half of the card is one flexible slot for the cover, the lyrics or the queue; the scrubber, transport, volume and bottom row stay anchored below it in every view, so nothing there moves when you switch. In Lyrics and Queue the title row slides up beside a small cover (the big cover shrinks into it) and the list fills the slot under it. The bottom row switches views; the middle of that row is a three-part pill for shuffle, repeat and endless, which keeps adding recommendations when the queue ends (the queue previews them under "Endless"). The header above the cover holds the album name and the button that collapses the player. Collapsing slides the card to the right until only a 56px sliver is left at the window edge: the left edge of the cover and its blurred backdrop, under a fade that is part of the card, so it slides in with it, solid on the left and still 60% opaque on the right, with a chevron in the middle. The whole sliver is the button that reopens it. A small floating pill centred on the window then carries cover, title, previous/play/next, a thin progress line, and Lyrics and Queue buttons that reopen the player on that view; tapping the cover or title reopens it on the cover. Volume and the scrubber live in the full player. The whole card scrolls: a square cover, the controls under it, then two info cards (About the artist with a Follow button, and Credits), so a tall player has no dead space and a short one just scrolls. The cards stay under the controls in Lyrics and Queue too; there the lyrics or queue keep at least 380px and the card scrolls to reach them.</p></div>
+      <div><h3>Content</h3><p>The header wash is the one place colour from art appears. Track rows are 44px with tabular durations and a tonal hover. The playing row is the only one with accent text. Rows virtualise, since Liked Songs can pass 5,000 items.</p></div>
+      <div><h3>Library · 264px, left</h3><p>Four page buttons (Home, Downloads, Local Music, History &amp; stats) sit at the top; there is no separate Library page, because the list below them is the library, then the library with its own search, a sort and view button, filter pills and a list that shows the open item. The button opens Sort by (recents, recently added, alphabetical, creator) and View as: compact list with a dot between title and subtext, the list with covers, a grid of covers only, or a grid with title and subtext under each. Its collapse button sits on the left of the header. Collapsing to 68px only trims text: every icon, cover and the button itself stay exactly where they were, the search stays as an icon, and the filter row shrinks to zero height.</p></div>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th>Window width</th><th>Behaviour</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1180px and up</td><td>All four regions. The library is expanded or collapsed by the user.</td></tr>
+        <tr><td class="num">960 to 1180px</td><td>The library collapses on its own; the player stays open.</td></tr>
+        <tr><td class="num">Under 960px</td><td>The player becomes a bottom mini bar that opens full height over the content, as on the phone. Minimum window is 800 by 560.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section id="pages">
+    <span class="eyebrow">5 · Pages</span>
+    <h2>Every page is built from the same few parts.</h2>
+    <p>Pages reuse the shell, the 44px row, the cover-art header wash and one shelf of 132px cards, so a new page costs a layout rather than a new look. Nothing below adds a colour or a control the playlist page doesn't already have.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Page</th><th>Built from</th><th>Decisions</th></tr></thead>
+      <tbody>
+        <tr><td>Home</td><td>Mood chips, quick-pick tiles, card shelves, feature cards</td><td>No hero banner. Quick picks are the eight things you reopen most, as flat tiles (four across when the page is wide). Shelves scroll sideways. The page ends with large portrait cards, each labelled with why it is there ("More like Hoshi Yume"), art filling the card, and the other artists on it at the bottom.</td></tr>
+        <tr><td>Search</td><td>Top result, song rows, shelves</td><td>The titlebar box searches YouTube Music; <code>Enter</code> lands here. Type chips narrow it. Library search stays in the sidebar.</td></tr>
+        <tr><td>Artist</td><td>Wash header with round art, rows, shelves</td><td>Popular songs show play counts instead of the artist column. Artists are always round, albums square.</td></tr>
+        <tr><td>Downloads</td><td>Storage bar, progress rows, table</td><td>Active downloads come first and are the only place a progress bar appears. Quality and size are columns, not a settings trip.</td></tr>
+        <tr><td>Local Music</td><td>Folder chips, info bar, table</td><td>Files that aren't matched to YouTube Music get one bar with a Match now action, not a warning on every row. A Format column shows FLAC depth and bitrate.</td></tr>
+        <tr><td>History &amp; stats</td><td>Source chips, stat tiles, panels, ranked lists, day-grouped rows</td><td>One page for what you played and how much, across YouTube Music, Spotify and this app. The source chips filter every list and swap the totals; each row carries a YT, SP or ML badge. YouTube Music history comes from the account; Spotify is limited to what its web player exposes (recent plays, not full history); plays from this app, including local files and offline listening, are counted locally and are the only source that is complete.</td></tr>
+        <tr><td>Settings</td><td>Category list, one panel at a time</td><td>Appearance is live: swatches, mode and density re-theme the shell behind it. Shortcuts are listed so they can be rebound later.</td></tr>
+        <tr><td>Spotify import</td><td>Progress, tiles, review rows</td><td>Each uncertain track sits next to its best match with the reason it is uncertain. Accept or skip per row, or accept everything above 90%.</td></tr>
+        <tr><td>Listening party</td><td>Popover from the titlebar</td><td>The button sits beside the account pill and shows a dot while a party is live. Not in a party: start one or join with a code. In one: code and copy-link, who is listening and their sync state, two guest permissions, End party.</td></tr>
+        <tr><td>Palette and account menu</td><td>Overlay, popover</td><td><code>Ctrl K</code> or the hint in the search box. Typing filters, arrows move, <code>Enter</code> runs. The menu holds settings, accounts, shortcuts and sign out.</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note"><strong>Not designed yet:</strong> Explore, Charts, Podcasts and the full-height player below 960px. Home's mood chips stand in for Moods.</p>
+  </section>
+
+  <section id="open">
+    <span class="eyebrow">6 · Open questions</span>
+    <h2>What I'd settle before building</h2>
+    <ol class="q">
+      <li><strong>Audio engine.</strong> gpui has no audio. libmpv gives codecs and buffering for free but adds a native dependency; symphonia with rodio is pure Rust but means writing HTTP streaming and seeking. I'd prototype with libmpv.</li>
+      <li><strong>Who owns the library database.</strong> If the daemon owns it, the client stays thin and the Android schema can be shared. If the client owns it, offline start-up is faster. I'd start with the daemon.</li>
+      <li><strong>Packaging the JVM.</strong> A bundled runtime from <code>jlink</code> is the dependable route; a native build would be smaller but may not survive the InnerTube dependencies.</li>
+      <li><strong>gpui versus gpui-component.</strong> The shell above needs lists, tabs, an input and a palette. <code>gpui-component</code> covers those on a pinned snapshot, but a hello-world on your machine should confirm it renders on Wayland before we commit.</li>
+      <li><strong>Explore, Charts and Podcasts.</strong> Android has them as screens. I would leave them out of the first desktop release and let Home and Search cover discovery; say if any should get a sidebar button.</li>
+      <li><strong>Login helper on Windows and macOS.</strong> Only Linux was tested; the helper design assumes wry behaves the same elsewhere.</li>
+    </ol>
+  </section>
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var mock = $('mock'), src = $('src'), json = $('json');
+  var presets = [
+    { n: 'Indigo', hex: '#6a82ff', mode: 'dark' },
+    { n: 'Ember', hex: '#e8743b', mode: 'dark' },
+    { n: 'Moss', hex: '#5a9a6a', mode: 'light' },
+    { n: 'Harbor', hex: '#2f6fa8', mode: 'light' },
+    { n: 'Graphite', hex: '#8a8f99', mode: 'dark' }
+  ];
+  var state = { hex: '#6a82ff', mode: 'dark', name: 'Indigo', dense: false };
+
+  // sRGB hex to OKLCH, enough to read hue and chroma from the picked colour.
+  function oklch(hex) {
+    var v = [1, 3, 5].map(function (i) {
+      var c = parseInt(hex.slice(i, i + 2), 16) / 255;
+      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    });
+    var l = Math.cbrt(0.4122214708 * v[0] + 0.5363325363 * v[1] + 0.0514459929 * v[2]);
+    var m = Math.cbrt(0.2119034982 * v[0] + 0.6806995451 * v[1] + 0.1073969566 * v[2]);
+    var s = Math.cbrt(0.0883024619 * v[0] + 0.2817188376 * v[1] + 0.6299787005 * v[2]);
+    var A = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+    var B = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+    return { c: Math.hypot(A, B), h: (Math.atan2(B, A) * 180 / Math.PI + 360) % 360 };
+  }
+
+  function apply() {
+    var o = oklch(state.hex);
+    var ac = Math.min(Math.max(o.c, 0.02), 0.2);
+    mock.style.setProperty('--h', o.h.toFixed(1));
+    mock.style.setProperty('--ac', ac.toFixed(3));
+    mock.style.setProperty('--nc', Math.min(o.c * 0.1, 0.018).toFixed(3));
+    mock.dataset.mode = state.mode;
+    mock.dataset.density = state.dense ? 'compact' : 'comfortable';
+    $('m-dark').setAttribute('aria-pressed', state.mode === 'dark');
+    $('m-light').setAttribute('aria-pressed', state.mode === 'light');
+    $('m-dens').setAttribute('aria-pressed', state.dense);
+    src.value = state.hex;
+    [].forEach.call($('swatches').children, function (b) { b.setAttribute('aria-pressed', b.title === state.name); });
+    [].forEach.call(document.querySelectorAll('[data-md]'), function (b) { b.setAttribute('aria-pressed', b.dataset.md === state.mode); });
+    [].forEach.call(document.querySelectorAll('[data-dn]'), function (b) { b.setAttribute('aria-pressed', (b.dataset.dn === 'compact') === state.dense); });
+    [].forEach.call($('presets').children, function (b) { b.setAttribute('aria-pressed', b.textContent === state.name); });
+    json.textContent = JSON.stringify({
+      name: state.name, mode: state.mode, source: state.hex,
+      density: state.dense ? 'compact' : 'comfortable',
+      radius: { art: 6, control: 8 },
+      overrides: { accent: null }
+    }, null, 2);
+  }
+
+  presets.forEach(function (p) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'chip-b'; b.textContent = p.n;
+    b.addEventListener('click', function () { state.hex = p.hex; state.mode = p.mode; state.name = p.n; apply(); });
+    $('presets').appendChild(b);
+    var sw = b.cloneNode(false);
+    sw.className = ''; sw.textContent = ''; sw.title = p.n; sw.style.background = p.hex;
+    sw.addEventListener('click', function () { b.click(); });
+    $('swatches').appendChild(sw);
+  });
+  [].forEach.call(document.querySelectorAll('[data-md]'), function (b) { b.addEventListener('click', function () { state.mode = b.dataset.md; apply(); }); });
+  [].forEach.call(document.querySelectorAll('[data-dn]'), function (b) { b.addEventListener('click', function () { state.dense = b.dataset.dn === 'compact'; apply(); }); });
+  src.addEventListener('input', function () { state.hex = src.value; state.name = 'Custom'; apply(); });
+  $('m-dark').addEventListener('click', function () { state.mode = 'dark'; apply(); });
+  $('m-light').addEventListener('click', function () { state.mode = 'light'; apply(); });
+  $('m-dens').addEventListener('click', function () { state.dense = !state.dense; apply(); });
+  apply();
+  // Player view, player collapse and library collapse. Reuses the theme state above.
+  var pl = $('pl');
+  // FLIP: measure, switch the view, then play each moved element from its old box to its new one.
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)');
+  function flip(el, a, scale) {
+    var b = el.getBoundingClientRect();
+    if (!a || !a.width || !b.width) return;
+    var k = scale ? 'scale(' + a.width / b.width + ',' + a.height / b.height + ')' : '';
+    el.animate([{ transformOrigin: '0 0', transform: 'translate(' + (a.left - b.left) + 'px,' + (a.top - b.top) + 'px) ' + k }, { transformOrigin: '0 0', transform: 'none' }],
+      { duration: 320, easing: 'cubic-bezier(0.32, 0.72, 0, 1)' });
+  }
+  function setView(v) {
+    var from = pl.dataset.view, moved = pl.querySelectorAll('.id .tt, .id .ib, .id .th, .cover');
+    var snap = reduce.matches || from === v ? null : [].map.call(moved, function (el) { return el.getBoundingClientRect(); });
+    pl.dataset.view = v;
+    [].forEach.call(pl.querySelectorAll('.mode > button'), function (x) { x.setAttribute('aria-pressed', x.dataset.v === v); });
+    if (!snap) return;
+    [].forEach.call(moved, function (el, i) {
+      var isTh = el.classList.contains('th'), isCv = el.classList.contains('cover');
+      if (isTh || isCv) { // the cover and the small cover morph into each other
+        var other = pl.querySelector(isTh ? '.cover' : '.id .th'), o = [].indexOf.call(moved, other);
+        if ((isTh && from === 'art') || (isCv && v === 'art')) flip(el, snap[o], true);
+      } else flip(el, snap[i]);
+    });
+  }
+  function setPlayer(open) {
+    mock.classList.toggle('pl-c', !open);
+    $('pc').setAttribute('aria-expanded', open);
+    $('pk').tabIndex = open ? -1 : 0;
+    $('pc').setAttribute('aria-label', open ? 'Hide player' : 'Show player');
+  }
+  [].forEach.call(pl.querySelectorAll('.mode > button'), function (b) {
+    b.addEventListener('click', function () { setView(pl.dataset.view === b.dataset.v ? 'art' : b.dataset.v); });
+  });
+  [].forEach.call(document.querySelectorAll('[data-mv]'), function (b) {
+    b.addEventListener('click', function () { setView(b.dataset.mv); setPlayer(true); });
+  });
+  $('pk').addEventListener('click', function () { setPlayer(true); });
+  $('pc').addEventListener('click', function () { setPlayer(mock.classList.contains('pl-c')); });
+  document.querySelector('.lsrch').addEventListener('click', function () {
+    if (mock.classList.contains('lib-c')) { $('col').click(); setTimeout(function () { $('ls').focus(); }, 0); }
+  });
+  $('col').addEventListener('click', function () {
+    var c = mock.classList.toggle('lib-c');
+    $('col').setAttribute('aria-expanded', !c);
+    $('col').setAttribute('aria-label', c ? 'Expand library' : 'Collapse library');
+  });
+  [].forEach.call(document.querySelectorAll('.fl button'), function (b) {
+    b.addEventListener('click', function () {
+      [].forEach.call(b.parentNode.children, function (x) { x.setAttribute('aria-pressed', x === b); });
+    });
+  });
+
+  // History & stats: the source chips filter the lists and swap the totals.
+  [].forEach.call(document.querySelectorAll('#hsrc button'), function (b) {
+    b.addEventListener('click', function () {
+      document.querySelector('.page[data-p="history"]').dataset.src = b.dataset.src;
+      [].forEach.call(document.querySelectorAll('#hst b'), function (n) { n.textContent = n.dataset[b.dataset.src]; });
+    });
+  });
+  [].forEach.call(document.querySelectorAll('.fb'), function (b) {
+    b.addEventListener('click', function () {
+      var on = b.getAttribute('aria-pressed') !== 'true';
+      [].forEach.call(document.querySelectorAll('.fb[data-a="' + b.dataset.a + '"]'), function (x) { x.setAttribute('aria-pressed', on); x.textContent = on ? 'Following' : 'Follow'; });
+    });
+  });
+  // Pages, palette, account menu. Everything navigable carries data-go; commands carry data-cmd.
+  var cur = 'album', hist = [], liSel = document.querySelector('.li[aria-current]');
+  var pal = $('pal'), menu = $('menu'), pq = $('pq'), pk = 0;
+  var pops = [{ el: menu, btn: $('me') }, { el: $('vm'), btn: $('vb') }, { el: $('party'), btn: $('pt') }];
+  function go(p, li, back) {
+    if (!back && p !== cur) hist.push(cur);
+    cur = p;
+    [].forEach.call(document.querySelectorAll('.page'), function (s) { var on = s.dataset.p === p; s.classList.toggle('on', on); if (on) s.scrollTop = 0; });
+    [].forEach.call(document.querySelectorAll('.nv'), function (n) { if (n.dataset.go === p) n.setAttribute('aria-current', 'page'); else n.removeAttribute('aria-current'); });
+    [].forEach.call(document.querySelectorAll('.chip-b[data-go]'), function (n) { n.setAttribute('aria-pressed', n.dataset.go === p); });
+    var sel = li || (liSel && liSel.dataset.go === p ? liSel : document.querySelector('.li[data-go="' + p + '"]'));
+    [].forEach.call(document.querySelectorAll('.li'), function (l) { if (l === sel && l.dataset.go === p) l.setAttribute('aria-current', 'true'); else l.removeAttribute('aria-current'); });
+    if (sel && sel.dataset.go === p) liSel = sel;
+  }
+  function setPanel(n) {
+    [].forEach.call(document.querySelectorAll('.sc button'), function (b) { b.setAttribute('aria-current', b.dataset.s === n); });
+    [].forEach.call(document.querySelectorAll('.sp'), function (x) { x.classList.toggle('on', x.dataset.s === n); });
+  }
+  function pis() { return [].filter.call(pal.querySelectorAll('.pi'), function (i) { return !i.hidden; }); }
+  function pick(n) {
+    var l = pis();
+    [].forEach.call(pal.querySelectorAll('.pi'), function (i) { i.classList.remove('sel'); });
+    if (!l.length) return;
+    pk = (n + l.length) % l.length; l[pk].classList.add('sel'); l[pk].scrollIntoView({ block: 'nearest' });
+  }
+  function setPal(open) {
+    pal.classList.toggle('o', open); setPop(null);
+    if (open) { pq.value = ''; filter(); pq.focus(); }
+  }
+  function filter() {
+    var q = pq.value.toLowerCase();
+    [].forEach.call(pal.querySelectorAll('.pi'), function (i) { i.hidden = i.textContent.toLowerCase().indexOf(q) < 0; });
+    [].forEach.call(pal.querySelectorAll('.pgr'), function (g) { g.hidden = !g.querySelector('.pi:not([hidden])'); });
+    pick(0);
+  }
+  function setPop(el, open) {
+    pops.forEach(function (p) { var o = p.el === el && open; p.el.hidden = !o; p.btn.setAttribute('aria-expanded', o); });
+  }
+
+  document.addEventListener('click', function (e) {
+    var g = e.target.closest('[data-go]'), c = e.target.closest('[data-cmd]');
+    if (g) { if (g.dataset.set) setPanel(g.dataset.set); go(g.dataset.go, g.classList.contains('li') ? g : null); setPal(false); setPop(null); }
+    else if (c) {
+      var k = c.dataset.cmd;
+      if (k === 'palette') setPal(!pal.classList.contains('o'));
+      else if (k === 'party') { setPal(false); setPop($('party'), true); }
+      else { setPal(false); $(k === 'player' ? 'pc' : 'col').click(); }
+    }
+    if (e.target === pal) setPal(false);
+    if (!e.target.closest('#me, #menu, #vb, #vm, #pt, #party')) setPop(null);
+  });
+  pops.forEach(function (p) {
+    p.btn.addEventListener('click', function () {
+      if (p.el.hidden && p.el.id === 'vm') p.el.style.top = (p.btn.getBoundingClientRect().bottom - mock.getBoundingClientRect().top + 6) + 'px';
+      setPop(p.el, p.el.hidden);
+    });
+  });
+  var items = document.querySelector('.items'), orig = [].slice.call(items.children);
+  var vicon = { compact: 'i-vc', list: 'i-vl', grid: 'i-vg', grid2: 'i-grid' };
+  [].forEach.call($('vm').querySelectorAll('[data-lv]'), function (b) {
+    b.addEventListener('click', function () {
+      items.dataset.lv = b.dataset.lv;
+      $('vb').querySelector('use').setAttribute('href', '#' + vicon[b.dataset.lv]);
+      [].forEach.call($('vm').querySelectorAll('[data-lv]'), function (x) { x.setAttribute('aria-pressed', x === b); });
+    });
+  });
+  [].forEach.call($('vm').querySelectorAll('[data-sort]'), function (b) {
+    b.addEventListener('click', function () {
+      var k = b.dataset.sort, l = orig.slice();
+      if (k === 'added') l.reverse();
+      else if (k === 'alpha') l.sort(function (a, c) { return a.title.localeCompare(c.title); });
+      else if (k === 'creator') l.sort(function (a, c) { return a.dataset.by.localeCompare(c.dataset.by) || a.title.localeCompare(c.title); });
+      l.forEach(function (li) { items.appendChild(li); });
+      [].forEach.call($('vm').querySelectorAll('[data-sort]'), function (x) { x.setAttribute('aria-checked', x === b); });
+    });
+  });
+  [].forEach.call(document.querySelectorAll('[data-pt]'), function (b) { b.addEventListener('click', function () { mock.dataset.party = b.dataset.pt; }); });
+  $('cl').addEventListener('click', function () {
+    $('cl').textContent = 'Copied';
+    setTimeout(function () { $('cl').textContent = 'Copy link'; }, 1500);
+  });
+  $('bk').addEventListener('click', function () { if (hist.length) go(hist.pop(), null, true); });
+  $('gs').addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter') return;
+    $('sq').textContent = $('gs').value.trim() || 'night bus';
+    go('search');
+  });
+  pq.addEventListener('input', filter);
+  pq.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowDown') { e.preventDefault(); pick(pk + 1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); pick(pk - 1); }
+    else if (e.key === 'Enter') { var l = pis(); if (l[pk]) l[pk].click(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    var k = e.key.toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && k === 'k') { e.preventDefault(); setPal(true); }
+    else if ((e.ctrlKey || e.metaKey) && k === 'b' && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('col').click(); }
+    else if (k === 'escape') { setPal(false); setPop(null); }
+  });
+  [].forEach.call(document.querySelectorAll('.sc button'), function (b) { b.addEventListener('click', function () { setPanel(b.dataset.s); }); });
+  [].forEach.call(document.querySelectorAll('.cp, .seg'), function (g) {
+    if (g.querySelector('[data-md], [data-dn]')) return;
+    [].forEach.call(g.children, function (b) { b.addEventListener('click', function () { [].forEach.call(g.children, function (x) { x.setAttribute('aria-pressed', x === b); }); }); });
+  });
+  [].forEach.call(document.querySelectorAll('.sw'), function (b) {
+    b.addEventListener('click', function () { b.setAttribute('aria-checked', b.getAttribute('aria-checked') !== 'true'); });
+  });
+  [].forEach.call(document.querySelectorAll('.pill button'), function (b) {
+    b.addEventListener('click', function () {
+      var on = b.getAttribute('aria-pressed') !== 'true';
+      b.setAttribute('aria-pressed', on);
+      if (b.dataset.pm === 'endless') pl.dataset.endless = on ? 'on' : 'off';
+    });
+  });
+  // Sidebar resizing. Widths live in --lib-open and --pl-open; the main area keeps at least 380px.
+  var libOpen = 264, plOpen = 308, MAIN = 380;
+  function used(skip) {
+    return (skip === 'l' ? 0 : mock.classList.contains('lib-c') ? 68 : libOpen) + (skip === 'r' ? 0 : mock.classList.contains('pl-c') ? 56 : plOpen + 10);
+  }
+  function setW(l, r) {
+    libOpen = l; plOpen = r;
+    mock.style.setProperty('--lib-open', l + 'px'); mock.style.setProperty('--pl-open', r + 'px');
+    $('rzl').setAttribute('aria-valuenow', l); $('rzr').setAttribute('aria-valuenow', r);
+  }
+  [{ id: 'rzl', side: 'l', def: 264, grow: 1, from: function (e, r) { return e.clientX - r.left; },
+     clamp: function (w) { return Math.max(200, Math.min(360, w, mock.clientWidth - used('l') - MAIN)); } },
+   { id: 'rzr', side: 'r', def: 308, grow: -1, from: function (e, r) { return r.right - e.clientX - 10; },
+     clamp: function (w) { return Math.max(260, Math.min(400, w, mock.clientWidth - used('r') - MAIN - 10)); } }].forEach(function (c) {
+    var h = $(c.id);
+    function set(w) { w = c.clamp(w); if (c.side === 'l') setW(w, plOpen); else setW(libOpen, w); }
+    h.addEventListener('pointerdown', function (e) { h.setPointerCapture(e.pointerId); mock.classList.add('rzing'); h.classList.add('on'); });
+    h.addEventListener('pointermove', function (e) { if (h.hasPointerCapture(e.pointerId)) set(c.from(e, mock.getBoundingClientRect())); });
+    h.addEventListener('lostpointercapture', function () { mock.classList.remove('rzing'); h.classList.remove('on'); });
+    h.addEventListener('dblclick', function () { set(c.def); });
+    h.addEventListener('keydown', function (e) {
+      var d = e.key === 'ArrowRight' ? 16 : e.key === 'ArrowLeft' ? -16 : 0;
+      if (d) { e.preventDefault(); set((c.side === 'l' ? libOpen : plOpen) + d * c.grow); }
+    });
+  });
+  window.addEventListener('resize', function () {
+    var over = used() + MAIN - mock.clientWidth;
+    if (over > 0) { var d = Math.min(over, plOpen - 260); setW(Math.max(200, libOpen - (over - d)), plOpen - d); }
+  });
+  go('album');
+})();
+</script>

@@ -1,0 +1,11 @@
+[package]
+name = "metrolist-login"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+wry = "0.57"
+tao = "0.37"
+gtk = "0.18"
+serde_json.workspace = true
+ureq.workspace = true

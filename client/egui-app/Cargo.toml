@@ -1,0 +1,12 @@
+[package]
+name = "metrolist-egui"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.37"
+egui_extras = { version = "0.37", features = ["svg", "http", "image"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+serde_json.workspace = true
+ureq.workspace = true
+serde.workspace = true
