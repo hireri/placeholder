@@ -40,7 +40,9 @@ jobs:
       - name: Daemon
         run: metrolist/gradlew -p . :daemon:installDist
       - name: Bundled JRE
-        run: jlink --add-modules java.se,jdk.unsupported,jdk.crypto.ec,jdk.charsets --strip-debug --no-header-files --no-man-pages --compress zip-6 --output dist/jre
+        run: |
+          mods=$(jdeps --print-module-deps --ignore-missing-deps --multi-release 21 daemon/build/install/daemon/lib/*.jar)
+          jlink --add-modules "$mods,jdk.unsupported,jdk.crypto.ec,jdk.charsets" --strip-debug --no-header-files --no-man-pages --compress zip-6 --output dist/jre
       - name: Client
         run: cargo build --release --manifest-path client/Cargo.toml --workspace ${{ matrix.cargo_flags }}
       - name: Package

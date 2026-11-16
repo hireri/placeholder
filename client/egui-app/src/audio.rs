@@ -30,6 +30,7 @@ const OPUS_RATE: u32 = 48_000;
 /// 120 ms at 48 kHz, the largest Opus frame, per channel.
 const OPUS_MAX_FRAME: usize = 5760;
 const POLL: Duration = Duration::from_millis(10);
+const PAUSED_POLL: Duration = Duration::from_millis(250);
 
 #[derive(serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -363,6 +364,12 @@ struct Shared {
 }
 
 impl Shared {
+    /// Wait between ring checks. Paused, nothing drains the ring, so back off; the 2 s ring covers the resume latency.
+    // ponytail: polling backoff; a Condvar woken by play()/seek() would make it zero-wake if this still shows up in profiles.
+    fn poll(&self) -> Duration {
+        if self.playing.load(Relaxed) { POLL } else { PAUSED_POLL }
+    }
+
     fn emit(&self, ev: Event) {
         self.events.lock().unwrap().push(ev);
         (self.wake)();
@@ -431,14 +438,14 @@ fn run(shared: &Shared, rx: &Receiver<f32>, info: &StreamInfo, mut epoch: u64) -
             ended = false;
         } else if !pending.is_empty() {
             if !shared.try_push(epoch, &mut pending) {
-                thread::sleep(POLL);
+                thread::sleep(shared.poll());
             }
         } else if eos {
             if shared.drained(epoch) {
                 shared.finish(epoch);
                 ended = true;
             } else {
-                thread::sleep(POLL);
+                thread::sleep(shared.poll());
             }
         } else if !s.decode_next(shared, &mut pending)? {
             eos = true;
@@ -506,6 +513,8 @@ fn output_device() -> Option<(cpal::Device, SupportedStreamConfig)> {
 pub struct Engine {
     shared: Arc<Shared>,
     stream: Option<cpal::Stream>,
+    /// Whether the device stream is running; redundant play() calls on a running ALSA stream raise I/O errors.
+    stream_on: AtomicBool,
     tx: Mutex<Option<Sender<f32>>>,
 }
 
@@ -540,7 +549,7 @@ impl Engine {
                 None
             }
         });
-        Engine { shared, stream, tx: Mutex::new(None) }
+        Engine { shared, stream, stream_on: AtomicBool::new(true), tx: Mutex::new(None) }
     }
 
     /// Stop whatever plays, open `s`, seek to `start_secs`, start playing.
@@ -560,6 +569,7 @@ impl Engine {
         // Dropping the previous sender ends its decode thread.
         *self.tx.lock().unwrap() = Some(tx);
         self.shared.playing.store(true, Relaxed);
+        self.resume_stream();
         let shared = self.shared.clone();
         thread::spawn(move || {
             if let Err(e) = run(&shared, &rx, &s, epoch) {
@@ -571,12 +581,24 @@ impl Engine {
 
     pub fn play(&self) {
         self.shared.playing.store(true, Relaxed);
+        self.resume_stream();
         (self.shared.wake)();
     }
 
+    /// Pausing the device stream stops the output callback and lets the sound server idle the node. `played` only advances
+    /// in the callback, so the position stays put. Errors are ignored: where a backend can't pause, the `playing` flag still silences it.
     pub fn pause(&self) {
         self.shared.playing.store(false, Relaxed);
+        if let Some(s) = self.stream.as_ref().filter(|_| self.stream_on.swap(false, Relaxed)) {
+            let _ = s.pause();
+        }
         (self.shared.wake)();
+    }
+
+    fn resume_stream(&self) {
+        if let Some(s) = self.stream.as_ref().filter(|_| !self.stream_on.swap(true, Relaxed)) {
+            let _ = s.play();
+        }
     }
 
     pub fn seek(&self, secs: f32) {
@@ -654,5 +676,29 @@ mod tests {
         println!("pos after 5s {p:.2}, after seek {:.2}, duration {:?}, errors {errs:?}", e.position(), e.duration());
         crate::backend::stop();
         assert!(errs.is_empty() && p > 3. && e.position() > 90.5);
+    }
+
+    /// Live: the position freezes while paused (also across a seek) and moves again after resume.
+    #[test]
+    #[ignore]
+    fn live_pause_resume() {
+        let sleep = |s| std::thread::sleep(std::time::Duration::from_secs(s));
+        let id = std::env::var("VIDEO_ID").unwrap_or_else(|_| "dQw4w9WgXcQ".into());
+        let info: super::StreamInfo = crate::backend::get(&format!("/stream/{id}")).expect("resolve");
+        let e = super::Engine::new(|| {});
+        e.load(info, 0.);
+        sleep(3);
+        e.pause();
+        sleep(1);
+        let (a, b) = (e.position(), { sleep(3); e.position() });
+        e.seek(60.);
+        sleep(2);
+        let c = e.position();
+        e.play();
+        sleep(3);
+        let d = e.position();
+        crate::backend::stop();
+        println!("playing {a:.2} paused {b:.2} after seek (paused) {c:.2} resumed {d:.2}");
+        assert!(a > 2. && (b - a).abs() < 0.05 && (c - 60.).abs() < 1.5 && d > c + 2.);
     }
 }

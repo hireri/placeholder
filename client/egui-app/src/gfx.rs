@@ -226,15 +226,45 @@ pub fn crop_uv(src: f32, dst: f32) -> Rect {
     Rect::from_center_size(egui::pos2(0.5, 0.5), size)
 }
 
+/// egui's image loaders keep bytes, decoded pixels and a GPU texture per URI forever; track last use so `trim_covers` can bound that.
+const COVER_KEEP: usize = 96;
+
+fn touch_cover(ctx: &Context, uri: &str) {
+    let frame = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<HashMap<String, u64>>(egui::Id::NULL).insert(uri.to_owned(), frame));
+}
+
+/// Forgets the least recently drawn covers beyond `COVER_KEEP`; call once per frame.
+pub fn trim_covers(ctx: &Context) {
+    let stale: Vec<String> = ctx.data_mut(|d| {
+        let m = d.get_temp_mut_or_default::<HashMap<String, u64>>(egui::Id::NULL);
+        if m.len() <= COVER_KEEP {
+            return vec![];
+        }
+        let mut by_age: Vec<_> = m.iter().map(|(k, v)| (*v, k.clone())).collect();
+        by_age.sort_unstable();
+        let drop: Vec<String> = by_age.into_iter().take(m.len() - COVER_KEEP).map(|(_, k)| k).collect();
+        for k in &drop { m.remove(k); }
+        drop
+    });
+    for uri in stale {
+        ctx.forget_image(&uri);
+    }
+}
+
 /// The cover at `url` for a `size` slot, `None` until one has loaded. The CDN bucket is roughly the pixels drawn, in 64px steps,
 /// and never below the largest bucket already loaded for this URL, so a resize keeps the sharp image up while a bigger one loads.
 fn cover_texture(ctx: &Context, url: &str, size: egui::Vec2) -> Option<SizedTexture> {
     let key = egui::Id::unique(("cover-px", url));
     let shown = ctx.data(|d| d.get_temp::<u32>(key)).unwrap_or(0);
     let want = ((size.x.max(size.y) * ctx.pixels_per_point() / 64.).ceil() * 64.).clamp(64., 800.) as u32;
-    let load = |px: u32| match Image::new(sized_url(url, px)).load_for_size(ctx, size) {
-        Ok(TexturePoll::Ready { texture }) => Some(texture),
-        _ => None,
+    let load = |px: u32| {
+        let uri = sized_url(url, px);
+        touch_cover(ctx, &uri);
+        match Image::new(uri).load_for_size(ctx, size) {
+            Ok(TexturePoll::Ready { texture }) => Some(texture),
+            _ => None,
+        }
     };
     let px = want.max(shown);
     if let Some(texture) = load(px) {

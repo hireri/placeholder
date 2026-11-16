@@ -21,7 +21,7 @@ fn exe_dir() -> Option<std::path::PathBuf> {
 
 fn daemon_command() -> Command {
     let script = if cfg!(windows) { "daemon.bat" } else { "daemon" };
-    let bundled = exe_dir().map(|d| d.join("daemon/bin").join(script)).filter(|p| p.exists());
+    let bundled = exe_dir().map(|d| d.join("daemon").join("bin").join(script)).filter(|p| p.exists());
     let path = std::env::var_os("METROLIST_DAEMON").map(Into::into).or(bundled).unwrap_or_else(|| {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daemon/build/install/daemon/bin").join(script)
     });
@@ -37,9 +37,19 @@ fn daemon_command() -> Command {
 /// Blocking on first call: starts the daemon and reads its `{"port":..,"token":..}` handshake line.
 fn conn() -> Result<&'static (String, String), String> {
     CONN.get_or_init(|| {
-        let mut child = daemon_command().stdout(Stdio::piped()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
+        let mut child = daemon_command().stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).map_err(|e| e.to_string())?;
+        if line.trim().is_empty() {
+            // Daemon exited before the handshake: surface its stderr instead of a bare JSON EOF.
+            let mut err = String::new();
+            let _ = std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err);
+            let tail: Vec<_> = err.lines().rev().take(6).collect();
+            return Err(format!("daemon exited at startup: {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | ")));
+        }
+        // Keep draining stderr so a chatty daemon can't block on a full pipe.
+        let mut stderr = child.stderr.take().unwrap();
+        std::thread::spawn(move || { let _ = std::io::copy(&mut stderr, &mut std::io::sink()); });
         *DAEMON.lock().unwrap() = Some(child);
         let v: serde_json::Value = serde_json::from_str(line.trim()).map_err(|e| format!("bad handshake {line:?}: {e}"))?;
         Ok((format!("http://127.0.0.1:{}", v["port"]), v["token"].as_str().unwrap_or_default().to_string()))

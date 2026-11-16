@@ -15,12 +15,14 @@ mod page;
 mod player;
 mod stats;
 mod theme;
+mod tray;
 #[cfg(feature = "video")]
 mod video;
 
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    let lock = tray::acquire();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Metrolist")
@@ -29,5 +31,9 @@ fn main() -> eframe::Result {
             .with_min_inner_size([800., 560.]),
         ..Default::default()
     };
-    eframe::run_native("Metrolist", opts, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+    eframe::run_native("Metrolist", opts, Box::new(move |cc| {
+        let app = app::App::new(cc);
+        tray::start(&cc.egui_ctx, lock);
+        Ok(Box::new(app))
+    }))
 }

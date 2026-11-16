@@ -4,7 +4,8 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-eframe = { version = "0.37", features = ["persistence"] }
+# glow (OpenGL) instead of the default wgpu: far lower idle RAM/VRAM for a 2D UI; no accesskit (system_fonts stays for CJK fallback; Inter has no CJK glyphs).
+eframe = { version = "0.37", default-features = false, features = ["persistence", "glow", "default_fonts", "system_fonts", "clipboard", "links", "wayland", "x11"] }
 egui_extras = { version = "0.37", features = ["svg", "http", "image"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 serde_json.workspace = true
@@ -23,3 +24,9 @@ gstreamer-video = { version = "0.25.4", optional = true }
 default = ["video"]
 # Music videos in the player (needs GStreamer 1.x with a VP9/H.264 decoder, e.g. gst-libav). `--no-default-features` builds without it.
 video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
+
+[target."cfg(windows)".dependencies]
+tray-icon = { version = "0.26.1", default-features = false }

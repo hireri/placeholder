@@ -639,14 +639,18 @@ impl eframe::App for App {
         eframe::set_value(storage, PREFS, &p);
     }
 
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         crate::backend::stop();
     }
 
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let full = ui.max_rect();
+        if ctx.input(|i| i.viewport().close_requested()) && crate::tray::hide_on_close() {
+            crate::tray::hide(&ctx);
+        }
         self.pl.tick(&ctx);
+        crate::gfx::trim_covers(&ctx);
         self.follow_track(&ctx);
         self.keys(&ctx);
         let t = self.t;
