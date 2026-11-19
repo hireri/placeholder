@@ -84,6 +84,15 @@ fun main() {
             delete("/auth/spotify") { creds.update { it.copy(spotify = null) }; SpotifyAuth.setCookie(null); call.respond(ServiceStatus(false)) }
 
             get("/youtube/search") { call.respond(Services.search(call.q("q") ?: "")) }
+            get("/youtube/match") {
+                val result = Services.matchTrack(call.q("id"), call.q("title") ?: "", call.q("artist") ?: "", call.q("duration")?.toIntOrNull(), call.q("album"))
+                call.respond(MatchDto(result.getOrNull(), retry = result.isFailure))
+            }
+            post("/youtube/playlists") {
+                val req = call.receive<CreatePlaylistReq>()
+                call.respond(Services.createPlaylist(req.title, req.videoIds))
+            }
+            get("/youtube/song/{videoId}") { call.respond(Services.song(call.parameters["videoId"]!!)) }
             get("/youtube/home") { call.respond(Services.home()) }
             get("/youtube/search/items") { call.respond(Services.searchItems(call.q("q") ?: "", call.q("type") ?: "song")) }
             get("/youtube/explore") { call.respond(Services.explore()) }

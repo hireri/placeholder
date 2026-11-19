@@ -56,6 +56,7 @@ impl Song {
             source: self.source.clone(),
             artist_id: self.artist_id.clone(),
             album_id: self.album_id.clone(),
+            ..Default::default()
         }
     }
 }
@@ -73,6 +74,8 @@ type Resolved = (usize, u64, Result<(String, audio::StreamInfo), String>);
 /// Player state. `engine` decodes and outputs audio; the queue, transport and lyrics live here.
 pub struct Player {
     pub engine: audio::Engine,
+    /// Codec and bitrate of the loaded stream, e.g. ("OPUS", 160) kbps.
+    pub quality: Option<(String, u32)>,
     queue: Vec<Song>,
     cur: usize,
     pub playing: bool,
@@ -81,7 +84,9 @@ pub struct Player {
     /// True when the engine holds the current song's stream.
     loaded: bool,
     /// The scrubber is being dragged, so the engine position is not read back over the pointer.
-    scrub: bool,
+    pub scrub: bool,
+    /// Bumped by every seek, so the video reopens at the new spot.
+    pub seeks: u32,
     /// Stream lookup in flight for the current song.
     pending: Option<Receiver<Resolved>>,
     req: u64,
@@ -94,8 +99,11 @@ pub struct Player {
     /// The current song's like as the star shows it; not read back from YouTube, so it starts unfilled.
     pub liked: bool,
     /// Like request in flight: the value it asked for, and the daemon's answer.
-    like: Option<(bool, Receiver<Result<(), String>>)>,
+    like: Option<(bool, Track, Receiver<Result<(), String>>)>,
+    /// A like change for `App` to mirror into the cached Liked songs page (applied the frame it happens).
+    pub like_event: Option<(Track, bool)>,
     scroll: f32,
+    lyr_anim: LyrAnim,
     card_scroll: f32,
     lyr: Lyr,
     shown: (PlayerView, f64),
@@ -132,7 +140,7 @@ fn stream(vid: &str, title: &str, artist: &str) -> Result<(String, audio::Stream
 
 impl Player {
     pub fn new(engine: audio::Engine) -> Self {
-        Player { engine, queue: vec![], cur: 0, playing: false, pos: 0., loaded: false, scrub: false, pending: None, req: 0, retried: false, error: None, shuffle: false, repeat: false, liked: false, like: None, scroll: 0., card_scroll: 0., lyr: Lyr::Idle, shown: (PlayerView::Art, f64::NEG_INFINITY), ahead: None }
+        Player { engine, quality: None, queue: vec![], cur: 0, playing: false, pos: 0., loaded: false, scrub: false, seeks: 0, pending: None, req: 0, retried: false, error: None, shuffle: false, repeat: false, liked: false, like: None, like_event: None, scroll: 0., lyr_anim: LyrAnim::default(), card_scroll: 0., lyr: Lyr::Idle, shown: (PlayerView::Art, f64::NEG_INFINITY), ahead: None }
     }
 
     pub fn song(&self) -> Option<&Song> {
@@ -220,6 +228,7 @@ impl Player {
         }
         self.cur = idx;
         self.scroll = 0.;
+        self.lyr_anim = LyrAnim::default();
         self.lyr = Lyr::Idle;
         self.retried = false;
         self.error = None;
@@ -292,12 +301,24 @@ impl Player {
     fn fail(&mut self, e: String) {
         self.playing = false;
         self.loaded = false;
+        crate::toast::error(format!("Can't play this track: {e}\nDetails: {}", backend::log_path().display()));
         self.error = Some(e);
+    }
+
+    /// Where playback actually is: while scrubbing, `pos` follows the pointer instead.
+    /// Playback is wanted but no sound is coming: the stream is resolving or the output ran dry.
+    pub fn buffering(&self) -> bool {
+        self.playing && (self.pending.is_some() || (self.loaded && self.engine.starved()))
+    }
+
+    pub fn heard(&self) -> f32 {
+        if self.scrub && self.loaded { self.engine.position() } else { self.pos }
     }
 
     /// Moves the playhead. Without a loaded stream the next load starts from here.
     pub fn seek(&mut self, secs: f32) {
         self.pos = secs;
+        self.seeks = self.seeks.wrapping_add(1);
         if self.loaded {
             self.engine.seek(secs);
         }
@@ -317,16 +338,32 @@ impl Player {
 
     /// Likes or unlikes the current song on YouTube. The star flips at once; `tick` reverts it if the daemon refuses.
     pub fn set_like(&mut self, ctx: &egui::Context) {
-        let Some(vid) = self.song().map(|s| s.vid.clone()).filter(|v| !v.is_empty()) else { return };
+        let Some(s) = self.song().filter(|s| !s.vid.is_empty()) else { return };
+        let vid = s.vid.clone();
+        let track = Track {
+            id: vid.clone(),
+            title: s.title.clone(),
+            artists: s.artist.split(", ").filter(|a| !a.is_empty()).map(String::from).collect(),
+            album: Some(s.album.clone()).filter(|a| !a.is_empty()),
+            duration_sec: Some(s.dur),
+            thumbnail: s.thumbnail.clone(),
+            source: "youtube".into(),
+            artist_id: s.artist_id.clone(),
+            album_id: s.album_id.clone(),
+            ..Default::default()
+        };
         let on = !self.liked;
         self.liked = on;
+        crate::toast::info(if on { "Added to liked songs" } else { "Removed from liked songs" });
+        self.like_event = Some((track.clone(), on));
+        ctx.request_repaint();
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(backend::post(&format!("/youtube/like/{vid}?on={on}")));
             ctx.request_repaint();
         });
-        self.like = Some((on, rx));
+        self.like = Some((on, track, rx));
     }
 
     pub fn toggle(&mut self, ctx: &egui::Context) {
@@ -375,6 +412,7 @@ impl Player {
                                 self.lyr = Lyr::Idle;
                             }
                         }
+                        self.quality = Some((codec_name(&info.mime_type), info.bitrate.map_or(0, |b| b / 1000)));
                         self.engine.load(info, self.pos);
                         self.loaded = true;
                         if !self.playing {
@@ -385,11 +423,13 @@ impl Player {
                 }
             }
         }
-        if let Some((on, rx)) = self.like.take() {
+        if let Some((on, track, rx)) = self.like.take() {
             match rx.try_recv() {
-                Err(TryRecvError::Empty) => self.like = Some((on, rx)),
+                Err(TryRecvError::Empty) => self.like = Some((on, track, rx)),
                 Ok(Err(e)) => {
                     self.liked = !on;
+                    self.like_event = Some((track, !on));
+                    crate::toast::error(e.clone());
                     self.error = Some(e);
                 }
                 _ => {}
@@ -432,11 +472,15 @@ impl Player {
 }
 
 /// Thin progress/volume bar; grows on hover like the scrubber in the mock. Returns the pointer fraction while pressed.
-fn bar(ui: &egui::Ui, key: &str, rect: Rect, track: Color32, fill: Color32, frac: f32, grow: bool) -> Option<f32> {
+fn bar(ui: &egui::Ui, key: &str, rect: Rect, track: Color32, fill: Color32, frac: f32, grow: bool, cached: &[(f32, f32)]) -> Option<f32> {
     let resp = ui.interact(rect.expand2(vec2(0., 6.)), ui.scope_id().with(key), Sense::click_and_drag());
-    let h = if grow { 4. + 2. * ui.ctx().animate_bool_with_time(ui.scope_id().with((key, "h")), resp.hovered(), 0.12) } else { 4. };
+    let h = if grow { 4. + 2. * ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with((key, "h")), resp.hovered(), 0.12, ease_out) } else { 4. };
     let r = Rect::from_center_size(rect.center(), vec2(rect.width(), h));
     ui.painter().rect_filled(r, rad(h / 2.), track);
+    for &(a, b) in cached {
+        let seg = Rect::from_min_max(pos2(r.left() + r.width() * a, r.top()), pos2(r.left() + r.width() * b, r.bottom()));
+        ui.painter().rect_filled(seg, rad(h / 2.), fill.gamma_multiply(0.35));
+    }
     ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * frac, h)), rad(h / 2.), fill);
     resp.is_pointer_button_down_on().then(|| resp.interact_pointer_pos().map(|p| ((p.x - rect.min.x) / rect.width()).clamp(0., 1.))).flatten()
 }
@@ -449,8 +493,42 @@ fn link_hover(ctx: &egui::Context, p: &egui::Painter, resp: &egui::Response, r: 
     }
 }
 
+/// Synced-lyrics scroll: every row has its own offset, so a line change can cascade down the list (BitChord's `ScrollRun`).
+#[derive(Default)]
+struct LyrAnim {
+    cur: Option<usize>,
+    back: bool,
+    /// When the current line changed, and the scroll target it changed to.
+    t0: f64,
+    to: f32,
+    /// Per-row offsets when the change began, and as drawn last frame (the start of an interrupting change).
+    from: Vec<f32>,
+    shown: Vec<f32>,
+    /// The user scrolled away: where, and when they last touched the wheel. Following resumes after `BROWSE_HOLD`.
+    browse: Option<(f32, f64)>,
+    /// Last frame drawn, so reopening the view snaps instead of replaying a stale cascade.
+    seen: f64,
+}
+
+/// BitChord's lyric motion constants (PlayerLyrics.kt): easing, scroll run length, per-row stagger, falloff by distance from the line.
+fn lyr_ease(t: f32) -> f32 {
+    bezier(0.41, 0., 0.12, 0.99, t)
+}
+const LYR_DUR: f32 = 0.35;
+const LYR_STAGGER: f32 = 0.06 * LYR_DUR;
+const LINE_ALPHA: [f32; 5] = [1., 0.8, 0.7, 0.58, 0.46];
+const LINE_BLUR: [f32; 5] = [0., 1., 1., 1.7, 2.4];
+const GLOW_ROOM: f32 = 10.;
+const GAP_ROW: f32 = 40. + 16.;
+const BROWSE_HOLD: f64 = 5.;
+
 /// Cover, backdrop and video crossfade time.
 const ART_FADE: f32 = 0.25;
+
+/// Cubic ease-in-out, so a crossfade starts and ends gently instead of ramping linearly.
+fn ease_in_out(t: f32) -> f32 {
+    if t < 0.5 { 4. * t * t * t } else { 1. - (-2. * t + 2.).powi(3) / 2. }
+}
 
 /// What the player art shows, kept in egui memory between frames.
 #[derive(Clone, Default)]
@@ -507,7 +585,7 @@ impl App {
 
         // The whole card scrolls: cover/lyrics/queue slot, then the controls (CTRL_H), then the info cards.
         // `va` morphs the art view (0) into the compact header (1) so the cover and title travel between them.
-        const CTRL_H: f32 = 230.;
+        const CTRL_H: f32 = 248.;
         let art = view == PlayerView::Art;
         let va = crate::app::anim(ui.ctx(), "pl-view", !art);
         let cards_h = if empty { 0. } else { self.info_cards(ui, c, 0., false) };
@@ -527,12 +605,12 @@ impl App {
 
         // Bottom stack, built upward: error line, mode row, volume, transport, scrubber (14px gaps).
         let mut y = yb - 12.;
-        let device_y = y - 7.;
         y -= 14. + 14.;
         let modes_y = y - 21.;
         y -= 42. + 14.;
         let vol_y = y - 8.;
-        y -= 16. + 14.;
+        let q_y = vol_y - 8. - 4. - 7.;
+        y -= 16. + 14. + 18.;
         let tr_y = y - 26.;
         y -= 52. + 14.;
         let scrub = Rect::from_min_size(pos2(x0, y - 24.), vec2(w, 24.));
@@ -543,9 +621,9 @@ impl App {
         let aspect = url.as_deref().and_then(|u| cover_aspect(ui.ctx(), u, square.size()));
         let wide = aspect.filter(|a| *a > 1.2);
         // A wide cover is a video's: with videos on, the video itself plays in the floating rect (paced by the audio playhead).
-        let want = (self.video_on && wide.is_some() && open > 0.5 && va < 0.99).then(|| self.pl.song().map(|s| s.vid.clone())).flatten().filter(|v| !v.is_empty());
+        let want = (self.video_on && wide.is_some() && open > 0.5).then(|| self.pl.song().map(|s| s.vid.clone())).flatten().filter(|v| !v.is_empty());
         #[cfg(feature = "video")]
-        let frame = self.video_frame(ui.ctx(), want.as_deref());
+        let frame = self.video_frame(ui.ctx(), want.as_deref(), self.video_h);
         #[cfg(not(feature = "video"))]
         let frame: Option<(egui::TextureHandle, f32)> = want.and(None);
 
@@ -558,8 +636,8 @@ impl App {
             st.shown = url.clone();
             st.gen += 1;
         }
-        let f = (ctx.animate_value_with_time(id.with("gen"), st.gen as f32, ART_FADE) - st.gen.saturating_sub(1) as f32).clamp(0., 1.);
-        let vf = ctx.animate_bool_with_time(id.with("vid"), frame.is_some(), ART_FADE);
+        let f = ease_in_out((ctx.animate_value_with_time(id.with("gen"), st.gen as f32, ART_FADE) - st.gen.saturating_sub(1) as f32).clamp(0., 1.));
+        let vf = ctx.animate_bool_with_time_and_easing(id.with("vid"), frame.is_some(), ART_FADE, ease_in_out);
         if frame.is_some() {
             st.last = frame.clone();
         } else if vf == 0. {
@@ -579,12 +657,14 @@ impl App {
             ui.painter().rect_filled(c, rad(18.), t.s1);
         }
 
-        let start = wide.map(|a| frame.as_ref().map_or(a, |f| f.1)).map_or(square, |a| {
+        let wide_a = wide.map(|a| frame.as_ref().map_or(a, |f| f.1));
+        let start = wide_a.map_or(square, |a| {
             let slot = Rect::from_min_max(pos2(x0, base + 56.), pos2(x1, body_bottom - 62.));
             let h = (w / a).min(slot.height().max(0.));
             Rect::from_center_size(slot.center(), vec2(h * a, h))
         });
-        let small = Rect::from_min_size(pos2(x0, ident_top), vec2(46., 46.));
+        // A video keeps its shape in the compact header too.
+        let small = Rect::from_min_size(pos2(x0, ident_top), vec2(46. * wide_a.unwrap_or(1.), 46.));
         let cr = Rect::from_min_max(start.min.lerp(small.min, va), start.max.lerp(small.max, va));
         let (r0, b0): (f32, f32) = if wide.is_some() { (12., 12.) } else { (18., 0.) };
         let (top_r, bot_r) = (lerp(r0..=6., va) as u8, lerp(b0..=6., va) as u8);
@@ -608,15 +688,26 @@ impl App {
         if let Some((tex, a)) = vtex.filter(|_| vf > 0.) {
             egui::Image::new(sized(tex.id(), 1.)).fit_to_exact_size(cr.size()).uv(crop_uv(a, cr.width() / cr.height())).corner_radius(cr_corners).tint(tint.gamma_multiply(vf)).paint_at(ui, cr);
         }
+        #[cfg(feature = "video")]
+        if want.is_some() && self.video.as_ref().is_some_and(|v| v.waiting(self.pl.heard(), self.pl.dur())) {
+            let time = ctx.input(|i| i.time) as f32;
+            ui.painter().rect_filled(cr, cr_corners, Color32::BLACK.gamma_multiply(0.35 * shown));
+            crate::page::spinner(ui.painter(), cr.center(), (cr.height() * 0.1).clamp(8., 16.), time, Color32::WHITE);
+            ctx.request_repaint();
+        }
         if let Some(u) = self.pl.next_song().and_then(|s| s.thumbnail.as_deref()) {
             preload_cover(ui.ctx(), u, square.size());
         }
-        if wide.is_none() {
+        // Dissolves the cover's lower half into the backdrop. It follows the cover (not the art-view square) and is gone
+        // by mid-morph, so it never sits over the cover as it travels to the header.
+        let dis = (1. - va * 2.).max(0.);
+        if wide.is_none() && dis > 0. {
+            let fp = ui.painter().with_clip_rect(cr);
             if let Some(o) = old_blur.filter(|_| f < 1.) {
-                fade_blur(ui.painter(), o, c, square, square.center().y, square.max.y, 1. - va);
+                fade_blur(&fp, o, c, square, cr.center().y, cr.max.y, dis);
             }
             if let Some(b) = cur_blur {
-                fade_blur(ui.painter(), b, c, square, square.center().y, square.max.y, (1. - va) * f);
+                fade_blur(&fp, b, c, square, cr.center().y, cr.max.y, dis * f);
             }
         }
         if open < 0.02 {
@@ -635,13 +726,33 @@ impl App {
                 pending_menu = Some((pos, Target::Track(s.track())));
             }
         }
-        // Video / thumbnail toggle in the floating rect's corner.
+        // Video / thumbnail toggle and quality in the floating rect's corner; they fade in while the pointer is over it.
         if wide.is_some() && va < 0.5 && cfg!(feature = "video") {
-            let at = pos2(cr.max.x - 24., cr.max.y - 24.);
-            p.circle_filled(at, 16., Color32::from_black_alpha(140));
-            let (ic, tip) = if self.video_on { (icon!("vidoff"), "Show the thumbnail") } else { (icon!("vid"), "Play the video") };
-            if glyph_button(ui, "pl-video", at, 32., ic, 16., Color32::WHITE).on_hover_text(tip).clicked() {
-                self.video_on = !self.video_on;
+            let over = ui.rect_contains_pointer(cr);
+            let a = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with("pl-vctl"), over, 0.15, ease_in_out);
+            if a > 0. {
+                let at = pos2(cr.max.x - 24., cr.max.y - 24.);
+                p.circle_filled(at, 16., Color32::from_black_alpha(140).gamma_multiply(a));
+                let (ic, tip) = if self.video_on { (icon!("vidoff"), "Hide the video") } else { (icon!("vid"), "Play the video") };
+                if glyph_button(ui, "pl-video", at, 32., ic, 16., Color32::WHITE.gamma_multiply(a)).on_hover_text(tip).clicked() {
+                    self.video_on = !self.video_on;
+                }
+                if self.video_on {
+                    // Quality: a pill left of the toggle; click steps up through the offered heights, right-click steps down.
+                    let label = format!("{}p", self.video_h);
+                    let w = text_w(&p, &label, font_w(11., Weight::Semi)) + 16.;
+                    let pill = Rect::from_center_size(pos2(at.x - 16. - 6. - w / 2., at.y), vec2(w, 24.));
+                    p.rect_filled(pill, rad(12.), Color32::from_black_alpha(140).gamma_multiply(a));
+                    p.text(pill.center(), Align2::CENTER_CENTER, &label, font_w(11., Weight::Semi), Color32::WHITE.gamma_multiply(a));
+                    let r = press(ui, "pl-vq", pill).on_hover_text("Video quality (right-click for lower)");
+                    let hs = crate::app::VIDEO_HEIGHTS;
+                    let i = hs.iter().position(|h| *h == self.video_h).unwrap_or(0);
+                    if r.clicked() {
+                        self.video_h = hs[(i + 1) % hs.len()];
+                    } else if r.secondary_clicked() {
+                        self.video_h = hs[(i + hs.len() - 1) % hs.len()];
+                    }
+                }
             }
         }
 
@@ -650,10 +761,8 @@ impl App {
         let (title, artist, album) = pl.song().map_or_else(|| ("Nothing playing".to_string(), "Pick a song to start listening".to_string(), String::new()), |s| (s.title.clone(), s.artist.clone(), s.album.clone()));
         let artist_id = pl.song().and_then(|s| s.artist_id.clone());
 
-        if let Some(e) = &pl.error {
-            trunc(&p, pos2(x0, device_y), w, e, font(11.), it.tm);
-        }
-        if let Some(f) = bar(ui, "scrub", Rect::from_min_size(scrub.min, vec2(w, 4.)), it.s3, it.tx, pl.frac(), true) {
+        // The pointer only moves the shown playhead; playback carries on and the new spot is committed on release.
+        if let Some(f) = bar(ui, "scrub", Rect::from_min_size(scrub.min, vec2(w, 4.)), it.s3, it.tx, pl.frac(), true, &pl.engine.cached(dur)) {
             pl.pos = f * dur;
             pl.scrub = true;
         } else if pl.scrub {
@@ -666,8 +775,14 @@ impl App {
         // Spread across the width like the mode row below, so resizing the player keeps them evenly spaced.
         let tr_x = [x0 + w * 0.15, x0 + w * 0.5, x0 + w * 0.85];
         let main_icon = if pl.playing { icon!("pause") } else { icon!("play") };
+        let buffering = pl.buffering();
         for (i, (ic, s)) in [(icon!("rw"), 34.), (main_icon, 46.), (icon!("ff"), 34.)].into_iter().enumerate() {
-            if glyph_button(ui, ("tr", i), pos2(tr_x[i], tr_y), 52., ic, s, if empty { it.tf } else { it.tx }).clicked() {
+            let col = if i == 1 && buffering { Color32::TRANSPARENT } else if empty { it.tf } else { it.tx };
+            if i == 1 && buffering {
+                crate::page::spinner(ui.painter(), pos2(tr_x[i], tr_y), 14., ui.input(|i| i.time) as f32, it.tx);
+                ui.ctx().request_repaint();
+            }
+            if glyph_button(ui, ("tr", i), pos2(tr_x[i], tr_y), 52., ic, s, col).clicked() {
                 match i {
                     0 => pl.prev(ui.ctx()),
                     1 => pl.toggle(ui.ctx()),
@@ -676,9 +791,18 @@ impl App {
             }
         }
 
+        if let Some((codec, kbps)) = pl.quality.as_ref().filter(|_| !empty) {
+            let (ic, tier) = if *kbps >= 256 { (icon!("aqh"), "High") } else { (icon!("aqs"), "Standard") };
+            let label = if *kbps == 0 { codec.clone() } else { format!("{tier} · {codec} · {kbps} kbps") };
+            let font = font(11.);
+            let tw = text_w(ui.painter(), &label, font.clone());
+            let x = (x0 + x1) / 2. - (tw + 18.) / 2.;
+            icon(ui, ic, pos2(x + 6., q_y), 12., it.tm);
+            ui.painter().text(pos2(x + 18., q_y), Align2::LEFT_CENTER, label, font, it.tm);
+        }
         icon(ui, icon!("vlo"), pos2(x0 + 8., vol_y), 16., it.tm);
         icon(ui, icon!("vhi"), pos2(x1 - 8., vol_y), 16., it.tm);
-        if let Some(v) = bar(ui, "vol", Rect::from_min_max(pos2(x0 + 26., vol_y - 2.), pos2(x1 - 26., vol_y + 2.)), it.s3, it.tm, self.volume, false) {
+        if let Some(v) = bar(ui, "vol", Rect::from_min_max(pos2(x0 + 26., vol_y - 2.), pos2(x1 - 26., vol_y + 2.)), it.s3, it.tm, self.volume, false, &[]) {
             self.volume = v;
             pl.engine.set_volume(v);
         }
@@ -721,12 +845,12 @@ impl App {
             p.circle_filled(pos2(x1 - 16., top + 16.), 16., disc);
         }
         if va > 0.01 {
-            trunc(&p, pos2(x0 + 4., top + 16.), w - 44., &album, font_w(13., Weight::Semi), it.tx.gamma_multiply(va));
+            trunc(&p, pos2(x0 + 4., top + 16.), w - 44., if album.is_empty() { &title } else { &album }, font_w(13., Weight::Semi), it.tx.gamma_multiply(va));
         }
         let hide = glyph_button(ui, "hide", pos2(x1 - 16., top + 16.), 32., icon!("colr"), 16., if va < 0.5 { it.tx } else { it.tm }).clicked();
         // Identity row; in the art view it sits on the cover's lower edge. Title and artist are links.
         let cy = lerp(body_bottom - 50. + 23.0..=ident_top + 23., va);
-        let tx = lerp(x0..=x0 + 56., va);
+        let tx = lerp(x0..=small.max.x + 10., va);
         let text_w = x1 - 72. - tx;
         let title_r = trunc(&p, pos2(tx, cy - 9.), text_w, &title, font_w(15., Weight::Bold), it.tx);
         let artist_r = trunc(&p, pos2(tx, cy + 10.), text_w, &artist, font(13.), it.tm);
@@ -767,6 +891,7 @@ impl App {
         let op = k;
         let body = Rect::from_min_max(pos2(x0, top), pos2(x1, body_bottom)).translate(vec2(0., 6. * (1. - k)));
         let pl = &mut self.pl;
+        let mut seek_to = None;
         match view {
             PlayerView::Art => {}
             PlayerView::Lyrics => {
@@ -785,30 +910,121 @@ impl App {
                     bp.text(pos2(x0 + 2., area.min.y + 20.), Align2::LEFT_CENTER, m, font(14.), it.tm);
                 } else if let Lyr::Done(Some(l)) = &pl.lyr {
                     let cur = if l.synced { l.lines.iter().rposition(|(s, _)| *s <= pl.pos) } else { None };
-                    let gs: Vec<_> = l.lines.iter().enumerate().map(|(i, (_, tx))| {
-                        bp.layout(tx.clone(), font_w(21., Weight::Bold), if !l.synced || Some(i) == cur { it.tx } else { it.tf }, w - 4.)
+                    let n = l.lines.len();
+                    let now = ui.input(|i| i.time);
+                    let ctx = ui.ctx().clone();
+                    let gs: Vec<_> = l.lines.iter().map(|(_, tx)| bp.layout(tx.clone(), font_w(30., Weight::Extra), Color32::WHITE, w)).collect();
+                    // Instrumental breaks (empty lines) swell open while they play: a row of three dots that fill with the break.
+                    let until = |i: usize| l.lines.get(i + 1).map_or(f32::INFINITY, |n| n.0);
+                    let swell: Vec<f32> = (0..n).map(|i| {
+                        if !l.lines[i].1.is_empty() { return 1. }
+                        let on = l.synced && pl.pos >= l.lines[i].0 && pl.pos < until(i);
+                        tween(&ctx, ui.scope_id().with(("lyr-gap", i)), on as u8 as f32, if on { 0.4 } else { 0.35 }, lyr_ease)
                     }).collect();
-                    let mut ys = vec![];
-                    let mut ly = 10.;
-                    for g in &gs {
+                    // Row tops from the animated heights; `ys_end` is the same with every break at its target, so the follow target
+                    // does not drift while one opens.
+                    let (mut ys, mut ys_end) = (vec![], vec![]);
+                    let (mut ly, mut ly_end) = (30., 30.);
+                    for (i, g) in gs.iter().enumerate() {
+                        let gap = l.lines[i].1.is_empty();
                         ys.push(ly);
-                        ly += g.size().y + 14.;
+                        ys_end.push(ly_end);
+                        ly += if gap { GAP_ROW * swell[i] } else { g.size().y + 2. * GLOW_ROOM };
+                        ly_end += if gap { if Some(i) == cur { GAP_ROW } else { 0. } } else { g.size().y + 2. * GLOW_ROOM };
                     }
-                    let max_scroll = (ly - area.height()).max(0.);
+                    let max_scroll = (ly + area.height() * 0.8 - area.height()).max(0.);
+                    let wheel = if b.rect_contains_pointer(area) { ui.input(|i| i.smooth_scroll_delta.y) } else { 0. };
+                    let mut offs = vec![pl.scroll; n];
+                    let mut browsing = false;
                     if l.synced {
-                        // Follow the current line, a third of the way down; the animation also keeps repainting while it moves.
-                        let want = cur.map_or(0., |i| ys[i] - area.height() * 0.33).clamp(0., max_scroll);
-                        pl.scroll = ui.ctx().animate_value_with_time(ui.scope_id().with("lyr-scroll"), want, 0.35);
-                    } else if b.rect_contains_pointer(body) {
-                        pl.scroll = (pl.scroll - ui.input(|i| i.smooth_scroll_delta.y)).clamp(0., max_scroll);
+                        let want = cur.map_or(0., |i| ys_end[i] - 30.).clamp(0., max_scroll);
+                        let an = &mut pl.lyr_anim;
+                        if an.from.len() != n || now - an.seen > 0.3 {
+                            *an = LyrAnim { cur, t0: f64::NEG_INFINITY, to: want, from: vec![want; n], shown: vec![want; n], seen: now, ..Default::default() };
+                        }
+                        an.seen = now;
+                        if wheel != 0. {
+                            let at = an.browse.map_or_else(|| an.shown.get(cur.unwrap_or(0)).copied().unwrap_or(want), |b| b.0);
+                            an.browse = Some(((at - wheel).clamp(0., max_scroll), now));
+                        }
+                        if an.browse.is_some_and(|b| now - b.1 > BROWSE_HOLD) {
+                            // Hand back to following: every row animates from where the user left it.
+                            let at = an.browse.take().map_or(want, |b| b.0);
+                            (an.from, an.cur, an.t0, an.to, an.back) = (vec![at; n], cur, now, want, want < at);
+                        }
+                        if let Some((at, _)) = an.browse {
+                            browsing = true;
+                            (an.cur, an.to) = (cur, want);
+                            offs = vec![at; n];
+                            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                        } else {
+                            if an.cur != cur || (an.to - want).abs() > 0.5 {
+                                // Interrupting: every row restarts from where it is drawn now.
+                                an.back = want < an.to;
+                                an.from = an.shown.clone();
+                                (an.cur, an.t0, an.to) = (cur, now, want);
+                            }
+                            let c0 = cur.unwrap_or(0) as isize;
+                            let mut moving = false;
+                            for i in 0..n {
+                                let d = if an.back { c0 - i as isize } else { i as isize - c0 }.clamp(0, 3) as f32;
+                                let k = ((now - an.t0) as f32 - d * LYR_STAGGER) / LYR_DUR;
+                                moving |= k < 1.;
+                                offs[i] = lerp(an.from[i]..=an.to, lyr_ease(k.clamp(0., 1.)));
+                            }
+                            if moving {
+                                ctx.request_repaint();
+                            }
+                        }
+                        an.shown.clone_from(&offs);
+                        pl.scroll = want;
+                    } else if wheel != 0. {
+                        pl.scroll = (pl.scroll - wheel).clamp(0., max_scroll);
+                        offs = vec![pl.scroll; n];
                     }
-                    let lp = bp.with_clip_rect(area);
-                    for (g, y) in gs.into_iter().zip(ys) {
-                        lp.galley(pos2(x0 + 2., area.min.y + y - pl.scroll), g, Color32::WHITE);
+                    let lp = bp.with_clip_rect(area.expand2(vec2(GLOW_ROOM, 0.)));
+                    let hover_ok = l.synced && b.rect_contains_pointer(area);
+                    let scroll_line = cur.unwrap_or(0);
+                    for (i, g) in gs.into_iter().enumerate() {
+                        let gap = l.lines[i].1.is_empty();
+                        let rh = if gap { GAP_ROW * swell[i] } else { g.size().y + 2. * GLOW_ROOM };
+                        let top = area.min.y + ys[i] - offs[i];
+                        if rh <= 0.5 || top + rh < area.min.y - 24. || top > area.max.y + 24. {
+                            continue;
+                        }
+                        let row = Rect::from_min_size(pos2(x0 - GLOW_ROOM, top), vec2(w + 2. * GLOW_ROOM, rh));
+                        let id = ("lyr-line", i);
+                        let hit = hover_ok && ui.rect_contains_pointer(row.intersect(area));
+                        let ha = ctx.animate_bool_with_time_and_easing(ui.scope_id().with(id), hit, 0.18, ease_out);
+                        if ha > 0. {
+                            lp.rect_filled(row, rad(10.), it.tx.gamma_multiply(0.10 * ha));
+                        }
+                        if hit && press(ui, id, row.intersect(area)).clicked() {
+                            seek_to = Some(l.lines[i].0);
+                            pl.lyr_anim.browse = None;
+                        }
+                        // Falloff by distance from the line: dimmer and blurrier the further away; browsing or the line itself keeps it sharp.
+                        let active = l.synced && Some(i) == cur;
+                        let di = i.abs_diff(scroll_line).min(4);
+                        let sid = ui.scope_id().with(("lyr-fx", i));
+                        let ta = if !l.synced { 0.95 } else if active { 1. } else if browsing { 0.8 } else { LINE_ALPHA[di] };
+                        let tb = if !l.synced || browsing || active { 0. } else { LINE_BLUR[di] };
+                        let a = tween(&ctx, sid.with("a"), ta, 0.4, lyr_ease);
+                        let r = tween(&ctx, sid.with("r"), tb, 0.4, lyr_ease);
+                        if gap {
+                            let p = ((pl.pos - l.lines[i].0) / (until(i) - l.lines[i].0)).clamp(0., 1.);
+                            for k in 0..3 {
+                                let f = (p * 3. - k as f32).clamp(0., 1.);
+                                let at = pos2(x0 + 6.5 + k as f32 * 18., top + rh / 2.);
+                                lp.circle_filled(at, 6.5 * swell[i], it.tx.gamma_multiply(lerp(0.3..=1., f) * a * swell[i]));
+                            }
+                        } else {
+                            blur_galley(&lp, &g, pos2(x0, top + GLOW_ROOM), it.tx, a, r);
+                        }
                     }
                     if let Some(b) = blur {
-                        fade_blur(&p, b, c, square, area.min.y + area.height() * 0.12, area.min.y, 1.);
-                        fade_blur(&p, b, c, square, area.min.y + area.height() * 0.8, area.max.y, 1.);
+                        fade_blur(&p, b, c, square, area.min.y + 28., area.min.y, 1.);
+                        fade_blur(&p, b, c, square, area.max.y - 28., area.max.y, 1.);
                     }
                     p.text(pos2(x0, body.max.y - foot_h / 2.), Align2::LEFT_CENTER, format!("Lyrics by {}", l.provider), font(12.), it.tm);
                 }
@@ -897,6 +1113,9 @@ impl App {
                 }
             }
         }
+        if let Some(s) = seek_to {
+            self.pl.seek(s);
+        }
         if !empty {
             self.info_cards(ui, c, yb + 6., true);
         }
@@ -918,4 +1137,8 @@ impl App {
             self.toggle_menu(menu_btn, m);
         }
     }
+}
+
+fn codec_name(mime: &str) -> String {
+    if mime.contains("opus") { "OPUS" } else if mime.contains("mp4a") { "AAC" } else { "AUDIO" }.into()
 }

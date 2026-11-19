@@ -1,16 +1,62 @@
 //! Single instance (a localhost lock) and the system tray. While a tray icon exists, closing the window hides it
-//! and playback continues; "Quit" in the tray menu is the way out.
+//! and playback continues; "Quit" in the tray menu is the way out. Where windows can't be hidden (Wayland) the
+//! window is destroyed instead and `main` recreates it on "show".
 
 use eframe::egui::{Context, ViewportCommand};
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+use crate::media::Cmd;
 
 // ponytail: fixed port; swap for a per-user socket path if collisions with other software show up.
 const LOCK_ADDR: &str = "127.0.0.1:47613";
 
 static HAS_TRAY: AtomicBool = AtomicBool::new(false);
 static QUITTING: AtomicBool = AtomicBool::new(false);
+/// The window was closed to the tray and no longer exists; `main` keeps the player running until `show`.
+static HIDDEN: AtomicBool = AtomicBool::new(false);
+/// A show request that arrived while there was no window.
+static WANT_SHOW: AtomicBool = AtomicBool::new(false);
+/// The live window's context, `None` while hidden.
+static CTX: Mutex<Option<Context>> = Mutex::new(None);
+static CMDS: Mutex<Vec<Cmd>> = Mutex::new(Vec::new());
+
+/// Playback commands clicked in the tray menu, drained by the app each frame.
+pub fn take_cmds() -> Vec<Cmd> {
+    std::mem::take(&mut *CMDS.lock().unwrap())
+}
+
+pub fn set_ctx(ctx: Option<Context>) {
+    *CTX.lock().unwrap() = ctx;
+}
+
+/// Wakes the window's UI thread, if there is a window.
+pub fn wake() {
+    if let Some(c) = &*CTX.lock().unwrap() {
+        c.request_repaint();
+    }
+}
+
+fn send(c: Cmd) {
+    CMDS.lock().unwrap().push(c);
+    wake();
+}
+
+pub fn quitting() -> bool {
+    QUITTING.load(Ordering::Relaxed)
+}
+
+/// True after the window was closed to the tray.
+pub fn hidden() -> bool {
+    HIDDEN.swap(false, Ordering::Relaxed)
+}
+
+/// True once if a show was requested while hidden.
+pub fn take_show() -> bool {
+    WANT_SHOW.swap(false, Ordering::Relaxed)
+}
 
 /// Takes the instance lock. If another instance holds it, asks that one to show its window and exits.
 pub fn acquire() -> Option<TcpListener> {
@@ -28,25 +74,38 @@ pub fn acquire() -> Option<TcpListener> {
 
 /// True when the close button should hide to the tray instead of quitting.
 pub fn hide_on_close() -> bool {
-    HAS_TRAY.load(Ordering::Relaxed) && !QUITTING.load(Ordering::Relaxed)
+    HAS_TRAY.load(Ordering::Relaxed) && !quitting()
 }
 
+/// Hides the window. Wayland can't hide one (winit ignores `Visible(false)`), so there the close goes through and the
+/// window is destroyed; `main` notices `hidden()` and recreates it on `show`.
 pub fn hide(ctx: &Context) {
+    if cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
+        HIDDEN.store(true, Ordering::Relaxed);
+        return;
+    }
     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
     ctx.send_viewport_cmd(ViewportCommand::Visible(false));
 }
 
-fn show(ctx: &Context) {
+fn show() {
+    let ctx = CTX.lock().unwrap().clone();
+    let Some(ctx) = ctx else {
+        WANT_SHOW.store(true, Ordering::Relaxed);
+        return;
+    };
     ctx.send_viewport_cmd(ViewportCommand::Visible(true));
     ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
     ctx.send_viewport_cmd(ViewportCommand::Focus);
     ctx.request_repaint();
 }
 
-fn quit(ctx: &Context) {
+fn quit() {
     QUITTING.store(true, Ordering::Relaxed);
-    ctx.send_viewport_cmd(ViewportCommand::Close);
-    ctx.request_repaint();
+    if let Some(c) = &*CTX.lock().unwrap() {
+        c.send_viewport_cmd(ViewportCommand::Close);
+        c.request_repaint();
+    }
 }
 
 /// Round accent-coloured placeholder until the app has a real icon asset.
@@ -61,12 +120,11 @@ fn icon_rgba(n: u32) -> Vec<u8> {
         .collect()
 }
 
-pub fn start(ctx: &Context, lock: Option<TcpListener>) {
+pub fn start(lock: Option<TcpListener>) {
     if let Some(l) = lock {
-        let c = ctx.clone();
-        std::thread::spawn(move || l.incoming().flatten().for_each(|_| show(&c)));
+        std::thread::spawn(move || l.incoming().flatten().for_each(|_| show()));
     }
-    platform::tray(ctx);
+    platform::tray();
 }
 
 #[cfg(target_os = "linux")]
@@ -74,14 +132,14 @@ mod platform {
     use super::*;
     use ksni::{blocking::TrayMethods, menu::StandardItem, MenuItem};
 
-    struct Tray(Context);
+    struct Tray;
 
     impl ksni::Tray for Tray {
         fn id(&self) -> String {
             "metrolist".into()
         }
         fn title(&self) -> String {
-            "Metrolist".into()
+            "Serafim".into()
         }
         fn icon_pixmap(&self) -> Vec<ksni::Icon> {
             let mut d = icon_rgba(32);
@@ -89,19 +147,23 @@ mod platform {
             vec![ksni::Icon { width: 32, height: 32, data: d }]
         }
         fn activate(&mut self, _x: i32, _y: i32) {
-            show(&self.0);
+            show();
         }
         fn menu(&self) -> Vec<MenuItem<Self>> {
             vec![
-                StandardItem { label: "Show Metrolist".into(), activate: Box::new(|t: &mut Self| show(&t.0)), ..Default::default() }.into(),
-                StandardItem { label: "Quit".into(), activate: Box::new(|t: &mut Self| quit(&t.0)), ..Default::default() }.into(),
+                StandardItem { label: "Play / Pause".into(), activate: Box::new(|_: &mut Self| send(Cmd::Toggle)), ..Default::default() }.into(),
+                StandardItem { label: "Next".into(), activate: Box::new(|_: &mut Self| send(Cmd::Next)), ..Default::default() }.into(),
+                StandardItem { label: "Previous".into(), activate: Box::new(|_: &mut Self| send(Cmd::Prev)), ..Default::default() }.into(),
+                MenuItem::Separator,
+                StandardItem { label: "Show Serafim".into(), activate: Box::new(|_: &mut Self| show()), ..Default::default() }.into(),
+                StandardItem { label: "Quit".into(), activate: Box::new(|_: &mut Self| quit()), ..Default::default() }.into(),
             ]
         }
     }
 
-    pub fn tray(ctx: &Context) {
+    pub fn tray() {
         // Err means no StatusNotifier host (e.g. bare WM): leave HAS_TRAY false so the close button still quits.
-        match Tray(ctx.clone()).spawn() {
+        match Tray.spawn() {
             Ok(h) => {
                 HAS_TRAY.store(true, Ordering::Relaxed);
                 std::mem::forget(h); // the handle's drop would remove the icon; it lives for the whole run
@@ -114,21 +176,26 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::*;
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    pub fn tray(ctx: &Context) {
+    pub fn tray() {
         let menu = Menu::new();
-        let (show_i, quit_i) = (MenuItem::new("Show Metrolist", true, None), MenuItem::new("Quit", true, None));
-        let _ = menu.append_items(&[&show_i, &quit_i]);
+        let [play_i, next_i, prev_i, show_i, quit_i] = ["Play / Pause", "Next", "Previous", "Show Serafim", "Quit"].map(|l| MenuItem::new(l, true, None));
+        let _ = menu.append_items(&[&play_i, &next_i, &prev_i, &PredefinedMenuItem::separator(), &show_i, &quit_i]);
         let Ok(icon) = Icon::from_rgba(icon_rgba(32), 32, 32) else { return };
-        let Ok(t) = TrayIconBuilder::new().with_icon(icon).with_tooltip("Metrolist").with_menu(Box::new(menu)).with_menu_on_left_click(false).build() else { return };
-        let (c1, c2) = (ctx.clone(), ctx.clone());
-        let quit_id = quit_i.id().clone();
-        MenuEvent::set_event_handler(Some(move |e: MenuEvent| if e.id == quit_id { quit(&c1) } else { show(&c1) }));
+        let Ok(t) = TrayIconBuilder::new().with_icon(icon).with_tooltip("Serafim").with_menu(Box::new(menu)).with_menu_on_left_click(false).build() else { return };
+        let (quit_id, play_id, next_id, prev_id) = (quit_i.id().clone(), play_i.id().clone(), next_i.id().clone(), prev_i.id().clone());
+        MenuEvent::set_event_handler(Some(move |e: MenuEvent| match e.id {
+            id if id == quit_id => quit(),
+            id if id == play_id => send(Cmd::Toggle),
+            id if id == next_id => send(Cmd::Next),
+            id if id == prev_id => send(Cmd::Prev),
+            _ => show(),
+        }));
         TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
-                show(&c2);
+                show();
             }
         }));
         HAS_TRAY.store(true, Ordering::Relaxed);
@@ -138,5 +205,5 @@ mod platform {
 
 #[cfg(not(any(target_os = "linux", windows)))]
 mod platform {
-    pub fn tray(_: &super::Context) {}
+    pub fn tray() {}
 }

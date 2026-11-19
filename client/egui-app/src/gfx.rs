@@ -21,6 +21,8 @@ macro_rules! icon {
 
 const ICONS: &[(&str, &[u8])] = &[
     ("bytes://icons/alb.svg", include_bytes!("../assets/icons/alb.svg")),
+    ("bytes://icons/aqh.svg", include_bytes!("../assets/icons/aqh.svg")),
+    ("bytes://icons/aqs.svg", include_bytes!("../assets/icons/aqs.svg")),
     ("bytes://icons/art.svg", include_bytes!("../assets/icons/art.svg")),
     ("bytes://icons/back.svg", include_bytes!("../assets/icons/back.svg")),
     ("bytes://icons/col.svg", include_bytes!("../assets/icons/col.svg")),
@@ -64,7 +66,7 @@ pub fn install(ctx: &Context) {
         ctx.include_bytes(*uri, *bytes);
     }
     // Inter Variable, one font entry per weight so FontId can pick weight through its family.
-    let weights = [("inter-400", 400., FontFamily::Proportional), ("inter-500", 500., w(Weight::Medium)), ("inter-600", 600., w(Weight::Semi)), ("inter-650", 650., w(Weight::Bold))];
+    let weights = [("inter-400", 400., FontFamily::Proportional), ("inter-500", 500., w(Weight::Medium)), ("inter-600", 600., w(Weight::Semi)), ("inter-650", 650., w(Weight::Bold)), ("inter-800", 800., w(Weight::Extra))];
     for (name, wght, fam) in weights {
         let data = FontData::from_static(include_bytes!("../assets/fonts/InterVariable.ttf"))
             .tweak(egui::FontTweak { coords: VariationCoords::new([(b"wght", wght)]), ..Default::default() });
@@ -78,10 +80,11 @@ pub enum Weight {
     Medium,
     Semi,
     Bold,
+    Extra,
 }
 
 fn w(weight: Weight) -> FontFamily {
-    FontFamily::Name(match weight { Weight::Medium => "w500", Weight::Semi => "w600", Weight::Bold => "w650" }.into())
+    FontFamily::Name(match weight { Weight::Medium => "w500", Weight::Semi => "w600", Weight::Bold => "w650", Weight::Extra => "w800" }.into())
 }
 
 pub fn font(size: f32) -> FontId {
@@ -90,6 +93,64 @@ pub fn font(size: f32) -> FontId {
 
 pub fn font_w(size: f32, weight: Weight) -> FontId {
     FontId::new(size, w(weight))
+}
+
+/// Standard ease-out for hover/fade transitions (egui's default animate_* is linear).
+pub fn ease_out(t: f32) -> f32 {
+    1. - (1. - t).powi(3)
+}
+
+/// CSS-style cubic-bezier easing (Compose `CubicBezierEasing`): finds the curve parameter whose x is `t`, returns its y.
+pub fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+    let at = |a: f32, b: f32, s: f32| 3. * a * s * (1. - s).powi(2) + 3. * b * s * s * (1. - s) + s * s * s;
+    let (mut lo, mut hi) = (0f32, 1f32);
+    for _ in 0..24 {
+        let m = (lo + hi) / 2.;
+        if at(x1, x2, m) < t { lo = m } else { hi = m }
+    }
+    at(y1, y2, (lo + hi) / 2.)
+}
+
+/// Tween toward `target` over `secs` with `ease`; a new target starts from the value on screen, so it is interruptible.
+pub fn tween(ctx: &Context, id: egui::Id, target: f32, secs: f32, ease: impl Fn(f32) -> f32) -> f32 {
+    let now = ctx.input(|i| i.time);
+    let (from, to, t0) = ctx.data(|d| d.get_temp::<(f32, f32, f64)>(id)).unwrap_or((target, target, f64::NEG_INFINITY));
+    let k = |t0: f64| ((now - t0) / secs as f64).clamp(0., 1.) as f32;
+    let (from, t0) = if to != target { (egui::lerp(from..=to, ease(k(t0))), now) } else { (from, t0) };
+    ctx.data_mut(|d| d.insert_temp(id, (from, target, t0)));
+    if k(t0) < 1. {
+        ctx.request_repaint();
+    }
+    egui::lerp(from..=target, ease(k(t0)))
+}
+
+/// Gaussian blur of a galley (`sigma` in points) as copies at whole physical-pixel offsets: egui snaps text to the pixel grid, so
+/// sub-pixel taps would collapse onto each other. Each tap's alpha is `1-(1-a)^w`, so a stroke's interior composites to exactly `a`.
+pub fn blur_galley(p: &Painter, g: &std::sync::Arc<egui::Galley>, pos: Pos2, rgb: Color32, a: f32, sigma: f32) {
+    let ppp = p.ctx().pixels_per_point();
+    let s = sigma * ppp;
+    let a = a.min(0.98);
+    if s < 0.35 {
+        p.galley_with_override_text_color(pos, g.clone(), rgb.gamma_multiply(a));
+        return;
+    }
+    let step = (s / 1.2).ceil().max(1.);
+    let n = (2. * s / step).ceil() as i32;
+    let mut taps = vec![];
+    let mut sum = 0.;
+    for j in -n..=n {
+        for i in -n..=n {
+            let (dx, dy) = (i as f32 * step, j as f32 * step);
+            let w = (-(dx * dx + dy * dy) / (2. * s * s)).exp();
+            if w > 0.1 {
+                taps.push((dx / ppp, dy / ppp, w));
+                sum += w;
+            }
+        }
+    }
+    for (dx, dy, w) in taps {
+        p.galley_with_override_text_color(pos + egui::vec2(dx, dy), g.clone(), rgb.gamma_multiply(1. - (1. - a).powf(w / sum)));
+    }
 }
 
 pub fn icon(ui: &Ui, uri: &'static str, center: Pos2, size: f32, color: Color32) {
@@ -316,7 +377,7 @@ pub fn preload_cover(ctx: &Context, url: &str, size: egui::Vec2) {
     let _ = cover_texture(ctx, url, size);
 }
 
-/// Rewrites a YouTube `=wN-hN` size suffix to `px`; other URLs pass through.
+/// Rewrites a YouTube `=wN-hN` size suffix so its longer side is `px`, keeping the aspect ratio (video thumbnails are 16:9); other URLs pass through.
 pub fn sized_url(url: &str, px: u32) -> String {
     let Some(at) = url.find("=w") else { return url.to_string() };
     let rest = &url[at + 2..];
@@ -326,7 +387,9 @@ pub fn sized_url(url: &str, px: u32) -> String {
     if w == 0 || n == 0 {
         return url.to_string();
     }
-    format!("{}{px}-h{px}{}", &url[..at + 2], &h[n..])
+    let (sw, sh): (f32, f32) = (rest[..w].parse().unwrap_or(1.), h[..n].parse().unwrap_or(1.));
+    let k = px as f32 / sw.max(sh);
+    format!("{}{}-h{}{}", &url[..at + 2], (sw * k).round() as u32, (sh * k).round() as u32, &h[n..])
 }
 
 /// Vertical fade from transparent to `to` over `rect` (egui has no gradient fill).
@@ -334,6 +397,17 @@ pub fn fade_down(painter: &Painter, rect: Rect, to: Color32) {
     let mut m = egui::Mesh::default();
     let (a, b) = (to.gamma_multiply(0.), to);
     for (p, c) in [(rect.left_top(), a), (rect.right_top(), a), (rect.right_bottom(), b), (rect.left_bottom(), b)] {
+        m.vertices.push(egui::epaint::Vertex { pos: p, uv: egui::epaint::WHITE_UV, color: c });
+    }
+    m.indices.extend([0, 1, 2, 0, 2, 3]);
+    painter.add(m);
+}
+
+/// Horizontal fade into `to`: transparent at one edge, solid at the right edge (`solid_right`) or the left one.
+pub fn fade_h(painter: &Painter, rect: Rect, to: Color32, solid_right: bool) {
+    let mut m = egui::Mesh::default();
+    let (a, b) = if solid_right { (to.gamma_multiply(0.), to) } else { (to, to.gamma_multiply(0.)) };
+    for (p, c) in [(rect.left_top(), a), (rect.right_top(), b), (rect.right_bottom(), b), (rect.left_bottom(), a)] {
         m.vertices.push(egui::epaint::Vertex { pos: p, uv: egui::epaint::WHITE_UV, color: c });
     }
     m.indices.extend([0, 1, 2, 0, 2, 3]);

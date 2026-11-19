@@ -3,19 +3,22 @@
 use crate::backend;
 use eframe::egui::Context;
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 pub enum State<T> {
     Idle,
     Loading,
-    Ready(T),
+    Ready(Arc<T>),
     Failed(String),
 }
 
 pub struct Remote<T>(Arc<Mutex<State<T>>>);
 
-impl<T: Send + 'static> Remote<T> {
+impl<T: Send + Sync + 'static> Remote<T> {
     pub fn new() -> Self {
         Remote(Arc::new(Mutex::new(State::Idle)))
     }
@@ -34,9 +37,17 @@ impl<T: Send + 'static> Remote<T> {
         let (slot, ctx) = (self.0.clone(), ctx.clone());
         std::thread::spawn(move || {
             let r = load();
-            *slot.lock().unwrap() = r.map_or_else(State::Failed, State::Ready);
+            *slot.lock().unwrap() = r.map_or_else(State::Failed, |v| State::Ready(Arc::new(v)));
             ctx.request_repaint();
         });
+    }
+
+    /// The loaded value, cloned out so the caller can draw without holding the lock (other code may need it meanwhile).
+    pub fn ready(&self) -> Option<Arc<T>> {
+        match &*self.lock() {
+            State::Ready(v) => Some(v.clone()),
+            _ => None,
+        }
     }
 
     pub fn reset(&self) {
@@ -56,6 +67,9 @@ pub struct Item {
     pub duration_sec: Option<u32>,
     /// Browse id of the song's first artist.
     pub artist_id: Option<String>,
+    /// Songs only: the album they sit on (`None` for singles).
+    pub album: Option<String>,
+    pub album_id: Option<String>,
 }
 
 impl Item {
@@ -65,12 +79,13 @@ impl Item {
             id: self.id.clone(),
             title: self.title.clone(),
             artists: self.subtitle.as_deref().unwrap_or("").split(", ").filter(|a| !a.is_empty()).map(String::from).collect(),
-            album: None,
+            album: self.album.clone(),
             duration_sec: self.duration_sec,
             thumbnail: self.thumbnail.clone(),
             source: "youtube".into(),
             artist_id: self.artist_id.clone(),
-            album_id: None,
+            album_id: self.album_id.clone(),
+            ..Default::default()
         }
     }
 }
@@ -97,11 +112,170 @@ pub struct Track {
     pub artist_id: Option<String>,
     /// Browse id of the album (YouTube only).
     pub album_id: Option<String>,
+    /// Spotify import only: the YouTube counterpart is still being looked up.
+    #[serde(default)]
+    pub resolving: bool,
+    /// Spotify import only: no YouTube counterpart was found; the row keeps its Spotify metadata.
+    #[serde(default)]
+    pub unavailable: bool,
 }
 
 impl Track {
     pub fn dur(&self) -> String {
         self.duration_sec.map_or(String::new(), |s| format!("{}:{:02}", s / 60, s % 60))
+    }
+}
+
+/// The daemon's answer to `/youtube/match`: the matched track, or none.
+#[derive(Deserialize, Default)]
+struct Match {
+    track: Option<Track>,
+    /// The daemon's search failed (rate limit, network); the row should stay retryable rather than look unmatched.
+    #[serde(default)]
+    retry: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ExportReq<'a> {
+    title: &'a str,
+    #[serde(rename = "videoIds")]
+    video_ids: &'a [String],
+}
+
+#[derive(Deserialize)]
+struct ExportRes {
+    added: usize,
+    total: usize,
+}
+
+struct Wanted {
+    detail: Arc<Remote<Detail>>,
+    ctx: Context,
+    wanted: BTreeSet<usize>,
+    active: HashSet<usize>,
+    seen: Instant,
+}
+
+/// Resolves only the Spotify rows currently near the viewport. The UI replaces each playlist's wanted range as
+/// it scrolls, so a fast fling never leaves a queue of off-screen lookups behind.
+struct SpotifyMatcher {
+    windows: Mutex<HashMap<String, Wanted>>,
+    wake: Condvar,
+}
+
+impl SpotifyMatcher {
+    fn start() -> Arc<Self> {
+        let this = Arc::new(Self { windows: Default::default(), wake: Condvar::new() });
+        for _ in 0..2 {
+            let this = this.clone();
+            std::thread::spawn(move || this.work());
+        }
+        this
+    }
+
+    fn request(&self, ctx: &Context, id: &str, detail: &Arc<Remote<Detail>>, range: Range<usize>) {
+        let mut desired = BTreeSet::new();
+        if let State::Ready(d) = &mut *detail.lock() {
+            let d = Arc::make_mut(d);
+            for i in range {
+                let Some(t) = d.tracks.get_mut(i) else { continue };
+                if t.source != "spotify" || t.unavailable {
+                    continue;
+                }
+                if !t.resolving {
+                    t.resolving = true;
+                    ctx.request_repaint();
+                }
+                desired.insert(i);
+            }
+        }
+        let mut windows = self.windows.lock().unwrap();
+        let w = windows.entry(id.to_string()).or_insert_with(|| Wanted {
+            detail: detail.clone(),
+            ctx: ctx.clone(),
+            wanted: BTreeSet::new(),
+            active: HashSet::new(),
+            seen: Instant::now(),
+        });
+        w.detail = detail.clone();
+        w.ctx = ctx.clone();
+        w.seen = Instant::now();
+        w.wanted = desired.into_iter().filter(|i| !w.active.contains(i)).collect();
+        drop(windows);
+        self.wake.notify_all();
+    }
+
+    fn work(&self) {
+        loop {
+            let (id, i, detail, ctx) = self.next_job();
+            let Some(t) = detail.ready().and_then(|d| d.tracks.get(i).cloned()) else {
+                self.finish(&id, i);
+                continue;
+            };
+            if t.source != "spotify" || t.unavailable || !t.resolving {
+                self.finish(&id, i);
+                continue;
+            }
+            let path = format!(
+                "/youtube/match?id={}&title={}&artist={}&duration={}&album={}",
+                backend::enc(&t.id),
+                backend::enc(&t.title),
+                backend::enc(&t.artists.join(", ")),
+                t.duration_sec.map_or(String::new(), |d| d.to_string()),
+                backend::enc(t.album.as_deref().unwrap_or("")),
+            );
+            let answer = backend::get::<Match>(&path);
+            let retry = match &answer {
+                Ok(m) => m.retry,
+                Err(_) => true,
+            };
+            if let State::Ready(d) = &mut *detail.lock() {
+                if let Some(t) = Arc::make_mut(d).tracks.get_mut(i) {
+                    match answer {
+                        Ok(m) => match m.track {
+                            Some(yt) => *t = yt,
+                            None => {
+                                t.resolving = false;
+                                t.unavailable = true;
+                            }
+                        },
+                        Err(_) => {}
+                    }
+                }
+            }
+            ctx.request_repaint();
+            if retry {
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            self.finish(&id, i);
+        }
+    }
+
+    fn next_job(&self) -> (String, usize, Arc<Remote<Detail>>, Context) {
+        let mut windows = self.windows.lock().unwrap();
+        loop {
+            for (id, w) in windows.iter_mut() {
+                if w.seen.elapsed() > Duration::from_secs(3) {
+                    w.wanted.clear();
+                }
+                while let Some(i) = w.wanted.pop_first() {
+                    if w.active.insert(i) {
+                        return (id.clone(), i, w.detail.clone(), w.ctx.clone());
+                    }
+                }
+            }
+            windows = self.wake.wait(windows).unwrap();
+        }
+    }
+
+    fn finish(&self, id: &str, i: usize) {
+        if let Some(w) = self.windows.lock().unwrap().get_mut(id) {
+            w.active.remove(&i);
+        }
+    }
+
+    fn clear(&self) {
+        self.windows.lock().unwrap().clear();
     }
 }
 
@@ -116,6 +290,16 @@ pub struct Detail {
     pub channel_id: Option<String>,
     pub subscribed: bool,
     pub monthly_listeners: Option<String>,
+}
+
+impl Detail {
+    /// What playing this page plays: its track list, or for artists the songs on their shelves.
+    pub fn songs(&self) -> Vec<Track> {
+        if !self.tracks.is_empty() {
+            return self.tracks.clone();
+        }
+        self.sections.iter().flat_map(|s| &s.items).filter(|i| i.r#type == "song").map(|i| i.track()).collect()
+    }
 }
 
 /// YouTube Music history plus aggregates, computed once on load.
@@ -162,13 +346,18 @@ pub struct Data {
     pub spotify: Remote<Vec<Item>>,
     /// Saved playlists, albums and artists for the sidebar, tagged with their filter index (1 playlist, 2 album, 3 artist).
     pub library: Remote<Vec<(usize, Item)>>,
+    /// Bumped whenever `library` is edited in place, so the sidebar rebuilds its copy.
+    pub lib_rev: AtomicUsize,
     /// Song search results by query.
     pub searches: Mutex<HashMap<String, Arc<Remote<Vec<Track>>>>>,
     /// Album and artist search results by `type/query`.
     pub item_searches: Mutex<HashMap<String, Arc<Remote<Vec<Item>>>>>,
     /// Error from the last library save, shown on the album page.
-    pub notice: Mutex<Option<String>>,
     pub details: Mutex<HashMap<String, Arc<Remote<Detail>>>>,
+    matcher: Arc<SpotifyMatcher>,
+    exporting: Arc<AtomicBool>,
+    /// Songs looked up by id, to learn which album a feed item sits on.
+    pub song_infos: Mutex<HashMap<String, Arc<Remote<Track>>>>,
     /// Set while a sign-in/out is in flight (the login window blocks), with the last error.
     pub busy: Arc<Mutex<(Option<&'static str>, Option<String>)>>,
 }
@@ -181,10 +370,13 @@ impl Data {
             history: Remote::new(),
             spotify: Remote::new(),
             library: Remote::new(),
+            lib_rev: AtomicUsize::new(0),
             searches: Default::default(),
             item_searches: Default::default(),
-            notice: Default::default(),
             details: Default::default(),
+            matcher: SpotifyMatcher::start(),
+            exporting: Default::default(),
+            song_infos: Default::default(),
             busy: Default::default(),
         }
     }
@@ -199,11 +391,67 @@ impl Data {
                 _ => None,
             };
             let item = item.unwrap_or(Item { title: "Spotify playlist".into(), ..Default::default() });
-            r.ensure(ctx, move || Ok(Detail { item, tracks: backend::get(&path)?, ..Default::default() }));
+            r.ensure(ctx, move || {
+                let tracks: Vec<Track> = backend::get(&path)?;
+                Ok(Detail { item, tracks, ..Default::default() })
+            });
         } else {
             let path = format!("/youtube/{kind}/{id}");
             r.ensure(ctx, move || backend::get(&path));
         }
+        r
+    }
+
+    /// Queues the visible Spotify rows (± padding, filtered in page.rs) for matching.
+    pub fn want_spotify(&self, ctx: &Context, id: &str, range: Range<usize>) {
+        if range.is_empty() {
+            return;
+        }
+        let detail = self.details.lock().unwrap().get(&format!("spotify/{id}")).cloned();
+        if let Some(detail) = detail {
+            self.matcher.request(ctx, id, &detail, range);
+        }
+    }
+
+    /// Creates a YouTube Music playlist from the rows that already matched (unmatched rows are reported, not waited on).
+    pub fn export_spotify(&self, title: &str, tracks: &[Track]) {
+        if self.exporting.swap(true, Ordering::SeqCst) {
+            crate::toast::info("An export is already running");
+            return;
+        }
+        let video_ids: Vec<String> = tracks.iter().filter(|t| t.source == "youtube" && !t.id.is_empty()).map(|t| t.id.clone()).collect();
+        if video_ids.is_empty() {
+            self.exporting.store(false, Ordering::SeqCst);
+            crate::toast::error("No matched tracks to export yet");
+            return;
+        }
+        let title = if title.trim().is_empty() { "Spotify playlist" } else { title.trim() }.to_string();
+        let total = tracks.len();
+        crate::toast::info(format!("Exporting {} tracks to YouTube Music…", video_ids.len()));
+        let exporting = self.exporting.clone();
+        std::thread::spawn(move || {
+            let req = ExportReq { title: &title, video_ids: &video_ids };
+            match backend::post_json::<_, ExportRes>("/youtube/playlists", &req) {
+                Ok(r) => {
+                    let skipped = total.saturating_sub(r.added);
+                    let msg = if skipped > 0 {
+                        format!("Created “{title}” with {} of {total} tracks ({skipped} skipped)", r.added)
+                    } else {
+                        format!("Created “{title}” with {} tracks", r.added)
+                    };
+                    crate::toast::info(msg);
+                    let _ = r.total;
+                }
+                Err(e) => crate::toast::error(format!("Couldn't export the playlist: {e}")),
+            }
+            exporting.store(false, Ordering::SeqCst);
+        });
+    }
+
+    pub fn song_info(&self, ctx: &Context, id: &str) -> Arc<Remote<Track>> {
+        let r = self.song_infos.lock().unwrap().entry(id.to_string()).or_insert_with(|| Arc::new(Remote::new())).clone();
+        let path = format!("/youtube/song/{}", backend::enc(id));
+        r.ensure(ctx, move || backend::get(&path));
         r
     }
 
@@ -257,40 +505,108 @@ impl Data {
         self.searches.lock().unwrap().clear();
         self.item_searches.lock().unwrap().clear();
         self.details.lock().unwrap().clear();
+        self.matcher.clear();
+        self.song_infos.lock().unwrap().clear();
     }
 
-    /// Adds or removes an album (`kind` albums) or playlist from the YouTube Music library; the sidebar reloads on success.
+    /// Adds or removes a sidebar entry (`n`: 1 playlist, 2 album, 3 artist) right away, without waiting on YouTube's eventually-consistent library.
+    fn set_saved(&self, n: usize, item: Item, on: bool) {
+        if let State::Ready(v) = &mut *self.library.lock() {
+            let v = Arc::make_mut(v);
+            v.retain(|(k, i)| !(*k == n && i.id == item.id));
+            if on {
+                v.insert(0, (n, item));
+            }
+            self.lib_rev.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The loaded page item for `kind/id`, else a bare one.
+    fn known_item(&self, kind: &str, id: &str, r#type: &str) -> Item {
+        let page = self.details.lock().unwrap().get(&format!("{kind}/{id}")).cloned();
+        if let Some(p) = page {
+            if let State::Ready(d) = &*p.lock() {
+                return Item { r#type: r#type.into(), id: id.into(), ..d.item.clone() };
+            }
+        }
+        Item { r#type: r#type.into(), id: id.into(), ..Default::default() }
+    }
+
+    /// Adds or removes an album (`kind` albums) or playlist from the YouTube Music library. The sidebar and toast update at once; a refusal puts it back.
     pub fn save(self: &Arc<Self>, ctx: &Context, kind: &'static str, id: &str, on: bool) {
+        let (n, ty) = if kind == "albums" { (2, "album") } else { (1, "playlist") };
+        let item = self.known_item(kind, id, ty);
+        self.set_saved(n, item.clone(), on);
+        crate::toast::info(if on { "Saved to your library" } else { "Removed from your library" });
         let (me, ctx) = (self.clone(), ctx.clone());
         let path = format!("/youtube/save/{kind}/{id}?on={on}");
-        *me.notice.lock().unwrap() = None;
         std::thread::spawn(move || {
-            let r = backend::post(&path);
-            if r.is_ok() {
-                me.library.reset();
+            if let Err(e) = backend::post(&path) {
+                me.set_saved(n, item, !on);
+                crate::toast::error(format!("Couldn't update your library: {e}"));
             }
-            *me.notice.lock().unwrap() = r.err();
             ctx.request_repaint();
         });
     }
 
-    /// Subscribes to (or leaves) an artist's channel; on success the cached artist page (`artists/{artist_id}`) is updated in place.
+    /// Whether `id` is in the loaded Liked songs page (false until it loads).
+    pub fn is_liked(&self, id: &str) -> bool {
+        let page = self.details.lock().unwrap().get("playlists/LM").cloned();
+        page.is_some_and(|p| matches!(&*p.lock(), State::Ready(d) if d.tracks.iter().any(|t| t.id == id)))
+    }
+
+    /// Likes or unlikes a song from a list row: the star and Liked songs page change at once; a refusal puts it back.
+    pub fn like(self: &Arc<Self>, ctx: &Context, track: Track, on: bool) {
+        self.mirror_like(track.clone(), on);
+        crate::toast::info(if on { "Added to liked songs" } else { "Removed from liked songs" });
+        let (me, ctx) = (self.clone(), ctx.clone());
+        let path = format!("/youtube/like/{}?on={on}", backend::enc(&track.id));
+        std::thread::spawn(move || {
+            if let Err(e) = backend::post(&path) {
+                me.mirror_like(track, !on);
+                crate::toast::error(format!("Couldn't update your likes: {e}"));
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Mirrors a like into the cached Liked songs page (`LM`) so it shows without a refetch.
+    pub fn mirror_like(&self, track: Track, on: bool) {
+        for key in ["playlists/LM", "playlists/VLLM"] {
+            let page = self.details.lock().unwrap().get(key).cloned();
+            if let Some(p) = page {
+                if let State::Ready(d) = &mut *p.lock() {
+                    let d = Arc::make_mut(d);
+                    d.tracks.retain(|t| t.id != track.id);
+                    if on {
+                        d.tracks.insert(0, track.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Subscribes to (or leaves) an artist's channel. The button, sidebar and toast update at once; a refusal puts it back.
     pub fn subscribe(self: &Arc<Self>, ctx: &Context, artist_id: &str, channel_id: &str, on: bool) {
         let (me, ctx) = (self.clone(), ctx.clone());
         let (path, key) = (format!("/youtube/subscribe/{channel_id}?on={on}"), format!("artists/{artist_id}"));
-        *me.notice.lock().unwrap() = None;
-        std::thread::spawn(move || {
-            let r = backend::post(&path);
-            if r.is_ok() {
-                let page = me.details.lock().unwrap().get(&key).cloned();
-                if let Some(d) = page {
-                    if let State::Ready(d) = &mut *d.lock() {
-                        d.subscribed = on;
-                    }
+        let item = self.known_item("artists", artist_id, "artist");
+        let set = move |me: &Data, v: bool| {
+            let page = me.details.lock().unwrap().get(&key).cloned();
+            if let Some(d) = page {
+                if let State::Ready(d) = &mut *d.lock() {
+                    Arc::make_mut(d).subscribed = v;
                 }
-                me.library.reset();
             }
-            *me.notice.lock().unwrap() = r.err();
+            me.set_saved(3, item.clone(), v);
+        };
+        set(&me, on);
+        crate::toast::info(if on { "Subscribed" } else { "Unsubscribed" });
+        std::thread::spawn(move || {
+            if let Err(e) = backend::post(&path) {
+                set(&me, !on);
+                crate::toast::error(format!("Couldn't update the subscription: {e}"));
+            }
             ctx.request_repaint();
         });
     }
@@ -301,7 +617,12 @@ impl Data {
         *me.busy.lock().unwrap() = (Some(svc), None);
         std::thread::spawn(move || {
             let r = if sign_in { backend::sign_in(svc) } else { backend::sign_out(svc) };
-            *me.busy.lock().unwrap() = (None, r.err());
+            let err = r.as_ref().err().cloned();
+            match r {
+                Ok(()) => crate::toast::info(format!("{} {}", if sign_in { "Signed in to" } else { "Signed out of" }, if svc == "youtube" { "YouTube Music" } else { "Spotify" })),
+                Err(e) => crate::toast::error(e),
+            }
+            *me.busy.lock().unwrap() = (None, err);
             me.reset_content();
             ctx.request_repaint();
         });

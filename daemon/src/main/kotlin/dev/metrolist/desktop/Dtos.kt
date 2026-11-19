@@ -30,6 +30,9 @@ data class TrackDto(
 @Serializable
 data class PlaylistDto(val id: String, val title: String, val owner: String? = null, val thumbnail: String? = null, val source: String)
 
+/** `track` is null when no YouTube Music song matches the Spotify metadata. */
+@Serializable data class MatchDto(val track: TrackDto? = null, val retry: Boolean = false)
+
 @Serializable
 data class StreamDto(
     val url: String,
@@ -42,6 +45,7 @@ data class StreamDto(
     val useRangeChunks: Boolean,
     /** Track length from the player response; catalogue entries for videos often carry none. */
     val durationSec: Int? = null,
+    val bitrate: Int? = null,
 )
 
 @Serializable data class LyricsDto(val provider: String, val lrc: String)
@@ -56,8 +60,17 @@ data class ItemDto(
     val thumbnail: String? = null,
     val durationSec: Int? = null,
     val artistId: String? = null,
+    /** Songs only: the album they sit on, so a song card can open it. Null for singles. */
+    val album: String? = null,
+    val albumId: String? = null,
 )
 
 @Serializable data class SectionDto(val title: String, val items: List<ItemDto>)
 
 @Serializable data class PageDto(val item: ItemDto, val description: String? = null, val tracks: List<TrackDto> = emptyList(), val sections: List<SectionDto> = emptyList(), val channelId: String? = null, val subscribed: Boolean = false, val monthlyListeners: String? = null)
+
+@Serializable
+data class CreatePlaylistReq(val title: String, val videoIds: List<String> = emptyList())
+
+@Serializable
+data class CreatedPlaylistDto(val id: String, val added: Int, val total: Int)

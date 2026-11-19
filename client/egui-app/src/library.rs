@@ -81,8 +81,9 @@ impl App {
         let d = self.data.clone();
         d.load_library(ui.ctx());
         match &*d.library.lock() {
-            State::Ready(v) if !self.lib_loaded => {
+            State::Ready(v) if !self.lib_loaded || self.lib_rev != d.lib_rev.load(std::sync::atomic::Ordering::Relaxed) => {
                 self.lib_items = v.iter().map(|(k, i)| LibItem::from_item(*k, i.clone())).collect();
+                self.lib_rev = d.lib_rev.load(std::sync::atomic::Ordering::Relaxed);
                 self.lib_loaded = true;
             }
             State::Loading | State::Idle => self.lib_loaded = false,
@@ -207,7 +208,7 @@ impl App {
         // View switches fade the list out, swap, then fade it in; reversing mid-fade just reverses the fade.
         let target = if self.lib_open { self.lib_view } else { LibView::List };
         let settled = self.lib_shown == target;
-        let va = ui.ctx().animate_bool_with_time(egui::Id::unique("lib-view-fade"), settled, 0.12);
+        let va = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("lib-view-fade"), settled, 0.15, crate::gfx::ease_out);
         if !settled && va <= 0. {
             self.lib_shown = target;
         }
@@ -228,6 +229,7 @@ impl App {
         let cur = self.lib_current;
         let on_item = matches!(self.route, Route::Album | Route::Artist);
         let mut open_item: Option<(Route, &'static str, String)> = None;
+        let mut play_req: Option<crate::data::Item> = None;
         let mut menu_at: Option<(egui::Pos2, Target)> = None;
         let list = Rect::from_min_max(pos2(rect.min.x, y), rect.max);
         let mut lui = App::region(ui, list);
@@ -256,6 +258,12 @@ impl App {
                             menu_at = Some((pos, Target::Item(it.item())));
                         }
                         let tp = ui.painter().clone();
+                        let badge = match view {
+                            LibView::List => Some((pos2(cell.min.x + 26., cell.center().y), 28.)),
+                            LibView::Grid => Some((cell.center(), 30.)),
+                            LibView::Grid2 => Some((pos2(cell.max.x - 8. - 12. - 16., cell.min.y + 8. + (cw - 16.) - 12. - 16.), 32.)),
+                            LibView::Compact => None,
+                        };
                         let (tx, ty, tw) = match view {
                             LibView::Compact => (cell.min.x + 10., cell.center().y, cell.width() - 20.),
                             LibView::List => {
@@ -268,6 +276,11 @@ impl App {
                                 if on {
                                     tp.rect_stroke(cell.expand(2.), rad(8.), egui::Stroke::new(2., t.tx), egui::StrokeKind::Outside);
                                 }
+                                if let Some((at, size)) = badge {
+                                    if self.play_badge(ui, cell, at, size, ("lib-play", ix)) {
+                                        play_req = Some(it.item());
+                                    }
+                                }
                                 continue;
                             }
                             LibView::Grid2 => {
@@ -276,6 +289,11 @@ impl App {
                                 (art.min.x, art.max.y + 8. + 8., cw - 16.)
                             }
                         };
+                        if let Some((at, size)) = badge.filter(|_| view != LibView::Grid) {
+                            if self.play_badge(ui, cell, at, size, ("lib-play", ix)) {
+                                play_req = Some(it.item());
+                            }
+                        }
                         if view == LibView::Compact {
                             let tr = trunc(&tp, pos2(tx, ty), tw, &it.title, font_w(13., Weight::Medium), t.tx);
                             let sx = tr.max.x + 6.;
@@ -291,6 +309,9 @@ impl App {
             });
         if let Some((r, kind, id)) = open_item {
             self.open(r, Some((kind, id)));
+        }
+        if let Some(it) = play_req {
+            self.play_item(ui.ctx(), &it, &[]);
         }
         if let Some(m) = menu_at {
             self.ctx_menu = Some(m);

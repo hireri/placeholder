@@ -16,14 +16,12 @@ symphonia = { version = "0.6", features = ["mkv", "isomp4", "aac"] }
 opus = "0.4"
 souvlaki = { version = "0.9", default-features = false, features = ["use_zbus"] }
 raw-window-handle = "0.6"
-gstreamer = { version = "0.25.4", optional = true }
-gstreamer-app = { version = "0.25.2", optional = true }
-gstreamer-video = { version = "0.25.4", optional = true }
+discord-rich-presence = "1.1.0"
 
 [features]
 default = ["video"]
-# Music videos in the player (needs GStreamer 1.x with a VP9/H.264 decoder, e.g. gst-libav). `--no-default-features` builds without it.
-video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+# Music videos in the player (needs `ffmpeg` on PATH at runtime). `--no-default-features` builds without it.
+video = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }

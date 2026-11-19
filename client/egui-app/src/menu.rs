@@ -135,7 +135,6 @@ const SHUFFLE: usize = 3;
 const OPEN: usize = 4;
 const SONG: usize = 5;
 const ARTIST: usize = 6;
-const ALBUM: usize = 7;
 const SAVE: usize = 8;
 const REMOVE: usize = 9;
 const LINK: usize = 10;
@@ -175,20 +174,15 @@ impl App {
         let mut saved = None;
         match &target {
             Target::Track(tr) => {
-                items.extend([Item::Action(PLAY, "Play", None), Item::Action(NEXT, "Play next", None), Item::Action(QUEUE, "Add to queue", None), Item::Divider, Item::Action(SONG, "View song", None)]);
+                items.extend([Item::Action(PLAY, "Play", None), Item::Action(NEXT, "Play next", None), Item::Action(QUEUE, "Add to queue", None), Item::Divider, Item::Action(SONG, "Open", None)]);
                 if tr.artist_id.is_some() {
                     items.push(Item::Action(ARTIST, "Go to artist", None));
-                }
-                if tr.album_id.is_some() {
-                    items.push(Item::Action(ALBUM, "Go to album", None));
                 }
             }
             Target::Item(it) => {
                 if let Some((kind, _)) = crate::live::target(it) {
                     songs = match &*self.data.detail(ctx, kind, &it.id).lock() {
-                        State::Ready(d) if !d.tracks.is_empty() => Some(d.tracks.clone()),
-                        // Artists have no track list; their song shelves stand in.
-                        State::Ready(d) => Some(d.sections.iter().flat_map(|s| &s.items).filter(|i| i.r#type == "song").map(|i| i.track()).collect()),
+                        State::Ready(d) => Some(d.songs()),
                         _ => None,
                     };
                 }
@@ -214,12 +208,9 @@ impl App {
                 if !cur {
                     items.extend([Item::Action(PLAY, "Play now", None), Item::Action(NEXT, "Play next", None), Item::Action(REMOVE, "Remove from queue", None), Item::Divider]);
                 }
-                items.push(Item::Action(SONG, "View song", None));
+                items.push(Item::Action(SONG, "Open", None));
                 if tr.artist_id.is_some() {
                     items.push(Item::Action(ARTIST, "Go to artist", None));
-                }
-                if tr.album_id.is_some() {
-                    items.push(Item::Action(ALBUM, "Go to album", None));
                 }
             }
         }
@@ -234,17 +225,25 @@ impl App {
         match target {
             Target::Track(tr) => match pick {
                 PLAY => self.pl.play_tracks(ctx, std::slice::from_ref(&tr), 0, false),
-                NEXT | QUEUE => self.pl.enqueue(ctx, std::slice::from_ref(&tr), pick == NEXT),
+                NEXT | QUEUE => {
+                    self.pl.enqueue(ctx, std::slice::from_ref(&tr), pick == NEXT);
+                    crate::toast::info(if pick == NEXT { "Playing next" } else { "Added to queue" });
+                }
                 SONG => self.open_song(tr),
                 ARTIST => self.open_artist(tr.artist_id.as_deref().unwrap_or_default()),
-                ALBUM => self.open_album(tr.album_id.as_deref().unwrap_or_default()),
-                _ => ctx.copy_text(track_link(&tr)),
+                _ => {
+                    ctx.copy_text(track_link(&tr));
+                    crate::toast::info("Link copied");
+                }
             },
             Target::Item(it) => {
                 let v = songs.unwrap_or_default();
                 match pick {
                     PLAY | SHUFFLE => self.pl.play_tracks(ctx, &v, 0, pick == SHUFFLE),
-                    NEXT | QUEUE => self.pl.enqueue(ctx, &v, pick == NEXT),
+                    NEXT | QUEUE => {
+                        self.pl.enqueue(ctx, &v, pick == NEXT);
+                        crate::toast::info(if pick == NEXT { "Playing next" } else { "Added to queue" });
+                    }
                     OPEN => {
                         if let Some((kind, route)) = crate::live::target(&it) {
                             self.open(route, Some((kind, it.id.clone())));
@@ -254,7 +253,10 @@ impl App {
                         let kind = if it.r#type == "album" { "albums" } else { "playlists" };
                         self.data.save(ctx, kind, &it.id, !saved.unwrap_or(false));
                     }
-                    _ => ctx.copy_text(item_link(&it)),
+                    _ => {
+                        ctx.copy_text(item_link(&it));
+                        crate::toast::info("Link copied");
+                    }
                 }
             }
             Target::Queue(i) => {
@@ -262,11 +264,16 @@ impl App {
                 match pick {
                     PLAY => self.pl.play_index(ctx, i),
                     NEXT => self.pl.move_next(i),
-                    REMOVE => self.pl.remove_at(i),
+                    REMOVE => {
+                        self.pl.remove_at(i);
+                        crate::toast::info("Removed from queue");
+                    }
                     SONG => self.open_song(tr),
                     ARTIST => self.open_artist(tr.artist_id.as_deref().unwrap_or_default()),
-                    ALBUM => self.open_album(tr.album_id.as_deref().unwrap_or_default()),
-                    _ => ctx.copy_text(track_link(&tr)),
+                    _ => {
+                        ctx.copy_text(track_link(&tr));
+                        crate::toast::info("Link copied");
+                    }
                 }
             }
         }
