@@ -14,6 +14,28 @@ pub struct Lyrics {
     pub synced: bool,
 }
 
+/// Same directory the daemon uses for its data (credentials, settings, webview profiles, daemon.log).
+pub fn data_dir() -> std::path::PathBuf {
+    if let Some(d) = std::env::var_os("METROLIST_DATA") {
+        return d.into();
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default();
+        std::path::PathBuf::from(home).join(".config")
+    });
+    base.join("metrolist-desktop")
+}
+
+/// The daemon's stderr (InnerTubeX/Timber output), truncated each run; the place to look when playback fails.
+pub fn log_path() -> std::path::PathBuf {
+    data_dir().join("daemon.log")
+}
+
+fn log_file() -> Stdio {
+    let _ = std::fs::create_dir_all(data_dir());
+    std::fs::File::create(log_path()).map_or_else(|_| Stdio::null(), Stdio::from)
+}
+
 /// Release layout: `daemon/` (installDist) and `jre/` sit next to the executable; dev falls back to the Gradle build tree.
 fn exe_dir() -> Option<std::path::PathBuf> {
     std::env::current_exe().ok().and_then(|p| p.parent().map(Into::into))
@@ -37,19 +59,15 @@ fn daemon_command() -> Command {
 /// Blocking on first call: starts the daemon and reads its `{"port":..,"token":..}` handshake line.
 fn conn() -> Result<&'static (String, String), String> {
     CONN.get_or_init(|| {
-        let mut child = daemon_command().stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
+        let mut child = daemon_command().env("METROLIST_LOG", "1").stdout(Stdio::piped()).stderr(log_file()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).map_err(|e| e.to_string())?;
         if line.trim().is_empty() {
-            // Daemon exited before the handshake: surface its stderr instead of a bare JSON EOF.
-            let mut err = String::new();
-            let _ = std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err);
+            // Daemon exited before the handshake: surface its log instead of a bare JSON EOF.
+            let err = std::fs::read_to_string(log_path()).unwrap_or_default();
             let tail: Vec<_> = err.lines().rev().take(6).collect();
             return Err(format!("daemon exited at startup: {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | ")));
         }
-        // Keep draining stderr so a chatty daemon can't block on a full pipe.
-        let mut stderr = child.stderr.take().unwrap();
-        std::thread::spawn(move || { let _ = std::io::copy(&mut stderr, &mut std::io::sink()); });
         *DAEMON.lock().unwrap() = Some(child);
         let v: serde_json::Value = serde_json::from_str(line.trim()).map_err(|e| format!("bad handshake {line:?}: {e}"))?;
         Ok((format!("http://127.0.0.1:{}", v["port"]), v["token"].as_str().unwrap_or_default().to_string()))
@@ -107,8 +125,19 @@ fn parse_lrc(lrc: &str) -> (Vec<(f32, String)>, bool) {
         }
     }
     if synced {
-        out.retain(|(_, t)| !t.is_empty());
         out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // A bare timestamp marks an instrumental break (BitChord's `withInstrumentalGaps`): breaks under 4s, repeated ones and
+        // ones with no line after them are dropped, and a long run-up before the first line gets its own.
+        let all = std::mem::take(&mut out);
+        for (i, (s, t)) in all.iter().enumerate() {
+            let gap = t.is_empty() && all.get(i + 1).is_some_and(|n| n.0 - s >= 4.) && out.last().is_some_and(|l: &(f32, String)| !l.1.is_empty());
+            if !t.is_empty() || gap {
+                out.push((*s, t.clone()));
+            }
+        }
+        if out.first().is_some_and(|l| l.0 >= 4. && !l.1.is_empty()) {
+            out.insert(0, (0., String::new()));
+        }
     }
     (out, synced)
 }
@@ -127,7 +156,7 @@ pub fn get<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
     }
 }
 
-/// URL of a song's video-only stream starting at `start_ms`, and the token its request must carry (for GStreamer to fetch).
+/// URL of a song's video-only stream starting at `start_ms`, and the token its request must carry (for ffmpeg to fetch).
 #[cfg(feature = "video")]
 pub fn video_url(id: &str, start_ms: u64, max_height: u32) -> Result<(String, String), String> {
     let (url, token) = conn()?;
@@ -138,6 +167,16 @@ pub fn video_url(id: &str, start_ms: u64, max_height: u32) -> Result<(String, St
 pub fn post(path: &str) -> Result<(), String> {
     let (url, token) = conn()?;
     ureq::post(&format!("{url}{path}")).set("X-Metrolist-Token", token).call().map(drop).map_err(failure)
+}
+
+/// Blocking POST of a JSON body; call from a worker thread.
+pub fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(path: &str, body: &B) -> Result<T, String> {
+    let (url, token) = conn()?;
+    let body = serde_json::to_string(body).map_err(|e| e.to_string())?;
+    match ureq::post(&format!("{url}{path}")).set("X-Metrolist-Token", token).set("Content-Type", "application/json").send_string(&body) {
+        Ok(r) => r.into_json().map_err(|e| e.to_string()),
+        Err(e) => Err(failure(e)),
+    }
 }
 
 /// The daemon's `error` message for an HTTP failure, else the transport error.
@@ -161,6 +200,8 @@ pub struct Service {
 pub struct User {
     pub name: String,
     pub subtitle: Option<String>,
+    #[serde(rename = "avatarUrl")]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(serde::Deserialize, Clone, Default)]
@@ -181,7 +222,6 @@ pub fn sign_in(svc: &str) -> Result<(), String> {
 pub fn sign_out(svc: &str) -> Result<(), String> {
     let (url, token) = conn()?;
     ureq::delete(&format!("{url}/auth/{svc}")).set("X-Metrolist-Token", token).call().map_err(|e| e.to_string())?;
-    let base = std::env::var("METROLIST_DATA").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/metrolist-desktop"));
-    let _ = std::fs::remove_dir_all(base.join("webview").join(svc));
+    let _ = std::fs::remove_dir_all(data_dir().join("webview").join(svc));
     Ok(())
 }

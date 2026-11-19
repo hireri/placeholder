@@ -2,13 +2,13 @@
 //! cpal output. Decode runs on a worker thread per load; the output callback drains a bounded ring.
 #![allow(dead_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -29,6 +29,8 @@ const DEFAULT_CHUNK: u64 = 1 << 20;
 const OPUS_RATE: u32 = 48_000;
 /// 120 ms at 48 kHz, the largest Opus frame, per channel.
 const OPUS_MAX_FRAME: usize = 5760;
+/// Decoded audio kept ahead of the output; also what an in-buffer seek can jump within.
+const RING_SECS: usize = 8;
 const POLL: Duration = Duration::from_millis(10);
 const PAUSED_POLL: Duration = Duration::from_millis(250);
 
@@ -45,6 +47,8 @@ pub struct StreamInfo {
     pub use_range_chunks: bool,
     #[serde(default)]
     pub duration_sec: Option<u32>,
+    #[serde(default)]
+    pub bitrate: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,15 +67,110 @@ pub fn chunk_range(pos: u64, chunk: u64, total: Option<u64>) -> (u64, u64) {
     (start, end)
 }
 
-/// Byte-range reader over the stream URL. Keeps only the chunk that holds the cursor.
-struct HttpSource {
-    agent: ureq::Agent,
-    info: StreamInfo,
-    chunk: u64,
+/// Chunk cache budget. Opus is ~16 KB/s, so this holds minutes of audio: seeking back over what was just played is
+/// served from memory.
+const CACHE_BYTES: u64 = 8 << 20;
+
+#[derive(Default)]
+struct CacheState {
+    chunks: HashMap<u64, Arc<Vec<u8>>>,
+    inflight: HashSet<u64>,
     total: Option<u64>,
+    keep: usize,
+}
+
+impl CacheState {
+    /// Drops the chunks farthest from `near` until the budget holds.
+    fn evict(&mut self, near: u64) {
+        while self.chunks.len() > self.keep {
+            let Some(far) = self.chunks.keys().copied().max_by_key(|k| k.abs_diff(near)) else { return };
+            self.chunks.remove(&far);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ChunkCache {
+    state: Mutex<CacheState>,
+    ready: Condvar,
+}
+
+/// Fetches `chunk`-sized byte ranges of the stream into a shared cache. Cheap to clone for background prefetches.
+#[derive(Clone)]
+struct Fetcher {
+    agent: ureq::Agent,
+    info: Arc<StreamInfo>,
+    chunk: u64,
+    cache: Arc<ChunkCache>,
+}
+
+impl Fetcher {
+    /// Chunk number `idx`, from the cache, from another thread's in-flight request, or from the network.
+    fn get(&self, idx: u64) -> io::Result<Arc<Vec<u8>>> {
+        let mut st = self.cache.state.lock().unwrap();
+        loop {
+            if let Some(c) = st.chunks.get(&idx) {
+                return Ok(c.clone());
+            }
+            if st.inflight.insert(idx) {
+                break;
+            }
+            st = self.cache.ready.wait(st).unwrap();
+        }
+        let total = st.total;
+        drop(st);
+        let res = self.request(idx, total);
+        let mut st = self.cache.state.lock().unwrap();
+        st.inflight.remove(&idx);
+        let out = res.map(|(body, t)| {
+            st.total = st.total.or(t);
+            let body = Arc::new(body);
+            st.chunks.insert(idx, body.clone());
+            st.evict(idx);
+            body
+        });
+        drop(st);
+        self.cache.ready.notify_all();
+        out
+    }
+
+    /// Warms chunk `idx` on a background thread unless it is cached, in flight or past the end.
+    fn prefetch(&self, idx: u64) {
+        {
+            let st = self.cache.state.lock().unwrap();
+            if st.chunks.contains_key(&idx) || st.inflight.contains(&idx) || st.total.is_some_and(|t| idx * self.chunk >= t) {
+                return;
+            }
+        }
+        let f = self.clone();
+        thread::spawn(move || {
+            let _ = f.get(idx);
+        });
+    }
+
+    fn request(&self, idx: u64, total: Option<u64>) -> io::Result<(Vec<u8>, Option<u64>)> {
+        let (start, end) = chunk_range(idx * self.chunk, self.chunk, total);
+        let mut req = self.agent.get(&self.info.url).set("Range", &format!("bytes={start}-{end}"));
+        for (k, v) in &self.info.headers {
+            req = req.set(k, v);
+        }
+        let resp = req.call().map_err(|e| io::Error::other(e.to_string()))?;
+        if resp.status() != 206 {
+            return Err(io::Error::other(format!("unexpected HTTP {}", resp.status())));
+        }
+        let total = resp.header("Content-Range").and_then(|cr| cr.rsplit('/').next()).and_then(|t| t.parse().ok());
+        let len = end - start + 1;
+        let mut body = Vec::with_capacity(len as usize);
+        resp.into_reader().take(len).read_to_end(&mut body)?;
+        Ok((body, total))
+    }
+}
+
+/// Byte-range reader over the stream URL, backed by the chunk cache; reading into a chunk prefetches the next one.
+struct HttpSource {
+    f: Fetcher,
     pos: u64,
-    buf: Vec<u8>,
-    buf_start: u64,
+    cur: Option<(u64, Arc<Vec<u8>>)>,
 }
 
 impl HttpSource {
@@ -80,62 +179,42 @@ impl HttpSource {
             0 => DEFAULT_CHUNK,
             n => n,
         };
-        let mut s = HttpSource {
+        let cache = Arc::new(ChunkCache::default());
+        cache.state.lock().unwrap().keep = (CACHE_BYTES / chunk).clamp(3, 16) as usize;
+        let f = Fetcher {
             agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).build(),
-            info: info.clone(),
+            info: Arc::new(info.clone()),
             chunk,
-            total: None,
-            pos: 0,
-            buf: Vec::new(),
-            buf_start: 0,
+            cache,
         };
-        s.fetch(0)?;
-        Ok(s)
+        // The first chunk also tells the stream length.
+        let first = f.get(0)?;
+        Ok(HttpSource { f, pos: 0, cur: Some((0, first)) })
     }
 
-    fn fetch(&mut self, at: u64) -> io::Result<()> {
-        let (start, end) = chunk_range(at, self.chunk, self.total);
-        let mut req = self
-            .agent
-            .get(&self.info.url)
-            .set("Range", &format!("bytes={start}-{end}"));
-        for (k, v) in &self.info.headers {
-            req = req.set(k, v);
-        }
-        let resp = req.call().map_err(|e| io::Error::other(e.to_string()))?;
-        if resp.status() != 206 {
-            return Err(io::Error::other(format!("unexpected HTTP {}", resp.status())));
-        }
-        if self.total.is_none() {
-            self.total = resp
-                .header("Content-Range")
-                .and_then(|cr| cr.rsplit('/').next())
-                .and_then(|t| t.parse().ok());
-        }
-        let len = end - start + 1;
-        let mut body = Vec::with_capacity(len as usize);
-        resp.into_reader().take(len).read_to_end(&mut body)?;
-        self.buf = body;
-        self.buf_start = start;
-        Ok(())
+    fn total(&self) -> Option<u64> {
+        self.f.cache.state.lock().unwrap().total
     }
 }
 
 impl Read for HttpSource {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if out.is_empty() || self.total.is_some_and(|t| self.pos >= t) {
+        if out.is_empty() || self.total().is_some_and(|t| self.pos >= t) {
             return Ok(0);
         }
-        if self.pos < self.buf_start || self.pos >= self.buf_start + self.buf.len() as u64 {
-            self.fetch(self.pos)?;
+        let idx = self.pos / self.f.chunk;
+        if self.cur.as_ref().is_none_or(|(i, _)| *i != idx) {
+            self.cur = Some((idx, self.f.get(idx)?));
+            self.f.prefetch(idx + 1);
         }
-        let off = (self.pos - self.buf_start) as usize;
-        let avail = self.buf.len().saturating_sub(off);
+        let body = &self.cur.as_ref().unwrap().1;
+        let off = (self.pos - idx * self.f.chunk) as usize;
+        let avail = body.len().saturating_sub(off);
         if avail == 0 {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty range response"));
         }
         let n = avail.min(out.len());
-        out[..n].copy_from_slice(&self.buf[off..off + n]);
+        out[..n].copy_from_slice(&body[off..off + n]);
         self.pos += n as u64;
         Ok(n)
     }
@@ -150,7 +229,7 @@ impl Seek for HttpSource {
             }
             SeekFrom::Current(d) => (self.pos, d),
             SeekFrom::End(d) => (
-                self.total.ok_or_else(|| io::Error::other("unknown stream length"))?,
+                self.total().ok_or_else(|| io::Error::other("unknown stream length"))?,
                 d,
             ),
         };
@@ -168,7 +247,7 @@ impl MediaSource for HttpSource {
     }
 
     fn byte_len(&self) -> Option<u64> {
-        self.total
+        self.total()
     }
 }
 
@@ -253,11 +332,13 @@ struct Session {
     tmp: Vec<f32>,
     resample: Option<Resample>,
     duration: Option<f32>,
+    cache: (Arc<ChunkCache>, u64),
 }
 
 impl Session {
     fn open(info: &StreamInfo) -> Result<Session, String> {
         let src = HttpSource::open(info).map_err(|e| e.to_string())?;
+        let cache = (src.f.cache.clone(), src.f.chunk);
         let mss = MediaSourceStream::new(Box::new(src), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
         hint.mime_type(info.mime_type.split(';').next().unwrap_or_default().trim());
@@ -281,7 +362,7 @@ impl Session {
                 .map_err(|e| e.to_string())?;
             Codec::Aac(Box::new(d))
         };
-        Ok(Session { reader, track_id, time_base, codec, tmp: Vec::new(), resample: None, duration })
+        Ok(Session { reader, track_id, time_base, codec, tmp: Vec::new(), resample: None, duration, cache })
     }
 
     /// Seeks the demuxer and decoder and rebases the ring to the actual landing time.
@@ -335,8 +416,12 @@ struct Ring {
     /// Track time (s) at which `played` was 0.
     base: f64,
     duration: Option<f32>,
+    /// Chunk cache of the current stream and its chunk size, for the scrubber's buffered range.
+    cache: Option<(Arc<ChunkCache>, u64)>,
     /// Bumped on load/seek/stop. Decode threads drop samples produced under an older epoch.
     epoch: u64,
+    /// Bumped on load/stop only: a seek during the stream open must not stop it publishing the duration and cache.
+    loads: u64,
 }
 
 impl Ring {
@@ -364,7 +449,7 @@ struct Shared {
 }
 
 impl Shared {
-    /// Wait between ring checks. Paused, nothing drains the ring, so back off; the 2 s ring covers the resume latency.
+    /// Wait between ring checks. Paused, nothing drains the ring, so back off; the ring covers the resume latency.
     // ponytail: polling backoff; a Condvar woken by play()/seek() would make it zero-wake if this still shows up in profiles.
     fn poll(&self) -> Duration {
         if self.playing.load(Relaxed) { POLL } else { PAUSED_POLL }
@@ -411,12 +496,13 @@ impl Shared {
     }
 }
 
-fn run(shared: &Shared, rx: &Receiver<f32>, info: &StreamInfo, mut epoch: u64) -> Result<(), String> {
+fn run(shared: &Shared, rx: &Receiver<f32>, info: &StreamInfo, mut epoch: u64, load: u64) -> Result<(), String> {
     let mut s = Session::open(info)?;
     {
         let mut r = shared.ring.lock().unwrap();
-        if r.epoch == epoch {
+        if r.loads == load {
             r.duration = s.duration;
+            r.cache = Some(s.cache.clone());
         }
     }
     let mut pending = Vec::new();
@@ -510,6 +596,24 @@ fn output_device() -> Option<(cpal::Device, SupportedStreamConfig)> {
     Some((dev, cfg))
 }
 
+/// Clamps to 0..=1, sorts and joins overlapping or touching ranges.
+fn merge_ranges(mut v: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
+    v.retain_mut(|r| {
+        r.0 = r.0.clamp(0., 1.);
+        r.1 = r.1.clamp(0., 1.);
+        r.1 > r.0
+    });
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<(f32, f32)> = Vec::with_capacity(v.len());
+    for (s, e) in v {
+        match out.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => out.push((s, e)),
+        }
+    }
+    out
+}
+
 pub struct Engine {
     shared: Arc<Shared>,
     stream: Option<cpal::Stream>,
@@ -529,11 +633,13 @@ impl Engine {
         let shared = Arc::new(Shared {
             ring: Mutex::new(Ring {
                 samples: VecDeque::new(),
-                cap: out_rate as usize * out_ch * 2,
+                cap: out_rate as usize * out_ch * RING_SECS,
                 played: 0,
                 base: 0.0,
                 duration: None,
+                cache: None,
                 epoch: 0,
+                loads: 0,
             }),
             events: Mutex::new(Vec::new()),
             playing: AtomicBool::new(false),
@@ -557,10 +663,12 @@ impl Engine {
         if self.stream.is_none() {
             return self.shared.emit(Event::Error("no audio output device".into()));
         }
-        let epoch = {
+        let (epoch, load) = {
             let mut r = self.shared.ring.lock().unwrap();
             r.duration = None;
-            r.restart(start_secs as f64)
+            r.cache = None;
+            r.loads += 1;
+            (r.restart(start_secs as f64), r.loads)
         };
         let (tx, rx) = mpsc::channel();
         if start_secs > 0.0 {
@@ -572,7 +680,7 @@ impl Engine {
         self.resume_stream();
         let shared = self.shared.clone();
         thread::spawn(move || {
-            if let Err(e) = run(&shared, &rx, &s, epoch) {
+            if let Err(e) = run(&shared, &rx, &s, epoch, load) {
                 shared.fail(epoch, e);
             }
         });
@@ -602,7 +710,21 @@ impl Engine {
     }
 
     pub fn seek(&self, secs: f32) {
-        self.shared.ring.lock().unwrap().restart(secs as f64);
+        {
+            let mut r = self.shared.ring.lock().unwrap();
+            let per_sec = (self.shared.out_rate as usize * self.shared.out_ch) as f64;
+            let cursor = r.base + r.played as f64 / self.shared.out_rate as f64;
+            let ahead = r.samples.len() as f64 / per_sec;
+            // Already decoded: drop the samples in between instead of re-seeking the stream.
+            if !r.samples.is_empty() && (secs as f64) >= cursor && (secs as f64) < cursor + ahead {
+                let frames = ((secs as f64 - cursor) * self.shared.out_rate as f64) as usize;
+                r.samples.drain(..frames * self.shared.out_ch);
+                r.played += frames as u64;
+                drop(r);
+                return (self.shared.wake)();
+            }
+            r.restart(secs as f64);
+        }
         if let Some(tx) = self.tx.lock().unwrap().as_ref() {
             let _ = tx.send(secs);
         }
@@ -621,6 +743,8 @@ impl Engine {
         {
             let mut r = self.shared.ring.lock().unwrap();
             r.duration = None;
+            r.cache = None;
+            r.loads += 1;
             r.restart(0.0);
         }
         (self.shared.wake)();
@@ -636,6 +760,40 @@ impl Engine {
         self.shared.ring.lock().unwrap().duration
     }
 
+    /// Buffered parts of the song as sorted, merged fractions of `dur` (the caller's: WebM streams often carry none):
+    /// downloaded chunks plus the decoded-ahead span.
+    pub fn cached(&self, dur: f32) -> Vec<(f32, f32)> {
+        if dur <= 0. {
+            return Vec::new();
+        }
+        let (cache, chunk, dur, play, ahead) = {
+            let r = self.shared.ring.lock().unwrap();
+            let Some((c, n)) = r.cache.clone() else { return Vec::new() };
+            let rate = self.shared.out_rate as f64;
+            let play = r.base + r.played as f64 / rate;
+            (c, n, dur as f64, play, r.samples.len() as f64 / (rate * self.shared.out_ch as f64))
+        };
+        let st = cache.state.lock().unwrap();
+        let Some(total) = st.total.filter(|t| *t > 0) else { return Vec::new() };
+        // ponytail: assumes roughly constant bitrate and ignores the container header, so bytes map linearly to time.
+        let mut ranges: Vec<(f32, f32)> = st
+            .chunks
+            .iter()
+            .map(|(i, b)| {
+                let start = i * chunk;
+                ((start as f64 / total as f64) as f32, ((start + b.len() as u64) as f64 / total as f64) as f32)
+            })
+            .collect();
+        drop(st);
+        ranges.push(((play / dur) as f32, ((play + ahead) / dur) as f32));
+        merge_ranges(ranges)
+    }
+
+    /// Playing but the decoded ring is empty: the output is silent while the stream catches up.
+    pub fn starved(&self) -> bool {
+        self.is_playing() && self.shared.ring.lock().unwrap().samples.is_empty()
+    }
+
     pub fn is_playing(&self) -> bool {
         self.shared.playing.load(Relaxed)
     }
@@ -647,7 +805,26 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use super::chunk_range;
+    use super::{chunk_range, merge_ranges, CacheState};
+    use std::sync::Arc;
+
+    #[test]
+    fn merge_ranges_joins_and_clamps() {
+        let m = merge_ranges(vec![(0.5, 0.7), (0., 0.2), (0.1, 0.3), (0.7, 0.8), (0.9, 1.2), (0.4, 0.4)]);
+        assert_eq!(m, [(0., 0.3), (0.5, 0.8), (0.9, 1.)]);
+    }
+
+    #[test]
+    fn cache_evicts_farthest_chunk() {
+        let mut st = CacheState { keep: 3, ..Default::default() };
+        for i in [0, 1, 2, 9] {
+            st.chunks.insert(i, Arc::new(vec![]));
+        }
+        st.evict(9);
+        let mut left: Vec<_> = st.chunks.keys().copied().collect();
+        left.sort();
+        assert_eq!(left, [1, 2, 9]);
+    }
 
     #[test]
     fn chunk_range_math() {

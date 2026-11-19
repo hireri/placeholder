@@ -38,8 +38,8 @@ pub enum Route {
     History,
     Settings,
     Import,
-    /// One song (`App::song`): cover, details and the album it is on.
-    Song,
+    /// A home shelf listed in full; `sel` is ("shelf", shelf title).
+    Shelf,
 }
 
 /// A page in the back/forward history: the route plus what it shows.
@@ -82,13 +82,16 @@ pub struct App {
     pub global_search: String,
     pub lib_items: Vec<LibItem>,
     pub lib_loaded: bool,
+    pub lib_rev: usize,
     /// Query the Search page shows (`global_search` is the text box, committed on Enter).
     pub submitted: String,
     pub data: Arc<Data>,
     /// Album/artist/playlist shown by the Album and Artist routes: (endpoint segment, browse id).
     pub sel: Option<(&'static str, String)>,
-    /// Song shown by the Song route.
+    /// The single shown by the Album route when `sel` is `("song", _)`: a song with no album, as a one-track playlist.
     pub song: Option<Track>,
+    /// An album/playlist/artist whose hover-play was clicked before its page had loaded: (endpoint segment, browse id).
+    pub want_play: Option<(&'static str, String)>,
     /// Right-click menu: where it opened and what it is for. Drawn by `menu::context_menu`.
     pub ctx_menu: Option<(egui::Pos2, crate::menu::Target)>,
     /// Button that opened `ctx_menu`: presses on it toggle the menu instead of counting as "outside".
@@ -99,12 +102,19 @@ pub struct App {
     pub vol_open: bool,
     /// Music videos play in the player's floating rect (`true`) or show their thumbnail.
     pub video_on: bool,
+    /// Requested video height (one of `video::HEIGHTS`).
+    pub video_h: u32,
     #[cfg(feature = "video")]
     pub video: Option<crate::video::Video>,
     /// OS media controls (MPRIS/SMTC); `None` when the platform backend is unavailable.
     media: Option<Media>,
+    discord: crate::discord::Discord,
     started: bool,
 }
+
+/// Selectable video heights; the player's floating rect is at most ~720px wide, so 480 is the default.
+/// No 360p or lower: YouTube's SABR stream for those takes ~12 s to start or hangs.
+pub const VIDEO_HEIGHTS: [u32; 3] = [480, 720, 1080];
 
 /// UI state kept between runs (eframe storage).
 #[derive(Serialize, Deserialize)]
@@ -119,11 +129,12 @@ struct Prefs {
     view: PlayerView,
     volume: f32,
     video_on: bool,
+    video_h: u32,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, video_on: true }
+        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, video_on: true, video_h: 480 }
     }
 }
 
@@ -155,13 +166,9 @@ fn visuals(ctx: &Context, t: &Theme) {
     ctx.set_visuals(v);
 }
 
-fn quint_out(t: f32) -> f32 {
-    1. - (1. - t).powi(5)
-}
-
 /// 0..1 progress that eases toward `on`, reversing smoothly if toggled mid-flight.
 pub fn anim(ctx: &Context, id: &str, on: bool) -> f32 {
-    ctx.animate_bool_with_time_and_easing(Id::unique(id), on, 0.32, quint_out)
+    ctx.animate_bool_with_time_and_easing(Id::unique(id), on, 0.3, |t| 1. - (1. - t).powi(4))
 }
 
 impl App {
@@ -169,10 +176,8 @@ impl App {
         install(&cc.egui_ctx);
         let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, PREFS)).unwrap_or_default();
         let volume = prefs.volume.clamp(0., 1.);
-        let repaint = cc.egui_ctx.clone();
-        let pl = Player::new(audio::Engine::new(move || repaint.request_repaint()));
-        let wake = cc.egui_ctx.clone();
-        let media = Media::new(move || wake.request_repaint(), os_window(cc));
+        let pl = Player::new(audio::Engine::new(crate::tray::wake));
+        let media = Media::new(crate::tray::wake, os_window(cc));
         pl.engine.set_volume(volume);
         let t = Theme::idle();
         visuals(&cc.egui_ctx, &t);
@@ -199,10 +204,12 @@ impl App {
             global_search: String::new(),
             lib_items: Vec::new(),
             lib_loaded: false,
+            lib_rev: 0,
             submitted: String::new(),
             data: Arc::new(Data::new()),
             sel: None,
             song: None,
+            want_play: None,
             ctx_menu: None,
             ctx_keep: egui::Rect::NOTHING,
             home_chip: 0,
@@ -210,9 +217,11 @@ impl App {
             volume,
             vol_open: false,
             video_on: prefs.video_on,
+            video_h: prefs.video_h.max(VIDEO_HEIGHTS[0]),
             #[cfg(feature = "video")]
             video: None,
             media,
+            discord: crate::discord::Discord::new(),
             started: false,
         }
     }
@@ -233,8 +242,8 @@ impl App {
 
         // Brand sits over the library and is clipped by its width.
         let bp = p.with_clip_rect(Rect::from_min_max(tb.min, pos2(tb.min.x + lw, tb.max.y)));
-        bp.rect_filled(Rect::from_center_size(pos2(tb.min.x + 34., cy), vec2(16., 16.)), rad(5.), t.ax);
-        trunc(&bp, pos2(tb.min.x + 54., cy), 200., "Metrolist", font_w(14., Weight::Semi), t.tx);
+        bp.rect_filled(Rect::from_center_size(pos2(tb.min.x + 26., cy), vec2(18., 18.)), rad(5.), t.ax);
+        trunc(&bp, pos2(tb.min.x + 44., cy), 200., "Serafim", font_w(14., Weight::Semi), t.tx);
 
         // Right cluster, laid out from the right edge.
         let mut x = tb.max.x - 12.;
@@ -255,17 +264,17 @@ impl App {
         trunc(&p, pos2(me.min.x + 37., cy), 100., &name, font(13.), t.tx);
         x = me.min.x - 6.;
 
-        // Middle: back/forward + global search, centred in the space between brand and right cluster.
+        // Middle: search centred on the window, back/forward hugging its left edge.
         let (lo, hi) = (tb.min.x + lw, x - 12.);
-        let w = (hi - lo).min(560.).max(0.);
-        let mx = (lo + hi) / 2. - w / 2.;
-        if icon_button(ui, &t, "back", pos2(mx + 16., cy), 32., icon!("back"), 16., if self.back.is_empty() { t.tf } else { t.tm }).clicked() {
+        let cx = tb.center().x;
+        let half = (cx - lo - 76.).min(hi - cx).min(280.).max(0.);
+        if icon_button(ui, &t, "back", pos2(cx - half - 54., cy), 32., icon!("back"), 16., if self.back.is_empty() { t.tf } else { t.tm }).clicked() {
             self.back();
         }
-        if icon_button(ui, &t, "fwd", pos2(mx + 54., cy), 32., icon!("fwd"), 16., if self.fwd.is_empty() { t.tf } else { t.tm }).clicked() {
+        if icon_button(ui, &t, "fwd", pos2(cx - half - 16., cy), 32., icon!("fwd"), 16., if self.fwd.is_empty() { t.tf } else { t.tm }).clicked() {
             self.forward();
         }
-        let sr = Rect::from_min_max(pos2(mx + 70., cy - 17.), pos2(mx + w, cy + 17.));
+        let sr = Rect::from_min_max(pos2(cx - half, cy - 17.), pos2(cx + half, cy + 17.));
         let id = Id::unique("global-search");
         let focused = ui.memory(|m| m.has_focus(id));
         p.rect_filled(sr, rad(17.), if focused { t.s3 } else { t.s2 });
@@ -314,7 +323,12 @@ impl App {
             if i % 4 == 0 && on {
                 p.circle_filled(c, 18., t.tx.gamma_multiply(0.24));
             }
-            if icon_button(ui, &t, ("mini", i), c, 36., ic, s, if on { t.tx } else { t.tm }).clicked() {
+            let buffering = i == 2 && self.pl.buffering();
+            if buffering {
+                crate::page::spinner(&p, c, 10., ui.input(|i| i.time) as f32, t.tx);
+                ui.ctx().request_repaint();
+            }
+            if icon_button(ui, &t, ("mini", i), c, 36., ic, s, if buffering { Color32::TRANSPARENT } else if on { t.tx } else { t.tm }).clicked() {
                 match i {
                     0 => self.pl.toggle_shuffle(),
                     1 => self.pl.prev(ui.ctx()),
@@ -394,7 +408,7 @@ impl App {
         if hot.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        let h = ui.ctx().animate_bool_with_time(ui.scope_id().with("peek-h"), hot.hovered(), 0.12);
+        let h = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with("peek-h"), hot.hovered(), 0.15, ease_out);
         let (a_l, a_r) = (1., lerp(0.62..=0.78, h));
         // Outline with 18px rounded left corners, as (point, outward normal). A 1px transparent ring
         // offset along each normal gives the mesh an anti-aliased edge, which strips alone cannot.
@@ -463,10 +477,15 @@ impl App {
 
     /// Opens `r` showing `sel` (endpoint segment, browse id); a no-op if that page is already shown.
     pub fn open(&mut self, r: Route, sel: Option<(&'static str, String)>) {
-        if r == self.route && sel == self.sel && r != Route::Song {
+        let song = self.song.clone();
+        self.open_with(r, sel, song);
+    }
+
+    fn open_with(&mut self, r: Route, sel: Option<(&'static str, String)>, song: Option<Track>) {
+        if r == self.route && sel == self.sel {
             return;
         }
-        let was = self.restore(Loc { route: r, sel, song: self.song.clone() });
+        let was = self.restore(Loc { route: r, sel, song });
         self.back.push(was);
         self.fwd.clear();
     }
@@ -479,13 +498,41 @@ impl App {
         self.open(Route::Album, Some(("albums", id.to_string())));
     }
 
+    /// Songs have no page of their own: one on an album opens that album, a single opens as a one-track playlist.
     pub fn open_song(&mut self, t: Track) {
-        if self.route == Route::Song && self.song.as_ref().is_some_and(|s| s.id == t.id) {
-            return;
+        match t.album_id.clone() {
+            Some(id) => self.open_album(&id),
+            None => {
+                let sel = Some(("song", t.id.clone()));
+                self.open_with(Route::Album, sel, Some(t));
+            }
         }
-        let was = self.restore(Loc { route: Route::Song, sel: self.sel.clone(), song: Some(t) });
-        self.back.push(was);
-        self.fwd.clear();
+    }
+
+    /// Plays what an album/playlist/artist plays as soon as its page has loaded (started by a card's play button).
+    pub fn resolve_play(&mut self, ctx: &egui::Context) {
+        let Some((kind, id)) = self.want_play.clone() else { return };
+        let d = self.data.detail(ctx, kind, &id);
+        let state = match &*d.lock() {
+            State::Ready(p) => Ok(p.songs()),
+            State::Failed(e) => Err(Some(e.clone())),
+            _ => Err(None),
+        };
+        match state {
+            Ok(songs) => {
+                if songs.is_empty() {
+                    crate::toast::error("Nothing to play here");
+                } else {
+                    self.pl.play_tracks(ctx, &songs, 0, false);
+                }
+                self.want_play = None;
+            }
+            Err(Some(e)) => {
+                crate::toast::error(format!("Couldn't load it: {e}"));
+                self.want_play = None;
+            }
+            Err(None) => {}
+        }
     }
 
     fn back(&mut self) {
@@ -502,20 +549,49 @@ impl App {
         }
     }
 
+    /// Reattaches to a freshly created window after the previous one was destroyed (hidden to the tray on Wayland):
+    /// everything tied to the old egui context is rebuilt, the player and library state carry over.
+    pub fn rebind(&mut self, cc: &eframe::CreationContext<'_>) {
+        install(&cc.egui_ctx);
+        visuals(&cc.egui_ctx, &self.t);
+        self.g = Gfx::new();
+        #[cfg(feature = "video")]
+        {
+            self.video = None;
+        }
+        self.started = false;
+    }
+
+    /// One step of the player while no window exists: advances the queue and serves media keys and tray commands.
+    pub fn headless(&mut self, ctx: &Context) {
+        self.pl.tick(ctx);
+        if let Some((t, on)) = self.pl.like_event.take() {
+            self.data.mirror_like(t, on);
+        }
+        self.resolve_play(ctx);
+        self.sync_media(ctx);
+    }
+
     /// Mirrors the current song to the OS controls and applies their commands. Runs every frame, also while the sidebar is collapsed.
     fn sync_media(&mut self, ctx: &Context) {
-        let Some(m) = self.media.as_mut() else { return };
-        match self.pl.song() {
-            Some(s) => {
-                let cover = s.thumbnail.as_deref().map(|u| sized_url(u, 544));
-                let dur = self.pl.dur();
-                m.set_metadata(&s.title, &s.artist, &s.album, cover.as_deref(), (dur > 0.).then_some(dur));
-                m.set_playback(self.pl.playing, self.pl.pos);
-                m.set_volume(self.volume);
+        let mut cmds = crate::tray::take_cmds();
+        let cover = self.pl.song().and_then(|s| s.thumbnail.as_deref().map(|u| sized_url(u, 544)));
+        let song = self.pl.song().map(|s| (s.title.as_str(), s.artist.as_str(), cover.as_deref()));
+        self.discord.update(song, self.pl.playing, self.pl.pos, self.pl.dur());
+        if let Some(m) = self.media.as_mut() {
+            match self.pl.song() {
+                Some(s) => {
+                    let cover = s.thumbnail.as_deref().map(|u| sized_url(u, 544));
+                    let dur = self.pl.dur();
+                    m.set_metadata(&s.title, &s.artist, &s.album, cover.as_deref(), (dur > 0.).then_some(dur));
+                    m.set_playback(self.pl.playing, self.pl.pos);
+                    m.set_volume(self.volume);
+                }
+                None => m.set_stopped(),
             }
-            None => m.set_stopped(),
+            cmds.extend(m.poll());
         }
-        for cmd in m.poll() {
+        for cmd in cmds {
             match cmd {
                 Cmd::Play if !self.pl.playing => self.pl.toggle(ctx),
                 Cmd::Pause if self.pl.playing => self.pl.toggle(ctx),
@@ -635,7 +711,7 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, video_on: self.video_on };
+        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, video_on: self.video_on, video_h: self.video_h };
         eframe::set_value(storage, PREFS, &p);
     }
 
@@ -650,6 +726,10 @@ impl eframe::App for App {
             crate::tray::hide(&ctx);
         }
         self.pl.tick(&ctx);
+        if let Some((t, on)) = self.pl.like_event.take() {
+            self.data.mirror_like(t, on);
+        }
+        self.resolve_play(&ctx);
         crate::gfx::trim_covers(&ctx);
         self.follow_track(&ctx);
         self.keys(&ctx);
@@ -717,6 +797,8 @@ impl eframe::App for App {
             self.peek(ui, pl_r, 1. - pl_t);
             self.mini(ui, full, 1. - pl_t);
         }
+        // Mini player: 64 tall plus 14 margin; lift toasts clear of it while it's showing.
+        crate::toast::show(&ctx, &self.t, (1. - pl_t) * 82.);
         self.context_menu(&ctx);
     }
 }

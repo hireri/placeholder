@@ -3,7 +3,7 @@
 use crate::app::App;
 use crate::data::{State, Track};
 use crate::gfx::*;
-use eframe::egui::{self, pos2, vec2, Align2, Id, Rect, Sense};
+use eframe::egui::{self, pos2, vec2, Align2, Color32, Id, Rect, Sense};
 
 impl App {
     /// "About the artist" and "Credits" cards starting at `y0`; returns their height (`paint == false` only measures).
@@ -36,10 +36,9 @@ impl App {
             None => (None, false),
         };
         // Header (avatar, name, lines) ends at 110 and the bio starts at 124; the actions row and optional error line follow.
-        let notice = self.data.notice.lock().unwrap().clone();
         let bio_end = 124. + bio.as_ref().map_or(0., |g| g.size().y) + if more { 24. } else { 0. };
         let actions_y = bio_end + 12.;
-        let about_h = actions_y + 35. + if notice.is_some() { 22. } else { 0. } + 16.;
+        let about_h = actions_y + 35. + 16.;
 
         let mut credits: Vec<(String, &str, Option<(&'static str, String)>)> = vec![];
         for (i, a) in artist.split(", ").filter(|a| !a.is_empty()).enumerate() {
@@ -127,6 +126,15 @@ impl App {
                 p.rect_filled(r, rad(17.5), if hot.is_pointer_button_down_on() { t.ax.gamma_multiply(0.85) } else { t.ax });
                 p.text(r.center(), Align2::CENTER_CENTER, label, font(13.), t.on_ax);
                 hot
+            } else if key == "sub" {
+                // Subscribed: white pill.
+                let hot = ui.interact(r, ui.scope_id().with(key), Sense::click());
+                if hot.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                p.rect_filled(r, rad(17.5), if hot.hovered() { Color32::from_gray(225) } else { Color32::WHITE });
+                p.text(r.center(), Align2::CENTER_CENTER, label, font(13.), Color32::BLACK);
+                hot
             } else {
                 let hot = tonal(ui, &t, key, r, 17.5, Some(t.s2));
                 p.text(r.center(), Align2::CENTER_CENTER, label, font(13.), if hot.hovered() { t.tx } else { t.tm });
@@ -138,9 +146,6 @@ impl App {
             x += w + 8.;
         }
         let shuffle: Vec<Track> = if clicked == Some("shuffle") { song_items().map(|i| i.track()).collect() } else { vec![] };
-        if let Some(e) = &notice {
-            trunc(&p, pos2(a.min.x + 16., ay + 41.), bw - 32., e, font(12.), t.tm);
-        }
 
         let k = Rect::from_min_size(pos2(bx, a.max.y + 12.), vec2(bw, credits_h));
         p.rect_filled(k, rad(14.), fill);
