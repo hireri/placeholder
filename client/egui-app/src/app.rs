@@ -303,7 +303,7 @@ impl App {
         let cy = tb.center().y;
 
         // Left: the logo (over the library, tinted to the accent) with back and forward just right of it.
-        icon(ui, icon!("serafim"), pos2(tb.min.x + 30., cy), 30., t.ax);
+        icon(ui, icon!("serafin"), pos2(tb.min.x + 30., cy), 30., t.ax);
         if icon_button(ui, &t, "back", pos2(tb.min.x + 71., cy), 32., icon!("back"), 16., if self.back.is_empty() { t.tf } else { t.tm }).clicked() {
             self.back();
         }

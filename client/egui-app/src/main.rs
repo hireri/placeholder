@@ -1,4 +1,4 @@
-//! Serafim desktop client on egui/eframe. Layout shell only.
+//! Serafin desktop client on egui/eframe. Layout shell only.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[macro_use]
@@ -53,14 +53,14 @@ impl eframe::App for Carry {
 fn main() -> eframe::Result {
     tray::start(tray::acquire());
     let app: Shared = Rc::default();
-    let icon = image::load_from_memory(include_bytes!("../assets/logo/serafim-app-icon.png")).expect("bundled app icon").into_rgba8();
+    let icon = image::load_from_memory(include_bytes!("../assets/logo/serafin-app-icon.png")).expect("bundled app icon").into_rgba8();
     let icon = egui::IconData { width: icon.width(), height: icon.height(), rgba: icon.into_raw() };
     loop {
         let opts = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_icon(icon.clone())
-                .with_title("Serafim")
-                .with_app_id("serafim")
+                .with_title("Serafin")
+                .with_app_id("serafin")
                 .with_inner_size([1280., 800.])
                 .with_min_inner_size([800., 560.]),
             ..Default::default()

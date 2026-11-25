@@ -11,7 +11,7 @@ pub struct Custom {
     light: HashMap<String, String>,
 }
 
-const TEMPLATE: &str = "# Serafim custom theme. Delete a line to keep the generated colour for it.
+const TEMPLATE: &str = "# Serafin custom theme. Delete a line to keep the generated colour for it.
 # Names: s0 s1 s2 s3 (window, sidebar, panel, hover), tx tm tf (text), ax on_ax axc (accent, text on accent, accent container)
 [dark]
 s0 = \"#121214\"

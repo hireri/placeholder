@@ -158,7 +158,7 @@ mod platform {
             "metrolist".into()
         }
         fn title(&self) -> String {
-            "Serafim".into()
+            "Serafin".into()
         }
         fn icon_pixmap(&self) -> Vec<ksni::Icon> {
             tray_icons(self.dark)
@@ -178,7 +178,7 @@ mod platform {
                 StandardItem { label: "Next".into(), activate: Box::new(|_: &mut Self| send(Cmd::Next)), ..Default::default() }.into(),
                 StandardItem { label: "Previous".into(), activate: Box::new(|_: &mut Self| send(Cmd::Prev)), ..Default::default() }.into(),
                 MenuItem::Separator,
-                StandardItem { label: "Show Serafim".into(), activate: Box::new(|_: &mut Self| show()), ..Default::default() }.into(),
+                StandardItem { label: "Show Serafin".into(), activate: Box::new(|_: &mut Self| show()), ..Default::default() }.into(),
                 StandardItem { label: "Quit".into(), activate: Box::new(|_: &mut Self| quit()), ..Default::default() }.into(),
             ]
         }
@@ -215,10 +215,10 @@ mod platform {
 
     pub fn tray() {
         let menu = Menu::new();
-        let [play_i, next_i, prev_i, show_i, quit_i] = ["Play / Pause", "Next", "Previous", "Show Serafim", "Quit"].map(|l| MenuItem::new(l, true, None));
+        let [play_i, next_i, prev_i, show_i, quit_i] = ["Play / Pause", "Next", "Previous", "Show Serafin", "Quit"].map(|l| MenuItem::new(l, true, None));
         let _ = menu.append_items(&[&play_i, &next_i, &prev_i, &PredefinedMenuItem::separator(), &show_i, &quit_i]);
         let Ok(icon) = Icon::from_rgba(tray_icons(true).swap_remove(2).1, 32, 32) else { return };
-        let Ok(t) = TrayIconBuilder::new().with_icon(icon).with_tooltip("Serafim").with_menu(Box::new(menu)).with_menu_on_left_click(false).build() else { return };
+        let Ok(t) = TrayIconBuilder::new().with_icon(icon).with_tooltip("Serafin").with_menu(Box::new(menu)).with_menu_on_left_click(false).build() else { return };
         let (quit_id, play_id, next_id, prev_id) = (quit_i.id().clone(), play_i.id().clone(), next_i.id().clone(), prev_i.id().clone());
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| match e.id {
             id if id == quit_id => quit(),

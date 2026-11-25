@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Serafin
+Comment=YouTube Music client
+Exec=metrolist-egui
+Icon=serafin
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=serafin
+Terminal=false

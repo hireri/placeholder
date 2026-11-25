@@ -1,7 +1,7 @@
-# Serafim theme for matugen. Enable "Custom theme" in Serafim's Appearance settings.
+# Serafin theme for matugen. Enable "Custom theme" in Serafin's Appearance settings.
 #
 # ~/.config/matugen/config.toml:
-#   [templates.serafim]
+#   [templates.serafin]
 #   input_path  = '<this file>'
 #   output_path = '~/.config/metrolist-desktop/theme.toml'
 
