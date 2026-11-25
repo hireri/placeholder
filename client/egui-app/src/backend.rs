@@ -44,11 +44,24 @@ fn exe_dir() -> Option<std::path::PathBuf> {
 fn daemon_command() -> Command {
     let script = if cfg!(windows) { "daemon.bat" } else { "daemon" };
     let bundled = exe_dir().map(|d| d.join("daemon").join("bin").join(script)).filter(|p| p.exists());
-    let path = std::env::var_os("METROLIST_DAEMON").map(Into::into).or(bundled).unwrap_or_else(|| {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daemon/build/install/daemon/bin").join(script)
-    });
-    let mut cmd = Command::new(path);
-    if let Some(jre) = exe_dir().map(|d| d.join("jre")).filter(|p| p.exists()) {
+    let jre = exe_dir().map(|d| d.join("jre")).filter(|p| p.exists());
+    let lib = exe_dir().map(|d| d.join("daemon").join("lib")).filter(|p| p.is_dir());
+    let mut cmd = match (&jre, &lib) {
+        // Release layout: run java directly. daemon.bat puts every jar on one line and overflows cmd.exe's 8191-char limit
+        // ("The input line is too long"); java expands `lib/*` itself. Also means kill() stops the JVM, not just a wrapper.
+        (Some(jre), Some(lib)) if std::env::var_os("METROLIST_DAEMON").is_none() => {
+            let mut c = Command::new(jre.join("bin").join(format!("java{}", std::env::consts::EXE_SUFFIX)));
+            c.arg("-cp").arg(lib.join("*")).arg("dev.metrolist.desktop.MainKt");
+            c
+        }
+        _ => {
+            let path = std::env::var_os("METROLIST_DAEMON").map(Into::into).or(bundled).unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daemon/build/install/daemon/bin").join(script)
+            });
+            Command::new(path)
+        }
+    };
+    if let Some(jre) = jre {
         cmd.env("JAVA_HOME", jre);
     }
     #[cfg(windows)]

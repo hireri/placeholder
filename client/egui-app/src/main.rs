@@ -1,4 +1,5 @@
 //! Serafim desktop client on egui/eframe. Layout shell only.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[macro_use]
 mod gfx;

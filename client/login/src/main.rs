@@ -1,6 +1,7 @@
 //! Login popup: opens the service's own sign-in page in a wry webview, waits until the session
 //! exists, then hands the credentials straight to the daemon (they never pass through the UI).
 //! Usage: metrolist-login <youtube|spotify>   env: METROLIST_URL, METROLIST_TOKEN, METROLIST_DATA
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 use tao::{
