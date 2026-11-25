@@ -572,12 +572,15 @@ impl App {
         let ui = &mut App::region(&mut owned, c);
 
         // Ink: text and controls over the backdrop switch to dark tones when the cover is bright, so they stay readable.
-        let luma = url.as_deref().and_then(|u| self.g.luma(u));
-        let dark = ui.ctx().animate_value_with_time(ui.scope_id().with("pl-ink"), if luma.is_some_and(|l| l > 0.62) { 1. } else { 0. }, 0.4);
+        // 0.575 is where white and dark ink have equal contrast; the faint tiers keep a lightness gap from mid-tone backdrops.
+        let l = url.as_deref().and_then(|u| self.g.luma(u)).unwrap_or(0.);
+        let dark = ui.ctx().animate_value_with_time(ui.scope_id().with("pl-ink"), if l > 0.575 { 1. } else { 0. }, 0.4);
+        let ink = |light: f32, gap: f32, dark_l: f32| mix(oklch(light.max((l + gap).min(0.9)), 0.02, t.hue), oklch(dark_l, 0.02, t.hue), dark);
         let it = Theme {
             tx: mix(t.tx, oklch(0.18, 0.02, t.hue), dark),
-            tm: mix(t.tm, oklch(0.30, 0.02, t.hue), dark),
-            tf: mix(t.tf, oklch(0.40, 0.02, t.hue), dark),
+            tm: ink(0.72, 0.30, 0.28),
+            tf: ink(0.56, 0.20, 0.36),
+            ax: mix(t.ax, oklch(0.36, 0.12, t.hue), dark),
             s2: t.s2.lerp_to_gamma(Color32::from_black_alpha(30), dark),
             s3: t.s3.lerp_to_gamma(Color32::from_black_alpha(46), dark),
             ..t
@@ -865,7 +868,7 @@ impl App {
             link_hover(ui.ctx(), &p, &resp, artist_r, it.tm);
             artist_click = resp.clicked();
         }
-        if !empty && glyph_button(ui, "fav", pos2(x1 - 52., cy), 32., if pl.liked { icon!("starf") } else { icon!("star") }, 16., if pl.liked { t.ax } else { it.tm }).clicked() {
+        if !empty && glyph_button(ui, "fav", pos2(x1 - 52., cy), 32., if pl.liked { icon!("starf") } else { icon!("star") }, 16., if pl.liked { it.ax } else { it.tm }).clicked() {
             pl.set_like(ui.ctx());
         }
         let more = Rect::from_center_size(pos2(x1 - 16., cy), vec2(32., 32.));
@@ -1071,7 +1074,7 @@ impl App {
                     }
                     let (tx, tw) = (r.min.x + 14. + 10. + 38. + 10., r.width() - 14. - 10. - 38. - 10. - 30.);
                     let lp = b.painter().with_clip_rect(list);
-                    trunc(&lp, pos2(tx, cy - 8.), tw, &s.title, font_w(13., Weight::Medium), if on { t.ax } else { it.tx });
+                    trunc(&lp, pos2(tx, cy - 8.), tw, &s.title, font_w(13., Weight::Medium), if on { it.ax } else { it.tx });
                     trunc(&lp, pos2(tx, cy + 9.), tw, &s.artist, font(12.), it.tm);
                     (play, gone, menu)
                 };
@@ -1087,7 +1090,7 @@ impl App {
                     let time = ui.input(|i| i.time) as f32;
                     for k in 0..3 {
                         let h = if pl.playing { 4. + 8. * (0.5 + 0.5 * (time * (5. + k as f32 * 1.7)).sin()) } else { 6. };
-                        lp.rect_filled(Rect::from_min_max(pos2(ex - 10. + k as f32 * 5., ey + 6.), pos2(ex - 7. + k as f32 * 5., ey + 6. - h)), rad(1.), t.ax);
+                        lp.rect_filled(Rect::from_min_max(pos2(ex - 10. + k as f32 * 5., ey + 6.), pos2(ex - 7. + k as f32 * 5., ey + 6. - h)), rad(1.), it.ax);
                     }
                     if pl.playing {
                         ui.ctx().request_repaint_after(Duration::from_millis(60));
