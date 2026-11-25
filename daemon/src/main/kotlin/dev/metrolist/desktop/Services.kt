@@ -9,7 +9,7 @@ import com.metrolist.innertube.models.YTItem
 import com.metrolist.innertube.utils.completed
 import com.metrolist.innertube.models.PlaylistItem
 import com.metrolist.innertube.models.SongItem
-import com.metrolist.music.constants.AudioQuality
+import com.metrolist.innertube.models.WatchEndpoint
 import com.metrolist.music.lyrics.LyricsProviderRegistry
 import com.metrolist.music.lyrics.LyricsUtils
 import com.metrolist.music.utils.InnerTubeXPlayer
@@ -187,7 +187,7 @@ object Services {
 
     /** The stream URL plus the headers the player must send with it (upstream InnerTubeXPlayer, unmodified). */
     suspend fun stream(videoId: String): StreamDto {
-        val data = InnerTubeXPlayer.playerResponseForPlayback(videoId, null, AudioQuality.AUTO, ConnectivityManager()).getOrThrow()
+        val data = InnerTubeXPlayer.playerResponseForPlayback(videoId, null, Settings.audioQuality(), ConnectivityManager()).getOrThrow()
         return StreamDto(
             url = data.streamUrl,
             headers = data.streamHeaders,
@@ -245,10 +245,10 @@ object Services {
         ).bytes()
     }
 
-    /** First provider (in upstream's default order) that has lyrics. Upstream's LyricsHelper is DB-bound, so this is the thin desktop equivalent. */
+    /** First provider (in the stored order) that has lyrics. Upstream's LyricsHelper is DB-bound, so this is the thin desktop equivalent. */
     suspend fun lyrics(id: String, title: String, artist: String, durationSec: Int, album: String?): LyricsDto? {
         val cleaned = LyricsUtils.cleanTitleForSearch(title)
-        for (name in LyricsProviderRegistry.getDefaultProviderOrder()) {
+        for (name in Settings.lyricsOrder()) {
             val provider = LyricsProviderRegistry.getProviderByName(name)?.takeIf { it.isEnabled(context) } ?: continue
             try {
                 provider.getLyrics(context, id, cleaned, artist, durationSec, album).getOrNull()
@@ -295,6 +295,11 @@ object Services {
         return YouTube.search(query, f).getOrThrow().items.mapNotNull { it.toItem() }
     }
 
+    suspend fun suggest(query: String): SuggestDto {
+        val s = YouTube.searchSuggestions(query).getOrThrow()
+        return SuggestDto(s.queries, s.recommendedItems.mapNotNull { it.toItem() })
+    }
+
     suspend fun explore(): List<SectionDto> {
         val e = YouTube.explore().getOrThrow()
         return listOf(
@@ -307,6 +312,10 @@ object Services {
     /** One song with its album (feed items often lack it). */
     suspend fun song(videoId: String): TrackDto =
         YouTube.queue(listOf(videoId)).getOrThrow().firstOrNull()?.toDto() ?: throw NoSuchElementException("song not found")
+
+    /** What YouTube Music would play after a song (its "RDAMVM" radio mix), without the seed itself: feeds endless mode. */
+    suspend fun radio(videoId: String): List<TrackDto> =
+        YouTube.next(WatchEndpoint(videoId = videoId, playlistId = "RDAMVM$videoId")).getOrThrow().items.filter { it.id != videoId }.map { it.toDto() }
 
     /** Likes or unlikes a song on YouTube Music. */
     suspend fun like(videoId: String, on: Boolean) {

@@ -19,6 +19,7 @@ import io.ktor.utils.io.writeFully
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
+import io.ktor.server.routing.put
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
@@ -55,17 +56,28 @@ fun main() {
         val stored = creds.load()
         SpotifyAuth.setCookie(stored.spotify?.spDc)
         runCatching { YouTubeAuth.apply(stored.youtube) }
+        runCatching { Settings.apply() }
     }
 
     val server = embeddedServer(CIO, host = "127.0.0.1", port = System.getenv("METROLIST_PORT")?.toInt() ?: 0) {
         install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true; encodeDefaults = true }) }
         install(StatusPages) {
-            exception<Throwable> { call, e -> call.respond(HttpStatusCode.BadGateway, ErrorDto(e.message ?: e::class.simpleName ?: "error")) }
+            exception<Throwable> { call, e -> e.printStackTrace(); call.respond(HttpStatusCode.BadGateway, ErrorDto(e.message ?: e::class.simpleName ?: "error")) }
         }
         install(TokenGuard(token))
 
         routing {
             get("/health") { call.respondText("ok") }
+
+            get("/settings") { call.respond(Settings.get()) }
+            put("/settings") {
+                val req = call.receive<SettingsDto>()
+                try {
+                    call.respond(Settings.update(req))
+                } catch (e: IllegalArgumentException) {
+                    call.respond(HttpStatusCode.BadRequest, ErrorDto(e.message ?: "invalid settings"))
+                }
+            }
 
             get("/auth/status") { call.respond(status()) }
             post("/auth/youtube") {
@@ -93,8 +105,10 @@ fun main() {
                 call.respond(Services.createPlaylist(req.title, req.videoIds))
             }
             get("/youtube/song/{videoId}") { call.respond(Services.song(call.parameters["videoId"]!!)) }
+            get("/youtube/radio/{videoId}") { call.respond(Services.radio(call.parameters["videoId"]!!)) }
             get("/youtube/home") { call.respond(Services.home()) }
             get("/youtube/search/items") { call.respond(Services.searchItems(call.q("q") ?: "", call.q("type") ?: "song")) }
+            get("/youtube/suggest") { call.respond(Services.suggest(call.q("q") ?: "")) }
             get("/youtube/explore") { call.respond(Services.explore()) }
             post("/youtube/like/{videoId}") { Services.like(call.parameters["videoId"]!!, call.q("on") == "true"); call.respond(HttpStatusCode.NoContent) }
             post("/youtube/subscribe/{channelId}") { Services.subscribe(call.parameters["channelId"]!!, call.q("on") == "true"); call.respond(HttpStatusCode.NoContent) }

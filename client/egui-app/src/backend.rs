@@ -184,9 +184,18 @@ pub fn post(path: &str) -> Result<(), String> {
 
 /// Blocking POST of a JSON body; call from a worker thread.
 pub fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(path: &str, body: &B) -> Result<T, String> {
+    send_json("POST", path, body)
+}
+
+/// Blocking PUT of a JSON body; call from a worker thread.
+pub fn put_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(path: &str, body: &B) -> Result<T, String> {
+    send_json("PUT", path, body)
+}
+
+fn send_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(method: &str, path: &str, body: &B) -> Result<T, String> {
     let (url, token) = conn()?;
     let body = serde_json::to_string(body).map_err(|e| e.to_string())?;
-    match ureq::post(&format!("{url}{path}")).set("X-Metrolist-Token", token).set("Content-Type", "application/json").send_string(&body) {
+    match ureq::request(method, &format!("{url}{path}")).set("X-Metrolist-Token", token).set("Content-Type", "application/json").send_string(&body) {
         Ok(r) => r.into_json().map_err(|e| e.to_string()),
         Err(e) => Err(failure(e)),
     }
@@ -227,7 +236,7 @@ pub struct Status {
 pub fn sign_in(svc: &str) -> Result<(), String> {
     let (url, token) = conn()?;
     let helper = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("metrolist-login{}", std::env::consts::EXE_SUFFIX)))).unwrap_or_else(|| "metrolist-login".into());
-    let st = Command::new(helper).arg(svc).env("METROLIST_URL", url).env("METROLIST_TOKEN", token).status().map_err(|e| format!("cannot start login helper: {e}"))?;
+    let st = Command::new(&helper).arg(svc).env("METROLIST_URL", url).env("METROLIST_TOKEN", token).status().map_err(|e| format!("cannot start login helper {} (build it: cargo build -p metrolist-login): {e}", helper.display()))?;
     if st.success() { Ok(()) } else { Err("sign-in cancelled".into()) }
 }
 

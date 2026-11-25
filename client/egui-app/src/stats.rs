@@ -43,7 +43,7 @@ impl App {
         // A row click queues that list from the clicked song, once the scroll area is done with `self`.
         let mut play: Option<(Vec<Track>, usize)> = None;
         let mut menu: Option<(egui::Pos2, Target)> = None;
-        ScrollArea::vertical().id_salt("stats").auto_shrink(false).show(&mut lui, |ui| {
+        let out = ScrollArea::vertical().id_salt("stats").auto_shrink(false).show(&mut lui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
             let p = ui.painter().clone();
             let (l, w) = (card.min.x + 22., card.width() - 44.);
@@ -160,6 +160,7 @@ impl App {
             }
             ui.add_space(70.);
         });
+        scroll_fades(&lui, &out, self.t.s1);
         if let Some((list, i)) = play {
             self.pl.play_tracks(ui.ctx(), &list, i, false);
         }

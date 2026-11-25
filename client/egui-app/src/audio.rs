@@ -30,7 +30,8 @@ const OPUS_RATE: u32 = 48_000;
 /// 120 ms at 48 kHz, the largest Opus frame, per channel.
 const OPUS_MAX_FRAME: usize = 5760;
 /// Decoded audio kept ahead of the output; also what an in-buffer seek can jump within.
-const RING_SECS: usize = 8;
+// Also bounds the longest crossfade: the old track's tail must still be in the ring when the next one is mixed over it.
+const RING_SECS: usize = 14;
 const POLL: Duration = Duration::from_millis(10);
 const PAUSED_POLL: Duration = Duration::from_millis(250);
 
@@ -54,6 +55,8 @@ pub struct StreamInfo {
 #[derive(Debug, Clone)]
 pub enum Event {
     Ended,
+    /// Playback crossed into the stream handed to `Engine::queue_next`; the load is already done.
+    Advanced,
     Error(String),
 }
 
@@ -422,10 +425,30 @@ struct Ring {
     epoch: u64,
     /// Bumped on load/stop only: a seek during the stream open must not stop it publishing the duration and cache.
     loads: u64,
+    /// The next track already sitting in `samples` behind the current one.
+    pending: Option<Boundary>,
+    /// Boundaries crossed so far; lets the decode thread tell whether the old track is still the one playing.
+    advances: u64,
+}
+
+/// Where the next track starts in the ring, in `played` frames, and what describes it once it does.
+struct Boundary {
+    at: u64,
+    duration: Option<f32>,
+    cache: (Arc<ChunkCache>, u64),
+}
+
+/// A crossfade in progress on the decode side: `left` of the next track's `total` leading samples still to be added over the old tail.
+#[derive(Default)]
+struct Mix {
+    left: usize,
+    total: usize,
+    ch: usize,
 }
 
 impl Ring {
     fn rebase(&mut self, base: f64) -> u64 {
+        self.pending = None;
         self.samples.clear();
         self.played = 0;
         self.base = base;
@@ -443,6 +466,11 @@ struct Shared {
     events: Mutex<Vec<Event>>,
     playing: AtomicBool,
     volume: AtomicU32,
+    /// Crossfade length in seconds (f32 bits); 0 = off. Set from the settings page, read by the decode thread.
+    crossfade: AtomicU32,
+    gapless: AtomicBool,
+    /// Stream to continue into when the current one ends; see `Engine::queue_next`.
+    next: Mutex<Option<StreamInfo>>,
     out_rate: u32,
     out_ch: usize,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -460,11 +488,29 @@ impl Shared {
         (self.wake)();
     }
 
-    /// Moves `pending` into the ring once there is room. False means full; retry later.
-    fn try_push(&self, epoch: u64, pending: &mut Vec<f32>) -> bool {
+    /// Moves `pending` into the ring once there is room. While `mix` is open the samples are added over the old track's
+    /// faded-out tail instead of appended. False means full; retry later.
+    fn try_push(&self, epoch: u64, pending: &mut Vec<f32>, mix: &mut Mix) -> bool {
         let mut r = self.ring.lock().unwrap();
         if r.epoch != epoch {
             pending.clear();
+            mix.left = 0;
+            return true;
+        }
+        let n = mix.left.min(pending.len());
+        if n > 0 {
+            let frames = (mix.total / mix.ch).max(1) as f32;
+            for (k, b) in pending.drain(..n).enumerate() {
+                let i = mix.total - mix.left + k;
+                // The tail's front may already have played out; those samples of the new track are simply dropped.
+                if let Some(idx) = (r.samples.len() + k).checked_sub(mix.left) {
+                    let g = ((i / mix.ch) as f32 / frames * std::f32::consts::FRAC_PI_2).sin();
+                    r.samples[idx] += b * g;
+                }
+            }
+            mix.left -= n;
+        }
+        if pending.is_empty() {
             return true;
         }
         if !r.samples.is_empty() && r.samples.len() + pending.len() > r.cap {
@@ -472,6 +518,38 @@ impl Shared {
         }
         r.samples.extend(pending.drain(..));
         true
+    }
+
+    /// At the end of a stream: opens the queued next one and lines it up behind the old tail (fading that out under a
+    /// crossfade). `None` means nothing to chain into, and the caller ends normally.
+    fn chain(&self, epoch: u64, mix: &mut Mix) -> Option<(Session, StreamInfo, u64)> {
+        let cf = f32::from_bits(self.crossfade.load(Relaxed));
+        if !(self.gapless.load(Relaxed) || cf > 0.) || self.ring.lock().unwrap().pending.is_some() {
+            return None;
+        }
+        let info = self.next.lock().unwrap().take()?;
+        let next = Session::open(&info).ok()?;
+        let mut r = self.ring.lock().unwrap();
+        if r.epoch != epoch {
+            // A seek came in while the stream opened; the old track is still the one playing, so keep this for its real end.
+            drop(r);
+            *self.next.lock().unwrap() = Some(info);
+            return None;
+        }
+        let ch = self.out_ch;
+        let avail = r.samples.len() / ch;
+        let n = ((cf * self.out_rate as f32) as usize).min(avail);
+        let len = r.samples.len();
+        for k in 0..n {
+            let g = (k as f32 / n as f32 * std::f32::consts::FRAC_PI_2).cos();
+            for c in 0..ch {
+                r.samples[len - (n - k) * ch + c] *= g;
+            }
+        }
+        *mix = Mix { left: n * ch, total: n * ch, ch };
+        r.pending = Some(Boundary { at: r.played + (avail - n) as u64, duration: next.duration, cache: next.cache.clone() });
+        let adv = r.advances;
+        Some((next, info, adv))
     }
 
     fn drained(&self, epoch: u64) -> bool {
@@ -507,6 +585,9 @@ fn run(shared: &Shared, rx: &Receiver<f32>, info: &StreamInfo, mut epoch: u64, l
     }
     let mut pending = Vec::new();
     let (mut eos, mut ended) = (false, false);
+    // While the ring still holds the end of the track before this one: its session, its stream and the advance count at the hand-over.
+    let mut prev: Option<(Session, StreamInfo, u64)> = None;
+    let mut mix = Mix::default();
     loop {
         let cmd = match rx.try_recv() {
             Ok(secs) => Some(secs),
@@ -518,12 +599,20 @@ fn run(shared: &Shared, rx: &Receiver<f32>, info: &StreamInfo, mut epoch: u64, l
             Err(TryRecvError::Empty) => None,
         };
         if let Some(secs) = cmd {
+            if let Some((old, info, adv)) = prev.take() {
+                if shared.ring.lock().unwrap().advances == adv {
+                    // Still inside the old track: seek that one, and chain into the next again when it ends.
+                    s = old;
+                    *shared.next.lock().unwrap() = Some(info);
+                }
+            }
+            mix.left = 0;
             epoch = s.seek(shared, secs)?;
             pending.clear();
             eos = false;
             ended = false;
         } else if !pending.is_empty() {
-            if !shared.try_push(epoch, &mut pending) {
+            if !shared.try_push(epoch, &mut pending, &mut mix) {
                 thread::sleep(shared.poll());
             }
         } else if eos {
@@ -534,7 +623,10 @@ fn run(shared: &Shared, rx: &Receiver<f32>, info: &StreamInfo, mut epoch: u64, l
                 thread::sleep(shared.poll());
             }
         } else if !s.decode_next(shared, &mut pending)? {
-            eos = true;
+            match shared.chain(epoch, &mut mix) {
+                Some((next, info, adv)) => prev = Some((std::mem::replace(&mut s, next), info, adv)),
+                None => eos = true,
+            }
         }
     }
 }
@@ -582,6 +674,19 @@ fn fill<T: FromSample<f32>>(shared: &Shared, data: &mut [T]) {
         *s = T::from_sample_(v);
     }
     r.played += (got / shared.out_ch) as u64;
+    let crossed = r.pending.as_ref().is_some_and(|b| r.played >= b.at);
+    if crossed {
+        let b = r.pending.take().unwrap();
+        r.played -= b.at;
+        r.base = 0.;
+        r.duration = b.duration;
+        r.cache = Some(b.cache);
+        r.advances += 1;
+    }
+    drop(r);
+    if crossed {
+        shared.emit(Event::Advanced);
+    }
 }
 
 fn output_device() -> Option<(cpal::Device, SupportedStreamConfig)> {
@@ -640,10 +745,15 @@ impl Engine {
                 cache: None,
                 epoch: 0,
                 loads: 0,
+                pending: None,
+                advances: 0,
             }),
             events: Mutex::new(Vec::new()),
             playing: AtomicBool::new(false),
             volume: AtomicU32::new(1f32.to_bits()),
+            crossfade: AtomicU32::new(0f32.to_bits()),
+            gapless: AtomicBool::new(true),
+            next: Mutex::new(None),
             out_rate,
             out_ch,
             wake: Arc::new(wake),
@@ -668,6 +778,7 @@ impl Engine {
             r.duration = None;
             r.cache = None;
             r.loads += 1;
+            *self.shared.next.lock().unwrap() = None;
             (r.restart(start_secs as f64), r.loads)
         };
         let (tx, rx) = mpsc::channel();
@@ -714,7 +825,11 @@ impl Engine {
             let mut r = self.shared.ring.lock().unwrap();
             let per_sec = (self.shared.out_rate as usize * self.shared.out_ch) as f64;
             let cursor = r.base + r.played as f64 / self.shared.out_rate as f64;
-            let ahead = r.samples.len() as f64 / per_sec;
+            let mut ahead = r.samples.len() as f64 / per_sec;
+            // The next track's samples sit past the boundary and are not on this track's timeline.
+            if let Some(b) = &r.pending {
+                ahead = ahead.min(b.at.saturating_sub(r.played) as f64 / self.shared.out_rate as f64);
+            }
             // Already decoded: drop the samples in between instead of re-seeking the stream.
             if !r.samples.is_empty() && (secs as f64) >= cursor && (secs as f64) < cursor + ahead {
                 let frames = ((secs as f64 - cursor) * self.shared.out_rate as f64) as usize;
@@ -737,9 +852,28 @@ impl Engine {
         self.shared.volume.store(v.clamp(0.0, 1.0).powi(3).to_bits(), Relaxed);
     }
 
+    /// 0 turns crossfading off; clamped to 0..=12 s.
+    pub fn set_crossfade(&self, secs: f32) {
+        self.shared.crossfade.store(secs.clamp(0., 12.).to_bits(), Relaxed);
+    }
+
+    /// Continue into `s` without a gap (or crossfaded) when the current stream ends. Taken once; the player re-queues after each advance.
+    pub fn queue_next(&self, s: StreamInfo) {
+        *self.shared.next.lock().unwrap() = Some(s);
+    }
+
+    pub fn clear_next(&self) {
+        *self.shared.next.lock().unwrap() = None;
+    }
+
+    pub fn set_gapless(&self, on: bool) {
+        self.shared.gapless.store(on, Relaxed);
+    }
+
     pub fn stop(&self) {
         *self.tx.lock().unwrap() = None;
         self.shared.playing.store(false, Relaxed);
+        *self.shared.next.lock().unwrap() = None;
         {
             let mut r = self.shared.ring.lock().unwrap();
             r.duration = None;
@@ -805,8 +939,33 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use super::{chunk_range, merge_ranges, CacheState};
+    use super::{chunk_range, merge_ranges, CacheState, Mix, Ring, Shared};
     use std::sync::Arc;
+
+    #[test]
+    fn try_push_blends_the_head_of_the_next_track_over_the_old_tail() {
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+        use std::sync::Mutex;
+        let shared = Shared {
+            ring: Mutex::new(Ring { samples: [1.; 4].into(), cap: 100, played: 0, base: 0., duration: None, cache: None, epoch: 0, loads: 0, pending: None, advances: 0 }),
+            events: Mutex::new(vec![]),
+            playing: AtomicBool::new(true),
+            volume: AtomicU32::new(0),
+            crossfade: AtomicU32::new(0),
+            gapless: AtomicBool::new(true),
+            next: Mutex::new(None),
+            out_rate: 4,
+            out_ch: 1,
+            wake: Arc::new(|| {}),
+        };
+        let mut mix = Mix { left: 4, total: 4, ch: 1 };
+        let mut pending = vec![1.; 6];
+        assert!(shared.try_push(0, &mut pending, &mut mix));
+        let r = shared.ring.lock().unwrap();
+        assert_eq!(r.samples.len(), 6);
+        assert!((r.samples[0] - 1.).abs() < 1e-6 && r.samples[3] > 1.9 && r.samples[5] == 1.);
+        assert_eq!(mix.left, 0);
+    }
 
     #[test]
     fn merge_ranges_joins_and_clamps() {

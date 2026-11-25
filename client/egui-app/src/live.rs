@@ -5,11 +5,13 @@ use crate::backend;
 use crate::data::{Item, Section, State, Track};
 use crate::gfx::*;
 use crate::menu::Target;
-use crate::page::{Look, COVER, COVER_ROW_H, HEAD, HERO_H, HERO_MIN};
+use crate::page::{Look, HEAD, HERO_H, HERO_MIN};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, ScrollArea};
 use std::borrow::Cow;
 
 const GAP: f32 = 8.;
+/// Seconds a carousel arrow takes to slide the row.
+const CAR_SLIDE: f64 = 0.45;
 const CHIPS: [(&str, &str); 5] = [("All", ""), ("Songs", "song"), ("Albums", "album"), ("Playlists", "playlist"), ("Artists", "artist")];
 const SEARCH_CHIPS: [&str; 5] = ["All", "Songs", "Videos", "Albums", "Artists"];
 const TOP_W: f32 = 340.;
@@ -47,7 +49,7 @@ impl App {
     }
 
     /// Opens an item's page: albums, playlists and artists their own, a song the album it sits on (or its single).
-    fn open_item(&mut self, _ctx: &egui::Context, it: &Item) {
+    pub(crate) fn open_item(&mut self, _ctx: &egui::Context, it: &Item) {
         if it.r#type == "song" {
             return self.open_song(it.track());
         }
@@ -144,13 +146,26 @@ impl App {
         let max_off = (all.len() as f32 * step - GAP - w).max(0.);
         let id = ui.scope_id().with(("carousel", title));
         let off: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.);
+        // Arrow slide (from, to, start time). Clicks while it runs extend its target, so repeated clicks keep moving forward.
+        let aid = id.with("slide");
+        let now = ui.ctx().input(|i| i.time);
+        let mut slide = ui.ctx().data(|d| d.get_temp::<(f32, f32, f64)>(aid)).unwrap_or((0., 0., f64::NEG_INFINITY));
+        let k = ((now - slide.2) / CAR_SLIDE) as f32;
+        // A wheel or trackpad swipe over the row takes over from the slide.
+        if k < 1. && ui.input(|i| i.smooth_scroll_delta.x != 0.) {
+            slide.2 = f64::NEG_INFINITY;
+        }
+        let k = ((now - slide.2) / CAR_SLIDE) as f32;
+        let sliding = k < 1.;
+        let shown = if sliding { egui::lerp(slide.0..=slide.1, ease_out_soft(k)) } else { off };
+        let base = if sliding { slide.1 } else { off };
 
         let (_, hd) = ui.allocate_space(vec2(full, 44.));
         let (p, cy) = (ui.painter().clone(), hd.center().y + 6.);
         let mut rx = l + w - 8.;
         let mut go = None;
         if max_off > 0. {
-            for (dir, ic, can) in [(1., icon!("fwd"), off < max_off - 1.), (-1., icon!("back"), off > 1.)] {
+            for (dir, ic, can) in [(1., icon!("fwd"), base < max_off - 1.), (-1., icon!("back"), base > 1.)] {
                 if icon_button(ui, &t, ("car-arrow", title, dir as i32), pos2(rx - 16., cy), 32., ic, 18., if can { t.tx } else { t.tf }).clicked() && can {
                     go = Some(dir);
                 }
@@ -173,13 +188,20 @@ impl App {
         let (_, row) = ui.allocate_space(vec2(full, cw + 8. + 40.));
         let view = Rect::from_min_size(pos2(l, row.min.y), vec2(w, row.height()));
         let mut rui = App::region(ui, view);
-        let out = ScrollArea::horizontal().id_salt(id).auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(&mut rui, |ui| {
+        if let Some(dir) = go {
+            let to = (((base / step).round() + dir * cols.saturating_sub(1).max(1) as f32) * step).clamp(0., max_off);
+            slide = (shown, to, now);
+            ui.ctx().data_mut(|d| d.insert_temp(aid, slide));
+        }
+        let sliding = sliding || go.is_some();
+        let mut area = ScrollArea::horizontal().id_salt(id).auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+        if sliding {
+            area = area.horizontal_scroll_offset(shown);
+            ui.ctx().request_repaint();
+        }
+        let out = area.show(&mut rui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
             let (_, r) = ui.allocate_space(vec2((all.len() as f32 * step - GAP).max(w), view.height()));
-            if let Some(dir) = go {
-                let to = (off + dir * cols.saturating_sub(1).max(1) as f32 * step).clamp(0., max_off);
-                ui.scroll_to_rect(Rect::from_min_size(pos2(r.min.x + to, r.min.y), vec2(w, 1.)), Some(egui::Align::Min));
-            }
             let vis = ui.clip_rect();
             for (c, &it) in all.iter().enumerate() {
                 let cell = Rect::from_min_size(pos2(r.min.x + c as f32 * step, r.min.y), vec2(cw, cw + 40.));
@@ -190,11 +212,12 @@ impl App {
         });
         let off = out.state.clamped_offset().x;
         ui.ctx().data_mut(|d| d.insert_temp(id, off));
-        if off > 1. {
-            fade_h(&p, Rect::from_min_size(view.min, vec2(48., view.height())), t.s1, false);
+        let (left, right) = (ui.ctx().animate_bool_with_time(id.with("fade-l"), off > 1., 0.15), ui.ctx().animate_bool_with_time(id.with("fade-r"), off < max_off - 1., 0.15));
+        if left > 0. {
+            fade_h(&p, Rect::from_min_size(view.min, vec2(48., view.height())), t.s1.gamma_multiply(left), false);
         }
-        if off < max_off - 1. {
-            fade_h(&p, Rect::from_min_max(pos2(view.max.x - 48., view.min.y), view.max), t.s1, true);
+        if right > 0. {
+            fade_h(&p, Rect::from_min_max(pos2(view.max.x - 48., view.min.y), view.max), t.s1.gamma_multiply(right), true);
         }
     }
 
@@ -206,7 +229,7 @@ impl App {
         let rows = items.len().div_ceil(cols);
         let area = Rect::from_min_max(pos2(card.min.x, top), card.max);
         let mut lui = App::region(ui, area);
-        ScrollArea::vertical().id_salt(("wall", salt)).auto_shrink(false).show_viewport(&mut lui, |ui, vp| {
+        let out = ScrollArea::vertical().id_salt(("wall", salt)).auto_shrink(false).show_viewport(&mut lui, |ui, vp| {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
             let (first, last) = (((vp.min.y / rh) as usize).min(rows), (((vp.max.y / rh).ceil() as usize) + 1).min(rows));
             ui.add_space(first as f32 * rh);
@@ -220,6 +243,7 @@ impl App {
             }
             ui.add_space((rows - last) as f32 * rh + 70.);
         });
+        scroll_fades(&lui, &out, self.t.s1);
     }
 
     /// A home shelf listed in full, honouring the home page's type chip.
@@ -246,6 +270,7 @@ impl App {
             }
             ui.add_space(70.);
         });
+        scroll_fades(&lui, &out, self.t.s1);
         out.state.clamped_offset().y
     }
 
@@ -357,7 +382,7 @@ impl App {
         let (l, w) = (card.min.x + 14., card.width() - 28.);
         let area = Rect::from_min_max(pos2(card.min.x, top), card.max);
         let mut lui = App::region(ui, area);
-        ScrollArea::vertical().id_salt(("home", self.home_chip)).auto_shrink(false).show(&mut lui, |ui| {
+        let out = ScrollArea::vertical().id_salt(("home", self.home_chip)).auto_shrink(false).show(&mut lui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
             if let Some(u) = user {
                 let (_, r) = ui.allocate_space(vec2(area.width(), 52.));
@@ -393,6 +418,7 @@ impl App {
             }
             ui.add_space(70.);
         });
+        scroll_fades(&lui, &out, self.t.s1);
     }
 
     /// Album, playlist or artist selected from a card.
@@ -466,12 +492,12 @@ impl App {
         let chip_id = ui.scope_id().with(("search-chip", &q));
         let cur = ui.ctx().data(|m| m.get_temp::<usize>(chip_id)).unwrap_or(0);
         let mut area = App::region(ui, card);
-        ScrollArea::vertical().id_salt(("search", &q)).auto_shrink(false).show(&mut area, |ui| {
+        let out = ScrollArea::vertical().id_salt(("search", &q)).auto_shrink(false).show(&mut area, |ui| {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
             let (_, hr) = ui.allocate_space(vec2(full, 90.));
             let p = ui.painter().clone();
             trunc(&p, pos2(l, hr.min.y + 38.), full - 44., "Search", font_w(26., Weight::Bold), t.tx);
-            let sub = if q.is_empty() { "Type in the box above and press Enter" } else { "Songs, videos, albums and artists on YouTube Music" };
+            let sub = if q.is_empty() { "Press Ctrl K to search" } else { "Songs, videos, albums and artists on YouTube Music" };
             trunc(&p, pos2(l, hr.min.y + 66.), full - 44., sub, font(13.), t.tm);
             if q.is_empty() {
                 return;
@@ -508,7 +534,7 @@ impl App {
                 match &songs {
                     Ok(v) => {
                         let n = if all { v.len().min(5) } else { v.len() };
-                        let block = HEAD + n as f32 * COVER_ROW_H;
+                        let block = HEAD + n as f32 * self.cover_row_h();
                         let (_, br) = ui.allocate_space(vec2(full, if side { block.max(col_h) } else { block }));
                         let (tl, tr) = if side { (l + TOP_W + 20. - 6., card.max.x - 16.) } else { (card.min.x + 16., card.max.x - 16.) };
                         if side {
@@ -516,10 +542,10 @@ impl App {
                         }
                         let mut tui = App::region(ui, Rect::from_min_max(pos2(tl - 6., br.min.y), pos2(tr + 6., br.max.y)));
                         tui.spacing_mut().item_spacing = vec2(0., 0.);
-                        let look = Look { cover_w: COVER, open: true, album: false };
+                        let look = Look { cover_w: self.cover_px(), open: true, album: false };
                         let (_, head) = tui.allocate_space(vec2(tr - tl, HEAD));
-                        self.table_head(&tui, head.min.y + 14., tl, tr, look);
-                        let acts = self.track_rows(&mut tui, "songs", v, 0..n, (tl, tr), COVER_ROW_H, look);
+                        self.table_head(&tui, head.min.y + 14., tl, tr, look, None);
+                        let acts = self.track_rows(&mut tui, "songs", v, 0..n, (tl, tr), self.cover_row_h(), look);
                         self.apply_acts(ui, v, acts, look);
                     }
                     Err(m) => msg(ui, m),
@@ -535,10 +561,10 @@ impl App {
                     let (_, hd) = ui.allocate_space(vec2(full, 44.));
                     heading(ui, l, "Videos", hd);
                     let (tl, tr) = (card.min.x + 16., card.max.x - 16.);
-                    let look = Look { cover_w: COVER * 16. / 9., open: false, album: false };
+                    let look = Look { cover_w: self.cover_px() * 16. / 9., open: false, album: false };
                     let (_, head) = ui.allocate_space(vec2(full, HEAD));
-                    self.table_head(ui, head.min.y + 14., tl, tr, look);
-                    let acts = self.track_rows(ui, "videos", &tracks, 0..n, (tl, tr), COVER_ROW_H, look);
+                    self.table_head(ui, head.min.y + 14., tl, tr, look, None);
+                    let acts = self.track_rows(ui, "videos", &tracks, 0..n, (tl, tr), self.cover_row_h(), look);
                     self.apply_acts(ui, &tracks, acts, look);
                     ui.add_space(16.);
                 } else if chip == 2 {
@@ -563,6 +589,7 @@ impl App {
             }
             ui.add_space(70.);
         });
+        scroll_fades(&area, &out, self.t.s1);
     }
 
     /// Every item in a wrapped grid inside the current scroll area.
@@ -657,7 +684,8 @@ impl App {
         }
     }
 
-    pub fn settings_page(&mut self, ui: &mut egui::Ui, card: Rect, top: f32) {
+    /// Sign-in rows for each service, drawn inside the Settings page's Accounts panel (`card`).
+    pub fn accounts_panel(&mut self, ui: &mut egui::Ui, card: Rect, top: f32) {
         let (t, d) = (self.t, self.data.clone());
         d.status.ensure(ui.ctx(), || backend::get("/auth/status"));
         let g = d.status.lock();
@@ -668,11 +696,10 @@ impl App {
         };
         drop(g);
         let (busy, err) = d.busy.lock().unwrap().clone();
-        trunc(ui.painter(), pos2(card.min.x + 22., top + 12.), 300., "ACCOUNTS", font_w(10.5, Weight::Semi), t.tf);
         for (i, (svc, label, s)) in [("youtube", "YouTube Music", &st.youtube), ("spotify", "Spotify", &st.spotify)].into_iter().enumerate() {
-            let row = Rect::from_min_size(pos2(card.min.x + 22., top + 28. + i as f32 * 84.), vec2(card.width() - 44., 72.));
+            let row = Rect::from_min_size(pos2(card.min.x + 16., top + 16. + i as f32 * 84.), vec2(card.width() - 32., 72.));
             let p = ui.painter().clone();
-            p.rect_filled(row, rad(14.), t.s2);
+            p.rect_filled(row, rad(14.), t.s1);
             let cy = row.center().y;
             p.circle_filled(pos2(row.min.x + 36., cy), 20., t.axc);
             let who = s.user.as_ref().map(|u| u.name.as_str());
@@ -696,7 +723,7 @@ impl App {
                 let iw = text_w(&p, "Import playlists", font_w(13., Weight::Semi)) + 32.;
                 let ib = Rect::from_center_size(pos2(b.min.x - 8. - iw / 2., cy), vec2(iw, 36.));
                 let ir = ui.interact(ib, ui.scope_id().with("import"), egui::Sense::click());
-                p.rect_filled(ib, rad(18.), if ir.hovered() { t.s3 } else { t.s1 });
+                p.rect_filled(ib, rad(18.), if ir.hovered() { t.s3.lerp_to_gamma(t.tx, 0.1) } else { t.s3 });
                 p.text(ib.center(), Align2::CENTER_CENTER, "Import playlists", font_w(13., Weight::Semi), t.tx);
                 if ir.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -706,7 +733,7 @@ impl App {
                 }
             }
             let primary = !s.logged_in;
-            p.rect_filled(b, rad(18.), if primary { if r.hovered() { t.ax.gamma_multiply(0.9) } else { t.ax } } else if r.hovered() { t.s3 } else { t.s1 });
+            p.rect_filled(b, rad(18.), if primary { if r.hovered() { t.ax.gamma_multiply(0.9) } else { t.ax } } else if r.hovered() { t.s3.lerp_to_gamma(t.tx, 0.1) } else { t.s3 });
             p.text(b.center(), Align2::CENTER_CENTER, text, font_w(13., Weight::Semi), if primary { t.on_ax } else { t.tx });
             if r.hovered() && !working {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -716,7 +743,7 @@ impl App {
             }
         }
         if let Some(e) = err {
-            self.note(ui, card, top + 28. + 2. * 84., &e);
+            self.note(ui, card, top + 16. + 2. * 84. - 20., &e);
         }
     }
 }

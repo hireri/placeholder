@@ -14,7 +14,9 @@ mod library;
 mod media;
 mod menu;
 mod page;
+mod palette;
 mod player;
+mod settings;
 mod stats;
 mod theme;
 mod toast;
@@ -51,9 +53,12 @@ impl eframe::App for Carry {
 fn main() -> eframe::Result {
     tray::start(tray::acquire());
     let app: Shared = Rc::default();
+    let icon = image::load_from_memory(include_bytes!("../assets/logo/serafim-app-icon.png")).expect("bundled app icon").into_rgba8();
+    let icon = egui::IconData { width: icon.width(), height: icon.height(), rgba: icon.into_raw() };
     loop {
         let opts = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
+                .with_icon(icon.clone())
                 .with_title("Serafim")
                 .with_app_id("serafim")
                 .with_inner_size([1280., 800.])

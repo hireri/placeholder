@@ -1,10 +1,76 @@
 //! Tonal theme derived from one hue; same OKLCH tokens as design/desktop-design.html.
 
 use eframe::egui::Color32;
+use std::collections::HashMap;
+
+/// User colours from `theme.toml`: `[dark]` and `[light]` tables of `name = "#rrggbb"`.
+#[derive(serde::Deserialize, Default, Clone, PartialEq)]
+#[serde(default)]
+pub struct Custom {
+    dark: HashMap<String, String>,
+    light: HashMap<String, String>,
+}
+
+const TEMPLATE: &str = "# Serafim custom theme. Delete a line to keep the generated colour for it.
+# Names: s0 s1 s2 s3 (window, sidebar, panel, hover), tx tm tf (text), ax on_ax axc (accent, text on accent, accent container)
+[dark]
+s0 = \"#121214\"
+ax = \"#8ab4ff\"
+
+[light]
+s0 = \"#fafafa\"
+ax = \"#1a56db\"
+";
+
+pub fn theme_path() -> std::path::PathBuf {
+    crate::backend::data_dir().join("theme.toml")
+}
+
+pub fn mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(theme_path()).and_then(|m| m.modified()).ok()
+}
+
+/// Reads `theme.toml`, writing a starter file first if there is none. Errors are toasted and give `None`.
+pub fn load_custom() -> Option<Custom> {
+    let p = theme_path();
+    if !p.exists() {
+        let _ = std::fs::create_dir_all(p.parent()?);
+        let _ = std::fs::write(&p, TEMPLATE);
+    }
+    match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| toml::from_str(&s).map_err(|e| e.message().to_string())) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            crate::toast::error(format!("theme.toml: {e}"));
+            None
+        }
+    }
+}
+
+fn hex(s: &str) -> Option<Color32> {
+    let s = s.trim().strip_prefix('#')?;
+    let n = u32::from_str_radix(s, 16).ok().filter(|_| s.len() == 6)?;
+    Some(Color32::from_rgb((n >> 16) as u8, (n >> 8) as u8, n as u8))
+}
+
+/// Hand-tuned accent presets: (name, hue, accent chroma, surface chroma). Chroma is tuned per hue because
+/// yellows and cyans clip in sRGB sooner than blues and reds, and warm surfaces need less tint to read as neutral.
+pub const PRESETS: [(&str, f32, f32, f32); 10] = [
+    ("Blue", 265., 0.13, 0.012),
+    ("Violet", 295., 0.14, 0.014),
+    ("Pink", 350., 0.14, 0.012),
+    ("Red", 25., 0.15, 0.012),
+    ("Orange", 55., 0.14, 0.011),
+    ("Amber", 85., 0.13, 0.010),
+    ("Green", 150., 0.13, 0.010),
+    ("Teal", 190., 0.10, 0.009),
+    ("Sky", 235., 0.12, 0.011),
+    ("Monochrome", 0., 0., 0.),
+];
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct Theme {
     pub hue: f32,
+    pub dark: bool,
     /// window, sidebar, panel, hover
     pub s0: Color32,
     pub s1: Color32,
@@ -28,17 +94,44 @@ impl Theme {
         } else {
             ([0.975, 0.95, 0.925, 0.89], c(0.22, 0.02), c(0.46, 0.02), c(0.6, 0.015), c(0.5, ac), c(0.98, 0.01), c(0.9, ac * 0.5))
         };
-        Theme { hue, tx, tm, tf, ax, on_ax, axc, s0: c(s[0], nc), s1: c(s[1], nc), s2: c(s[2], nc), s3: c(s[3], nc) }
+        Theme { hue, dark, tx, tm, tf, ax, on_ax, axc, s0: c(s[0], nc), s1: c(s[1], nc), s2: c(s[2], nc), s3: c(s[3], nc) }
     }
 
     /// Nothing playing: near-grey surfaces with a blue accent.
-    pub fn idle() -> Self {
-        Theme::new(265., 0.12, 0.003, true)
+    pub fn idle(dark: bool) -> Self {
+        Theme::new(265., 0.12, 0.003, dark)
+    }
+
+    /// Accent preset `i` of `PRESETS`.
+    pub fn preset(i: u8, dark: bool) -> Self {
+        let (_, hue, ac, nc) = PRESETS[(i as usize).min(PRESETS.len() - 1)];
+        Theme::new(hue, ac, nc, dark)
     }
 
     /// Built around a cover's (hue, chroma): vivid covers get a stronger accent and tinted surfaces.
-    pub fn tinted((hue, chroma): (f32, f32)) -> Self {
-        Theme::new(hue, (chroma * 1.4).clamp(0.06, 0.16), (chroma * 0.2).clamp(0.006, 0.026), true)
+    pub fn tinted((hue, chroma): (f32, f32), dark: bool) -> Self {
+        Theme::new(hue, (chroma * 1.4).clamp(0.06, 0.16), (chroma * 0.2).clamp(0.006, 0.026), dark)
+    }
+
+    /// Overrides colours with the matching mode's table from `c`.
+    pub fn custom(mut self, c: &Custom) -> Self {
+        for (k, v) in if self.dark { &c.dark } else { &c.light } {
+            let Some(col) = hex(v) else { continue };
+            match k.as_str() {
+                "s0" => self.s0 = col,
+                "s1" => self.s1 = col,
+                "s2" => self.s2 = col,
+                "s3" => self.s3 = col,
+                "tx" => self.tx = col,
+                "tm" => self.tm = col,
+                "tf" => self.tf = col,
+                "ax" => self.ax = col,
+                "on_ax" => self.on_ax = col,
+                "axc" => self.axc = col,
+                _ => {}
+            }
+        }
+        self
     }
 
     /// Colour-wise blend `t` of the way from `self` to `to`.
@@ -46,6 +139,7 @@ impl Theme {
         let m = |a, b| mix(a, b, t);
         Theme {
             hue: to.hue,
+            dark: to.dark,
             s0: m(self.s0, to.s0),
             s1: m(self.s1, to.s1),
             s2: m(self.s2, to.s2),

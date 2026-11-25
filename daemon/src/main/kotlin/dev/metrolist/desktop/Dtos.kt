@@ -67,6 +67,9 @@ data class ItemDto(
 
 @Serializable data class SectionDto(val title: String, val items: List<ItemDto>)
 
+/** Search-as-you-type: query completions plus the songs, albums and artists YouTube Music suggests for them. */
+@Serializable data class SuggestDto(val queries: List<String>, val items: List<ItemDto>)
+
 @Serializable data class PageDto(val item: ItemDto, val description: String? = null, val tracks: List<TrackDto> = emptyList(), val sections: List<SectionDto> = emptyList(), val channelId: String? = null, val subscribed: Boolean = false, val monthlyListeners: String? = null)
 
 @Serializable

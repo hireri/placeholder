@@ -1,0 +1,30 @@
+# Serafim theme for matugen. Enable "Custom theme" in Serafim's Appearance settings.
+#
+# ~/.config/matugen/config.toml:
+#   [templates.serafim]
+#   input_path  = '<this file>'
+#   output_path = '~/.config/metrolist-desktop/theme.toml'
+
+[dark]
+s0 = "{{colors.surface.dark.hex}}"
+s1 = "{{colors.surface_container_low.dark.hex}}"
+s2 = "{{colors.surface_container.dark.hex}}"
+s3 = "{{colors.surface_container_high.dark.hex}}"
+tx = "{{colors.on_surface.dark.hex}}"
+tm = "{{colors.on_surface_variant.dark.hex}}"
+tf = "{{colors.outline.dark.hex}}"
+ax = "{{colors.primary.dark.hex}}"
+on_ax = "{{colors.on_primary.dark.hex}}"
+axc = "{{colors.primary_container.dark.hex}}"
+
+[light]
+s0 = "{{colors.surface.light.hex}}"
+s1 = "{{colors.surface_container_low.light.hex}}"
+s2 = "{{colors.surface_container.light.hex}}"
+s3 = "{{colors.surface_container_high.light.hex}}"
+tx = "{{colors.on_surface.light.hex}}"
+tm = "{{colors.on_surface_variant.light.hex}}"
+tf = "{{colors.outline.light.hex}}"
+ax = "{{colors.primary.light.hex}}"
+on_ax = "{{colors.on_primary.light.hex}}"
+axc = "{{colors.primary_container.light.hex}}"

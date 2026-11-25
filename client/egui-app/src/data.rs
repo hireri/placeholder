@@ -161,11 +161,13 @@ struct Wanted {
 struct SpotifyMatcher {
     windows: Mutex<HashMap<String, Wanted>>,
     wake: Condvar,
+    /// Lookups finished since the titlebar island last collected them.
+    done: AtomicUsize,
 }
 
 impl SpotifyMatcher {
     fn start() -> Arc<Self> {
-        let this = Arc::new(Self { windows: Default::default(), wake: Condvar::new() });
+        let this = Arc::new(Self { windows: Default::default(), wake: Condvar::new(), done: AtomicUsize::new(0) });
         for _ in 0..2 {
             let this = this.clone();
             std::thread::spawn(move || this.work());
@@ -243,6 +245,9 @@ impl SpotifyMatcher {
                     }
                 }
             }
+            if !retry {
+                self.done.fetch_add(1, Ordering::Relaxed);
+            }
             ctx.request_repaint();
             if retry {
                 std::thread::sleep(Duration::from_secs(3));
@@ -277,6 +282,19 @@ impl SpotifyMatcher {
     fn clear(&self) {
         self.windows.lock().unwrap().clear();
     }
+
+    /// Lookups still queued or running.
+    fn pending(&self) -> usize {
+        self.windows.lock().unwrap().values().map(|w| w.wanted.len() + w.active.len()).sum()
+    }
+}
+
+/// Query completions and the songs, albums and artists YouTube Music suggests for a half-typed search.
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct Suggest {
+    pub queries: Vec<String>,
+    pub items: Vec<Item>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -340,6 +358,7 @@ impl Stats {
 
 pub struct Data {
     pub status: Remote<backend::Status>,
+    pub settings: Remote<crate::settings::Daemon>,
     pub home: Remote<Vec<Section>>,
     pub history: Remote<Stats>,
     /// Number of Spotify playlists (its listening history is not exposed).
@@ -354,6 +373,8 @@ pub struct Data {
     pub item_searches: Mutex<HashMap<String, Arc<Remote<Vec<Item>>>>>,
     /// Error from the last library save, shown on the album page.
     pub details: Mutex<HashMap<String, Arc<Remote<Detail>>>>,
+    /// Search suggestions by query.
+    pub suggests: Mutex<HashMap<String, Arc<Remote<Suggest>>>>,
     matcher: Arc<SpotifyMatcher>,
     exporting: Arc<AtomicBool>,
     /// Songs looked up by id, to learn which album a feed item sits on.
@@ -366,6 +387,7 @@ impl Data {
     pub fn new() -> Self {
         Data {
             status: Remote::new(),
+            settings: Remote::new(),
             home: Remote::new(),
             history: Remote::new(),
             spotify: Remote::new(),
@@ -374,6 +396,7 @@ impl Data {
             searches: Default::default(),
             item_searches: Default::default(),
             details: Default::default(),
+            suggests: Default::default(),
             matcher: SpotifyMatcher::start(),
             exporting: Default::default(),
             song_infos: Default::default(),
@@ -460,6 +483,23 @@ impl Data {
         let path = format!("/youtube/search?q={}", backend::enc(q));
         r.ensure(ctx, move || backend::get(&path));
         r
+    }
+
+    pub fn suggest(&self, ctx: &Context, q: &str) -> Arc<Remote<Suggest>> {
+        let r = self.suggests.lock().unwrap().entry(q.to_string()).or_insert_with(|| Arc::new(Remote::new())).clone();
+        let path = format!("/youtube/suggest?q={}", backend::enc(q));
+        r.ensure(ctx, move || backend::get(&path));
+        r
+    }
+
+    /// Spotify rows still being matched to YouTube Music, and how many finished since `import_collect`.
+    pub fn import_progress(&self) -> (usize, usize) {
+        (self.matcher.done.load(Ordering::Relaxed), self.matcher.pending())
+    }
+
+    /// Takes the finished-lookup count, starting the next run from zero.
+    pub fn import_collect(&self) -> usize {
+        self.matcher.done.swap(0, Ordering::Relaxed)
     }
 
     /// Albums or artists (`kind` is the search filter: album | artist) matching `q`.

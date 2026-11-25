@@ -11,6 +11,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 serde_json.workspace = true
 ureq.workspace = true
 serde.workspace = true
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 cpal = "0.18"
 symphonia = { version = "0.6", features = ["mkv", "isomp4", "aac"] }
 opus = "0.4"

@@ -8,8 +8,10 @@ use eframe::egui::{self, pos2, vec2, Align2, Color32, Painter, Rect, ScrollArea}
 use std::time::Duration;
 
 const ROW_H: f32 = 44.;
-pub const COVER_ROW_H: f32 = 60.;
-pub const COVER: f32 = 46.;
+const COVER_ROW_H: f32 = 60.;
+const COVER_ROW_COMPACT: f32 = 48.;
+/// Cover rows are 14px taller than their cover.
+const COVER_PAD: f32 = 14.;
 /// Hero height at the top of the page and once collapsed into a single row by scrolling.
 pub const HERO_H: f32 = 249.;
 pub const HERO_MIN: f32 = 72.;
@@ -81,6 +83,21 @@ pub fn spinner(p: &Painter, center: egui::Pos2, r: f32, time: f32, col: Color32)
     p.circle_filled(center, r * 0.2, col.gamma_multiply(0.8 + 0.2 * (time * 4.5).sin()));
 }
 
+/// `tracks` ordered by column `col` (1 title, 2 artist, 3 album, 4 time), case-insensitively; blanks first when ascending.
+fn sort_tracks(tracks: &[Track], col: usize, asc: bool) -> Vec<Track> {
+    let mut v = tracks.to_vec();
+    match col {
+        1 => v.sort_by_cached_key(|t| t.title.to_lowercase()),
+        2 => v.sort_by_cached_key(|t| t.artists.join(", ").to_lowercase()),
+        3 => v.sort_by_cached_key(|t| t.album.as_deref().unwrap_or("").to_lowercase()),
+        _ => v.sort_by_key(|t| t.duration_sec),
+    }
+    if !asc {
+        v.reverse();
+    }
+    v
+}
+
 impl App {
     /// Shared card shell for every route: shadow, rounded panel, routed content, bottom fade and corner fix.
     pub fn page(&mut self, ui: &mut egui::Ui, card: Rect) {
@@ -104,7 +121,6 @@ impl App {
             Route::History => self.stats_page(ui, card),
             r => self.plain(ui, card, r),
         }
-        fade_down(&p, Rect::from_min_max(pos2(card.min.x, card.max.y - 56.), card.max), t.s1);
         round_bottom_corners(&p, card, 18., t.s0);
     }
 
@@ -164,8 +180,12 @@ impl App {
         if let (true, Some(it), Some(pos)) = (wash_hit.secondary_clicked(), &page_item, wash_hit.interact_pointer_pos()) {
             self.ctx_menu = Some((pos, Target::Item(it.clone())));
         }
-        let wash_tex = self.g.wash(ui.ctx(), &t);
-        egui::Image::new(sized(wash_tex, 1.)).fit_to_exact_size(wash.size()).corner_radius(rad(18.)).paint_at(ui, wash);
+        let wash_tex = self.g.wash(ui.ctx(), &t, cover_url);
+        if self.opts.tint {
+            egui::Image::new(sized(wash_tex, 1.)).fit_to_exact_size(wash.size()).corner_radius(rad(18.)).paint_at(ui, wash);
+        } else {
+            ui.painter().rect_filled(wash, rad(18.), t.s2);
+        }
         // The layout swaps once the page has scrolled past a point, as a quick crossfade (never both at once,
         // so the layers' widgets never share an id or overlap); the wash itself still shrinks with the scroll.
         let a = ui.ctx().animate_bool_with_time(ui.scope_id().with("hero-swap"), off > 40., 0.16);
@@ -285,18 +305,31 @@ impl App {
     pub fn tracks_table(&mut self, ui: &mut egui::Ui, card: Rect, tracks: &[Track], footer: Option<(&str, &[Section], &str)>) -> f32 {
         // Songs with their own covers (playlists) get a cover column in place of the number column.
         let covers = self.route == Route::Album && matches!(self.sel.as_ref().map(|s| s.0), Some("playlists" | "spotify"));
-        let look = if covers { Look { cover_w: COVER, open: true, album: true } } else { Look { cover_w: 0., open: false, album: false } };
-        let rh = if covers { COVER_ROW_H } else { ROW_H };
+        let look = if covers { Look { cover_w: self.cover_px(), open: true, album: true } } else { Look { cover_w: 0., open: false, album: false } };
+        let rh = if covers { self.cover_row_h() } else if self.opts.compact { 34. } else { ROW_H };
         let (tl, tr) = (card.min.x + 6., card.max.x - 6.);
         let list = Rect::from_min_max(pos2(card.min.x, card.min.y + HERO_MIN), card.max);
         let mut lui = App::region(ui, list);
         lui.spacing_mut().item_spacing = vec2(0., 0.);
+        // Header clicks sort the list: (column, ascending); kept per page so it survives a visit elsewhere.
+        let sort_id = ui.scope_id().with(("sort", self.route, &self.sel));
+        let mut sort: Option<(usize, bool)> = ui.ctx().data(|d| d.get_temp(sort_id)).flatten();
+        // ponytail: re-sorted and cloned every frame while a sort is active; cache by (page, sort) if huge playlists lag.
+        let sorted;
+        let tracks = match sort {
+            Some((col, asc)) => {
+                sorted = sort_tracks(tracks, col, asc);
+                &sorted[..]
+            }
+            None => tracks,
+        };
+        let shown_sort = sort;
         let n = tracks.len();
         let base = HERO_H - HERO_MIN + HEAD;
         let out = ScrollArea::vertical().id_salt(("tracks", self.route, &self.sel)).auto_shrink(false).show_viewport(&mut lui, |ui, vp| {
             ui.add_space(HERO_H - HERO_MIN);
             let (_, head) = ui.allocate_space(vec2(list.width(), HEAD));
-            self.table_head(ui, head.min.y + 14., tl, tr, look);
+            self.table_head(ui, head.min.y + 14., tl, tr, look, Some(&mut sort));
             // Rows are virtualized by hand (not `show_rows`) so the footer can follow the last one.
             let (first, last) = ((((vp.min.y - base).max(0.) / rh) as usize).min(n), ((((vp.max.y - base).max(0.) / rh).ceil() as usize) + 1).min(n));
             if let Some(("spotify", id)) = self.sel.as_ref().map(|s| (s.0, s.1.as_str())) {
@@ -313,32 +346,68 @@ impl App {
             }
             acts
         });
+        scroll_fades(&lui, &out, self.t.s1);
         self.apply_acts(ui, tracks, out.inner, look);
+        if sort != shown_sort {
+            ui.ctx().data_mut(|d| d.insert_temp(sort_id, sort));
+            ui.ctx().request_repaint();
+        }
         out.state.clamped_offset().y
     }
 
-    /// "# TITLE ARTIST TIME" with its rule, centred on `hy`.
-    pub fn table_head(&self, ui: &egui::Ui, hy: f32, tl: f32, tr: f32, look: Look) {
+    /// "# TITLE ARTIST TIME" with its rule, centred on `hy`. With `sort`, the labels are buttons: a click on a column
+    /// cycles ascending, descending, off; "#" turns sorting off.
+    pub fn table_head(&self, ui: &egui::Ui, hy: f32, tl: f32, tr: f32, look: Look, mut sort: Option<&mut Option<(usize, bool)>>) {
         let (t, p) = (self.t, ui.painter());
         let cols = columns(tl, tr - tl, look.num(), look.album);
         let head = font_w(11., Weight::Semi);
+        let cur = sort.as_deref().copied().flatten();
         for (i, label) in ["#", "TITLE", "ARTIST", "ALBUM", "TIME"].iter().enumerate() {
             let (cx, cw) = cols[i];
             if i == 3 && !look.album {
                 continue;
             }
+            let hit = sort.is_some().then(|| press(ui, ("head", i), Rect::from_min_size(pos2(cx - 4., hy - 12.), vec2(cw + 8., 24.))));
+            let active = cur.filter(|c| c.0 == i);
+            let col = if active.is_some() || hit.as_ref().is_some_and(|h| h.hovered()) { t.tx } else { t.tf };
             if i == 0 {
-                p.text(pos2(cx + NUM_X, hy), Align2::CENTER_CENTER, label, head.clone(), t.tf);
+                p.text(pos2(cx + NUM_X, hy), Align2::CENTER_CENTER, label, head.clone(), col);
             } else if i == 4 {
-                p.text(pos2(cx + cw, hy), Align2::RIGHT_CENTER, label, head.clone(), t.tf);
+                p.text(pos2(cx + cw, hy), Align2::RIGHT_CENTER, label, head.clone(), col);
             } else {
-                p.text(pos2(cx, hy), Align2::LEFT_CENTER, label, head.clone(), t.tf);
+                p.text(pos2(cx, hy), Align2::LEFT_CENTER, label, head.clone(), col);
+            }
+            if let Some((_, asc)) = active {
+                // Caret beside the label (left of it for the right-aligned TIME).
+                let w = text_w(p, label, head.clone());
+                let x = if i == 4 { cx + cw - w - 9. } else { cx + w + 9. };
+                let d = if asc { -2. } else { 2. };
+                p.add(egui::Shape::line(vec![pos2(x - 3.5, hy - d), pos2(x, hy + d), pos2(x + 3.5, hy - d)], (1.5, t.tx)));
+            }
+            if let (Some(s), Some(h)) = (sort.as_deref_mut(), hit) {
+                if h.clicked() {
+                    *s = match (i, *s) {
+                        (0, _) => None,
+                        (_, Some((c, true))) if c == i => Some((i, false)),
+                        (_, Some((c, false))) if c == i => None,
+                        _ => Some((i, true)),
+                    };
+                }
             }
         }
         p.line_segment([pos2(tl + 12., hy + 14.), pos2(tr - 12., hy + 14.)], (1., t.s2));
     }
 
     /// Rows `range` of `tracks`, stacked down `ui` between x `tl..tr`; `sid` keeps two tables on a page apart.
+    /// Row height of lists with covers (search songs, playlists), following the density setting.
+    pub fn cover_row_h(&self) -> f32 {
+        if self.opts.compact { COVER_ROW_COMPACT } else { COVER_ROW_H }
+    }
+
+    pub fn cover_px(&self) -> f32 {
+        self.cover_row_h() - COVER_PAD
+    }
+
     pub fn track_rows(&mut self, ui: &mut egui::Ui, sid: &'static str, tracks: &[Track], range: std::ops::Range<usize>, (tl, tr): (f32, f32), rh: f32, look: Look) -> Acts {
         let t = self.t;
         let cols = columns(tl, tr - tl, look.num(), look.album);
@@ -370,10 +439,10 @@ impl App {
             a.playing |= playing;
             let (cy, p) = (row.center().y, ui.painter());
             if look.cover_w > 0. {
-                let mut cover = Rect::from_min_size(pos2(cols[0].0 + 26., cy - COVER / 2.), vec2(look.cover_w, COVER));
+                let mut cover = Rect::from_min_size(pos2(cols[0].0 + 26., cy - (rh - COVER_PAD) / 2.), vec2(look.cover_w, rh - COVER_PAD));
                 p.text(pos2(cols[0].0 + NUM_X, cy), Align2::CENTER_CENTER, ix + 1, font(13.), if dim { t.tf } else { t.tm });
                 // A wide thumbnail (a video) is shown whole, letterboxed in its slot, instead of cropped to fill it.
-                let wide = tk.thumbnail.as_deref().and_then(|u| cover_aspect(ui.ctx(), u, cover.size())).filter(|a| *a > 1.3 && look.cover_w <= COVER);
+                let wide = tk.thumbnail.as_deref().and_then(|u| cover_aspect(ui.ctx(), u, cover.size())).filter(|a| *a > 1.3 && look.cover_w <= rh - COVER_PAD);
                 if let Some(a) = wide {
                     cover = Rect::from_center_size(cover.center(), vec2(cover.width(), cover.width() / a));
                 }
@@ -381,7 +450,7 @@ impl App {
                 if dim {
                     p.rect_filled(cover, rad(6.), Color32::from_black_alpha(150));
                     if pending {
-                        spinner(p, cover.center(), COVER * 0.22, time, Color32::WHITE);
+                        spinner(p, cover.center(), (rh - COVER_PAD) * 0.22, time, Color32::WHITE);
                     }
                 } else if cur {
                     p.rect_filled(cover, rad(6.), Color32::from_black_alpha(120));

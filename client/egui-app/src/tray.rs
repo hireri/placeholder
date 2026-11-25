@@ -14,6 +14,7 @@ use crate::media::Cmd;
 const LOCK_ADDR: &str = "127.0.0.1:47613";
 
 static HAS_TRAY: AtomicBool = AtomicBool::new(false);
+static DARK: AtomicBool = AtomicBool::new(true);
 static QUITTING: AtomicBool = AtomicBool::new(false);
 /// The window was closed to the tray and no longer exists; `main` keeps the player running until `show`.
 static HIDDEN: AtomicBool = AtomicBool::new(false);
@@ -108,16 +109,24 @@ fn quit() {
     }
 }
 
-/// Round accent-coloured placeholder until the app has a real icon asset.
-fn icon_rgba(n: u32) -> Vec<u8> {
-    let (c, r) = (n as f32 / 2., n as f32 / 2. - 1.);
-    (0..n * n)
-        .flat_map(|i| {
-            let (x, y) = ((i % n) as f32 + 0.5 - c, (i / n) as f32 + 0.5 - c);
-            let a = (r - (x * x + y * y).sqrt() + 0.5).clamp(0., 1.);
-            [0x8b, 0x7c, 0xf6, (a * 255.) as u8]
+/// The logo's small cut cropped to the glyph at 16/24/32/48 px, as (size, RGBA); the tray host picks the closest.
+/// Monochrome: the logo's alpha filled white (dark panel) or black (light panel).
+fn tray_icons(dark: bool) -> Vec<(u32, Vec<u8>)> {
+    [&include_bytes!("../assets/logo/tray-16.png")[..], &include_bytes!("../assets/logo/tray-24.png")[..], &include_bytes!("../assets/logo/tray-32.png")[..], &include_bytes!("../assets/logo/tray-48.png")[..]]
+        .map(|b| {
+            let mut i = image::load_from_memory(b).expect("bundled tray icon").into_rgba8();
+            let v = if dark { 255 } else { 0 };
+            i.pixels_mut().for_each(|p| p.0[..3].fill(v));
+            (i.width(), i.into_raw())
         })
-        .collect()
+        .into()
+}
+
+/// Repaints the tray icon for the panel's light/dark theme; cheap no-op when unchanged.
+pub fn set_dark(dark: bool) {
+    if HAS_TRAY.load(Ordering::Relaxed) && DARK.swap(dark, Ordering::Relaxed) != dark {
+        platform::update(dark);
+    }
 }
 
 pub fn start(lock: Option<TcpListener>) {
@@ -132,7 +141,17 @@ mod platform {
     use super::*;
     use ksni::{blocking::TrayMethods, menu::StandardItem, MenuItem};
 
-    struct Tray;
+    struct Tray {
+        dark: bool,
+    }
+
+    static HANDLE: Mutex<Option<ksni::blocking::Handle<Tray>>> = Mutex::new(None);
+
+    pub fn update(dark: bool) {
+        if let Some(h) = &*HANDLE.lock().unwrap() {
+            h.update(|t| t.dark = dark);
+        }
+    }
 
     impl ksni::Tray for Tray {
         fn id(&self) -> String {
@@ -142,9 +161,13 @@ mod platform {
             "Serafim".into()
         }
         fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-            let mut d = icon_rgba(32);
-            d.chunks_exact_mut(4).for_each(|p| p.rotate_right(1)); // RGBA -> ARGB
-            vec![ksni::Icon { width: 32, height: 32, data: d }]
+            tray_icons(self.dark)
+                .into_iter()
+                .map(|(n, mut d)| {
+                    d.chunks_exact_mut(4).for_each(|p| p.rotate_right(1)); // RGBA -> ARGB
+                    ksni::Icon { width: n as i32, height: n as i32, data: d }
+                })
+                .collect()
         }
         fn activate(&mut self, _x: i32, _y: i32) {
             show();
@@ -163,10 +186,10 @@ mod platform {
 
     pub fn tray() {
         // Err means no StatusNotifier host (e.g. bare WM): leave HAS_TRAY false so the close button still quits.
-        match Tray.spawn() {
+        match (Tray { dark: DARK.load(Ordering::Relaxed) }).spawn() {
             Ok(h) => {
                 HAS_TRAY.store(true, Ordering::Relaxed);
-                std::mem::forget(h); // the handle's drop would remove the icon; it lives for the whole run
+                *HANDLE.lock().unwrap() = Some(h); // static, so it is never dropped (a drop would remove the icon)
             }
             Err(e) => eprintln!("no system tray: {e}"),
         }
@@ -179,11 +202,22 @@ mod platform {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
+    thread_local!(static ICON: std::cell::RefCell<Option<tray_icon::TrayIcon>> = const { std::cell::RefCell::new(None) });
+
+    // Tray and UI both live on the main thread.
+    pub fn update(dark: bool) {
+        ICON.with(|t| {
+            if let (Some(t), Ok(i)) = (&*t.borrow(), Icon::from_rgba(tray_icons(dark).swap_remove(2).1, 32, 32)) {
+                let _ = t.set_icon(Some(i));
+            }
+        });
+    }
+
     pub fn tray() {
         let menu = Menu::new();
         let [play_i, next_i, prev_i, show_i, quit_i] = ["Play / Pause", "Next", "Previous", "Show Serafim", "Quit"].map(|l| MenuItem::new(l, true, None));
         let _ = menu.append_items(&[&play_i, &next_i, &prev_i, &PredefinedMenuItem::separator(), &show_i, &quit_i]);
-        let Ok(icon) = Icon::from_rgba(icon_rgba(32), 32, 32) else { return };
+        let Ok(icon) = Icon::from_rgba(tray_icons(true).swap_remove(2).1, 32, 32) else { return };
         let Ok(t) = TrayIconBuilder::new().with_icon(icon).with_tooltip("Serafim").with_menu(Box::new(menu)).with_menu_on_left_click(false).build() else { return };
         let (quit_id, play_id, next_id, prev_id) = (quit_i.id().clone(), play_i.id().clone(), next_i.id().clone(), prev_i.id().clone());
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| match e.id {
@@ -199,11 +233,12 @@ mod platform {
             }
         }));
         HAS_TRAY.store(true, Ordering::Relaxed);
-        std::mem::forget(t); // dropping removes the icon; keep it for the whole run
+        ICON.with(|i| *i.borrow_mut() = Some(t));
     }
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
 mod platform {
     pub fn tray() {}
+    pub fn update(_: bool) {}
 }

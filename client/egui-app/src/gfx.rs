@@ -25,11 +25,14 @@ const ICONS: &[(&str, &[u8])] = &[
     ("bytes://icons/aqs.svg", include_bytes!("../assets/icons/aqs.svg")),
     ("bytes://icons/art.svg", include_bytes!("../assets/icons/art.svg")),
     ("bytes://icons/back.svg", include_bytes!("../assets/icons/back.svg")),
+    ("bytes://icons/bell.svg", include_bytes!("../assets/icons/bell.svg")),
+    ("bytes://icons/gear.svg", include_bytes!("../assets/icons/gear.svg")),
     ("bytes://icons/col.svg", include_bytes!("../assets/icons/col.svg")),
     ("bytes://icons/colr.svg", include_bytes!("../assets/icons/colr.svg")),
     ("bytes://icons/dir.svg", include_bytes!("../assets/icons/dir.svg")),
     ("bytes://icons/ff.svg", include_bytes!("../assets/icons/ff.svg")),
     ("bytes://icons/fwd.svg", include_bytes!("../assets/icons/fwd.svg")),
+    ("bytes://icons/grip.svg", include_bytes!("../assets/icons/grip.svg")),
     ("bytes://icons/hist.svg", include_bytes!("../assets/icons/hist.svg")),
     ("bytes://icons/home.svg", include_bytes!("../assets/icons/home.svg")),
     ("bytes://icons/imp.svg", include_bytes!("../assets/icons/imp.svg")),
@@ -43,6 +46,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("bytes://icons/que.svg", include_bytes!("../assets/icons/que.svg")),
     ("bytes://icons/rep.svg", include_bytes!("../assets/icons/rep.svg")),
     ("bytes://icons/rw.svg", include_bytes!("../assets/icons/rw.svg")),
+    ("bytes://icons/serafim.svg", include_bytes!("../assets/logo/serafim.svg")),
     ("bytes://icons/search.svg", include_bytes!("../assets/icons/search.svg")),
     ("bytes://icons/shuf.svg", include_bytes!("../assets/icons/shuf.svg")),
     ("bytes://icons/song.svg", include_bytes!("../assets/icons/song.svg")),
@@ -98,6 +102,17 @@ pub fn font_w(size: f32, weight: Weight) -> FontId {
 /// Standard ease-out for hover/fade transitions (egui's default animate_* is linear).
 pub fn ease_out(t: f32) -> f32 {
     1. - (1. - t).powi(3)
+}
+
+/// True when `METROLIST_REDUCE_MOTION` is set: skips the non-essential motion that honours it. There is no OS hook yet.
+pub fn reduced_motion() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("METROLIST_REDUCE_MOTION").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// Gentle ease-out (`cubic-bezier(0.22, 1, 0.36, 1)`) for slides that should settle softly.
+pub fn ease_out_soft(t: f32) -> f32 {
+    bezier(0.22, 1., 0.36, 1., t)
 }
 
 /// CSS-style cubic-bezier easing (Compose `CubicBezierEasing`): finds the curve parameter whose x is `t`, returns its y.
@@ -235,6 +250,17 @@ pub fn wrapped(painter: &Painter, text: &str, font: FontId, color: Color32, max_
 
 pub fn text_w(painter: &Painter, text: &str, font: FontId) -> f32 {
     painter.layout_no_wrap(text.to_owned(), font, Color32::WHITE).size().x
+}
+
+/// Like [`icon_button`], but hover and press are a translucent wash of the text colour, so what lies beneath shows through.
+pub fn glass_button(ui: &Ui, t: &Theme, key: impl std::hash::Hash + std::fmt::Debug, center: Pos2, size: f32, uri: &'static str, glyph: f32, color: Color32) -> Response {
+    let resp = press(ui, key, Rect::from_center_size(center, egui::vec2(size, size)));
+    let a = if resp.is_pointer_button_down_on() { 0.18 } else if resp.hovered() { 0.1 } else { 0. };
+    if a > 0. {
+        ui.painter().circle_filled(center, size / 2., t.tx.gamma_multiply(a));
+    }
+    icon(ui, uri, center, glyph, color);
+    resp
 }
 
 /// Hit-tested tonal button: press shows `s3`, hover `s2`, otherwise `base`. Commits on release.
@@ -403,6 +429,33 @@ pub fn fade_down(painter: &Painter, rect: Rect, to: Color32) {
     painter.add(m);
 }
 
+/// Vertical fade from `to` at the top to transparent at the bottom.
+pub fn fade_up(painter: &Painter, rect: Rect, to: Color32) {
+    let mut m = egui::Mesh::default();
+    let (a, b) = (to, to.gamma_multiply(0.));
+    for (p, c) in [(rect.left_top(), a), (rect.right_top(), a), (rect.right_bottom(), b), (rect.left_bottom(), b)] {
+        m.vertices.push(egui::epaint::Vertex { pos: p, uv: egui::epaint::WHITE_UV, color: c });
+    }
+    m.indices.extend([0, 1, 2, 0, 2, 3]);
+    painter.add(m);
+}
+
+/// Fades a scroll area's top and bottom edges into `bg` while more content lies past them. Call right after `show`, with the
+/// ui the area was shown in, so the fades land over the content.
+pub fn scroll_fades<R>(ui: &egui::Ui, out: &egui::scroll_area::ScrollAreaOutput<R>, bg: Color32) {
+    let (r, y) = (out.inner_rect, out.state.clamped_offset().y);
+    let ctx = ui.ctx();
+    let top = ctx.animate_bool_with_time(out.id.with("fade-top"), y > 0.5, 0.15);
+    let bottom = ctx.animate_bool_with_time(out.id.with("fade-bottom"), y + r.height() < out.content_size.y - 0.5, 0.15);
+    let p = ui.painter();
+    if top > 0. {
+        fade_up(p, Rect::from_min_size(r.min, egui::vec2(r.width(), 32.)), bg.gamma_multiply(top));
+    }
+    if bottom > 0. {
+        fade_down(p, Rect::from_min_max(egui::pos2(r.min.x, r.max.y - 40.), r.max), bg.gamma_multiply(bottom));
+    }
+}
+
 /// Horizontal fade into `to`: transparent at one edge, solid at the right edge (`solid_right`) or the left one.
 pub fn fade_h(painter: &Painter, rect: Rect, to: Color32, solid_right: bool) {
     let mut m = egui::Mesh::default();
@@ -456,12 +509,12 @@ pub fn fade_blur(painter: &Painter, tex: TextureId, card: Rect, anchor: Rect, y0
 struct Art {
     tex: TextureHandle,
     tone: Option<(f32, f32)>,
-    /// OKLab lightness of the backdrop's lower part as drawn (after `DIM`), where the player's controls sit.
-    luma: f32,
+    /// Mean OKLab lightness of each row of the backdrop as drawn (after `DIM`), so any band of it can be read off.
+    luma: Vec<f32>,
 }
 
 /// What a backdrop worker sends back: (url, (blurred image, tone, luma)), `None` when the cover could not be fetched.
-type Fetched = (String, Option<(ColorImage, Option<(f32, f32)>, f32)>);
+type Fetched = (String, Option<(ColorImage, Option<(f32, f32)>, Vec<f32>)>);
 
 pub struct Gfx {
     /// Header wash and the (s1, accent) it was drawn for.
@@ -482,16 +535,25 @@ impl Gfx {
         Gfx { wash: None, asked: HashSet::new(), arts: HashMap::new(), failed: HashSet::new(), tx, rx }
     }
 
-    /// Redrawn when the theme moves, so it follows the track colours.
-    pub fn wash(&mut self, ctx: &Context, t: &Theme) -> TextureId {
-        let img = || gradient(256, 96, 135., mix(t.s1, t.ax, 0.24), t.s1, 0.64);
+    /// Header wash tinted by the cover at `url` (the theme's accent until its tone arrives or when it is grey), redrawn as the
+    /// tint or the theme's surface moves. Pages don't transition, so the tint doesn't either.
+    pub fn wash(&mut self, ctx: &Context, t: &Theme, url: Option<&str>) -> TextureId {
+        if let Some(u) = url {
+            self.fetch(ctx, u);
+        }
+        let want = match url.and_then(|u| self.tone(u)) {
+            Some(Some(tone)) => Theme::tinted(tone, t.dark).ax,
+            _ => t.ax,
+        };
+        let ax = want;
+        let img = || gradient(256, 96, 135., mix(t.s1, ax, 0.24), t.s1, 0.64);
         match &mut self.wash {
-            Some((s1, ax, tex)) if (*s1, *ax) != (t.s1, t.ax) => {
+            Some((s1, a, tex)) if (*s1, *a) != (t.s1, ax) => {
                 tex.set(img(), TextureOptions::LINEAR);
-                (*s1, *ax) = (t.s1, t.ax);
+                (*s1, *a) = (t.s1, ax);
             }
             Some(_) => {}
-            None => self.wash = Some((t.s1, t.ax, ctx.load_texture("wash", img(), TextureOptions::LINEAR))),
+            None => self.wash = Some((t.s1, ax, ctx.load_texture("wash", img(), TextureOptions::LINEAR))),
         }
         self.wash.as_ref().unwrap().2.id()
     }
@@ -501,7 +563,13 @@ impl Gfx {
         if self.asked.insert(url.to_owned()) {
             let (tx, u, ctx) = (self.tx.clone(), url.to_owned(), ctx.clone());
             std::thread::spawn(move || {
-                let r = fetch_backdrop(&u);
+                // A transient network error must not leave this song unthemed for the whole session (`asked` never retries).
+                let r = (0..3).find_map(|i| {
+                    if i > 0 {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    fetch_backdrop(&u)
+                });
                 let _ = tx.send((u, r));
                 ctx.request_repaint();
             });
@@ -532,15 +600,20 @@ impl Gfx {
         self.arts.get(url).map(|a| a.tone)
     }
 
-    /// Lightness (OKLab L, 0..1) of the dimmed backdrop under the player's controls; `None` until it arrives.
-    pub fn luma(&self, url: &str) -> Option<f32> {
-        self.arts.get(url).map(|a| a.luma)
+    /// Lightness (OKLab L, 0..1) of the dimmed backdrop over texture rows `v0..v1` (0..1 of the whole texture, the cover being 0..0.5);
+    /// `None` until it arrives.
+    pub fn luma(&self, url: &str, v0: f32, v1: f32) -> Option<f32> {
+        let rows = &self.arts.get(url)?.luma;
+        let n = rows.len() as f32;
+        let (a, b) = (((v0.clamp(0., 1.) * n) as usize).min(rows.len() - 1), (v1.clamp(0., 1.) * n).ceil() as usize);
+        let band = &rows[a..b.clamp(a + 1, rows.len())];
+        Some(band.iter().sum::<f32>() / band.len() as f32)
     }
 }
 
 /// Blocking: the cover at `url`, centre-cropped square, with its vertical flip below it, blurred as one 96x192 backdrop, plus its tone.
 /// Blurring across the seam hides the crease a mirrored wrap used to show.
-fn fetch_backdrop(url: &str) -> Option<(ColorImage, Option<(f32, f32)>, f32)> {
+fn fetch_backdrop(url: &str) -> Option<(ColorImage, Option<(f32, f32)>, Vec<f32>)> {
     let mut bytes = vec![];
     ureq::get(&sized_url(url, 128)).call().ok()?.into_reader().read_to_end(&mut bytes).ok()?;
     let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
@@ -552,32 +625,46 @@ fn fetch_backdrop(url: &str) -> Option<(ColorImage, Option<(f32, f32)>, f32)> {
     both.extend(sq.as_raw().chunks_exact(row).rev().flatten());
     // 96px with a sigma of 4 keeps the cover's shapes readable; 48px at sigma 6 smeared it into grey clouds once scaled up 7x.
     let out = blur(&ColorImage::from_rgba_unmultiplied([side as usize, 2 * side as usize], &both), 96, 192, 4.);
-    let l = luma(&out);
+    let l = row_luma(&out);
     Some((out, tone, l))
 }
 
-/// Mean OKLab lightness of the lower 40% of the cover half of `img` once dimmed by `DIM`: the controls sit there.
-fn luma(img: &ColorImage) -> f32 {
-    let [w, h] = img.size;
+/// Mean OKLab lightness of every row of `img` once dimmed by `DIM`.
+fn row_luma(img: &ColorImage) -> Vec<f32> {
     let dim = |v: u8| (v as u32 * DIM as u32 / 255) as u8;
-    let rows = &img.pixels[w * (h / 2 * 6 / 10)..w * (h / 2)];
-    rows.iter().map(|p| oklab([dim(p.r()), dim(p.g()), dim(p.b())]).0).sum::<f32>() / rows.len().max(1) as f32
+    img.pixels.chunks_exact(img.size[0]).map(|row| row.iter().map(|p| oklab([dim(p.r()), dim(p.g()), dim(p.b())]).0).sum::<f32>() / row.len() as f32).collect()
 }
 
-/// Chroma-weighted mean of the pixels in OKLab: vivid pixels set the hue, so a mostly grey cover with one red stripe reads red.
-/// `None` when the result is too grey to theme around.
+/// Dominant hue of the pixels in OKLab, weighted by chroma so vivid pixels win: a mostly grey cover with one red stripe reads red.
+/// Averaging a/b over the whole cover would let opposite hues (red and teal) cancel to grey, so the winning 90° sector of the hue wheel is
+/// averaged alone. `None` when the result is too grey to theme around.
 fn tone(px: impl Iterator<Item = [u8; 3]>) -> Option<(f32, f32)> {
-    let (mut a, mut b, mut w) = (0., 0., 0.);
+    const BINS: usize = 12;
+    let (mut w, mut sums) = ([0f32; BINS], [(0f32, 0f32, 0f32); BINS]);
     for p in px {
-        let (_, pa, pb) = oklab(p);
-        let c = (pa * pa + pb * pb).sqrt();
-        a += pa * c;
-        b += pb * c;
-        w += c;
+        let (_, a, b) = oklab(p);
+        let c = (a * a + b * b).sqrt();
+        let bin = ((b.atan2(a).to_degrees().rem_euclid(360.) / 360. * BINS as f32) as usize).min(BINS - 1);
+        w[bin] += c;
+        let s = &mut sums[bin];
+        (s.0, s.1, s.2) = (s.0 + a * c, s.1 + b * c, s.2 + c * c);
     }
-    let (a, b) = (a / w.max(1e-6), b / w.max(1e-6));
-    let c = (a * a + b * b).sqrt();
-    (c > 0.025).then(|| (b.atan2(a).to_degrees().rem_euclid(360.), c))
+    // A sector is its bin plus both neighbours, so a hue straddling a bin edge is not split in half.
+    let best = (0..BINS).max_by(|&i, &j| {
+        let sum = |k: usize| w[(k + BINS - 1) % BINS] + w[k] + w[(k + 1) % BINS];
+        sum(i).total_cmp(&sum(j))
+    })?;
+    let (mut a, mut b, mut cc, mut weight) = (0., 0., 0., 0.);
+    for k in [(best + BINS - 1) % BINS, best, (best + 1) % BINS] {
+        a += sums[k].0;
+        b += sums[k].1;
+        cc += sums[k].2;
+        weight += w[k];
+    }
+    let weight = weight.max(1e-6);
+    // Chroma-weighted mean chroma of the sector (sum c² / sum c), the same quantity the old vector mean gave for a single hue.
+    let c = cc / weight;
+    (c > 0.025).then(|| ((b / weight).atan2(a / weight).to_degrees().rem_euclid(360.), c))
 }
 
 pub fn sized(id: TextureId, size: f32) -> SizedTexture {
@@ -611,6 +698,15 @@ fn blur(src: &ColorImage, w: u32, h: u32, sigma: f32) -> ColorImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tone_keeps_a_hue_when_opposite_hues_would_cancel() {
+        let red = [220, 40, 40];
+        let teal = [40, 200, 200];
+        let (hue, c) = tone(std::iter::repeat(red).take(60).chain(std::iter::repeat(teal).take(40))).expect("two vivid hues still theme");
+        assert!(c > 0.1 && !(60. ..300.).contains(&hue), "hue {hue} should be the red side, not the cancelled mean");
+        assert!(tone(std::iter::repeat([120, 120, 120]).take(100)).is_none());
+    }
 
     #[test]
     fn backdrop_uv_top_half_is_cover_bottom_half_reflection() {

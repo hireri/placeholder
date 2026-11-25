@@ -236,7 +236,7 @@ impl App {
         lui.spacing_mut().item_spacing = vec2(0., 0.);
         lui.set_opacity(va);
         let bar = if self.lib_open { egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded } else { egui::scroll_area::ScrollBarVisibility::AlwaysHidden };
-        ScrollArea::vertical().id_salt("lib-list").auto_shrink(false).scroll_bar_visibility(bar)
+        let out = ScrollArea::vertical().id_salt("lib-list").auto_shrink(false).scroll_bar_visibility(bar)
             .show_rows(&mut lui, row_h, order.len().div_ceil(cols), |ui, range| {
                 for r in range {
                     let (_, row) = ui.allocate_space(vec2(list.width(), row_h));
@@ -307,6 +307,7 @@ impl App {
                     }
                 }
             });
+        scroll_fades(&lui, &out, t.s0);
         if let Some((r, kind, id)) = open_item {
             self.open(r, Some((kind, id)));
         }
@@ -316,6 +317,5 @@ impl App {
         if let Some(m) = menu_at {
             self.ctx_menu = Some(m);
         }
-        fade_down(&p, Rect::from_min_max(pos2(rect.min.x, rect.max.y - 40.), rect.max), t.s0);
     }
 }

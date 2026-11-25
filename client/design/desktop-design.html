@@ -97,21 +97,50 @@ button { font: inherit; }
 .art { border-radius: var(--art-r); background: linear-gradient(140deg, oklch(0.66 0.16 calc(var(--h) + var(--o, 50))), oklch(0.34 0.1 calc(var(--h) + var(--o, 50) - 90))); flex: none; }
 
 /* Titlebar */
-.tb { grid-column: 1 / -1; display: grid; grid-template-columns: var(--lib-w) minmax(0, 1fr) auto; align-items: center; padding-right: 12px; transition: grid-template-columns 320ms cubic-bezier(0.32, 0.72, 0, 1); }
-.mock.lib-c .brand span { opacity: 0; }
-.brand { font-weight: 650; letter-spacing: -0.01em; font-size: 14px; padding-left: 26px; display: flex; gap: 12px; align-items: center; white-space: nowrap; overflow: hidden; }
-.brand span { transition: opacity 160ms ease-out; }
-.brand i { width: 16px; height: 16px; border-radius: 5px; background: var(--ax); display: block; }
-.tb .mid { display: flex; align-items: center; gap: 6px; justify-self: center; width: min(100%, 560px); }
-.srch { flex: 1; display: flex; align-items: center; gap: 8px; background: var(--s2); border-radius: 999px; padding: 0 14px; height: 34px; color: var(--tm); transition: background-color 90ms ease-out; }
-.srch:focus-within { background: var(--s3); outline: 2px solid var(--ax); }
-.srch input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; color: var(--tx); }
-.srch input::placeholder { color: var(--tm); }
-.srch kbd { font: 500 10.5px var(--mono); color: var(--tf); }
-.tb .rt { display: flex; align-items: center; gap: 6px; }
-.imp { display: flex; align-items: center; gap: 8px; color: var(--tm); font-size: 12px; padding: 0 10px; height: 28px; border-radius: 999px; background: var(--s1); font-variant-numeric: tabular-nums; }
-.imp b { width: 44px; height: 3px; border-radius: 2px; background: var(--s3); position: relative; display: block; }
-.imp b::after { content: ""; position: absolute; inset: 0 34% 0 0; background: var(--ax); border-radius: 2px; }
+.tb { grid-column: 1 / -1; position: relative; display: grid; grid-template-columns: max(var(--lib-w), 124px) minmax(0, 1fr) auto; align-items: center; padding-right: 12px; transition: grid-template-columns 320ms cubic-bezier(0.32, 0.72, 0, 1); }
+.brand { padding-left: 15px; display: flex; align-items: center; gap: 10px; }
+.tnav { display: flex; gap: 2px; }
+.mock svg.logo { width: 30px; height: 30px; color: var(--ax); }
+/* Centred on the window, out of the grid flow, so the island growing never moves it. */
+.tb .mid { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: flex; width: clamp(140px, calc(100% - 640px), 300px); }
+.tsrch { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: 999px; background: var(--s2); color: var(--tm); text-align: left; transition: background-color 90ms ease-out; }
+.tsrch:hover { background: var(--s3); }
+.tsrch span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tsrch kbd { font: 500 10.5px var(--mono); color: var(--tf); }
+.pi span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pi em { font-style: normal; font-weight: 400; color: var(--tm); }
+.pi b { font-weight: 600; }
+.pi mark { background: none; color: var(--ax); }
+.pi.ent { height: 44px; }
+.pi.ent .art { width: 30px; height: 30px; }
+.pi.ent span { display: flex; flex-direction: column; line-height: 1.25; }
+.pi.ent small { font-size: 12px; color: var(--tm); overflow: hidden; text-overflow: ellipsis; }
+.pi .rm { flex: none; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 999px; color: var(--tf); opacity: 0; transition: opacity 90ms ease-out, background-color 90ms ease-out; }
+.pi .rm svg { width: 14px; height: 14px; }
+.pi:hover .rm, .pi.sel .rm { opacity: 1; }
+.pi .rm:hover { background: var(--s1); color: var(--tx); }
+@keyframes pin-in { from { opacity: 0; transform: translateY(-5px); } }
+.pbox.fresh .pi, .pbox.fresh .kk { animation: pin-in 170ms cubic-bezier(0.2, 0.8, 0.2, 1) both; animation-delay: calc(min(var(--i, 0), 10) * 11ms); }
+.pi.gone { height: 0; opacity: 0; padding-block: 0; overflow: hidden; transition: height 140ms ease-out, opacity 100ms ease-out, padding 140ms; }
+.tb .rt { grid-column: 3; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+/* Island: the notifications button, which widens into the Spotify import status while an import runs. */
+.isl { position: relative; display: flex; align-items: center; height: 32px; border-radius: 999px; color: var(--tm); transition: background-color 240ms ease-out, color 120ms ease-out; }
+.isl:hover { background: var(--s2); color: var(--tx); }
+.isl:not([data-s="idle"]) { background: var(--s1); }
+.isl .ii { width: 32px; height: 32px; flex: none; display: grid; place-items: center; }
+.isl .ii svg { grid-area: 1 / 1; opacity: 0; transform: scale(0.6); transition: opacity 160ms ease-out, transform 280ms cubic-bezier(0.16, 1, 0.3, 1); }
+.isl[data-s="idle"] .ic-b, .isl[data-s="import"] .ic-i, .isl[data-s="done"] .ic-c { opacity: 1; transform: none; }
+.isl[data-s="done"] .ic-c { color: var(--ax); }
+.isl .ex { display: grid; grid-template-columns: 0fr; transition: grid-template-columns 320ms cubic-bezier(0.32, 0.72, 0, 1); }
+.isl:not([data-s="idle"]) .ex { grid-template-columns: 1fr; }
+.isl .in { min-width: 0; overflow: hidden; opacity: 0; transition: opacity 120ms ease-out; }
+.isl:not([data-s="idle"]) .in { opacity: 1; transition: opacity 200ms ease-out 90ms; }
+.isl .cn { display: flex; align-items: center; gap: 8px; padding-right: 12px; white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
+.isl b { width: 44px; height: 3px; border-radius: 2px; background: var(--s3); position: relative; overflow: hidden; display: block; }
+.isl b::after { content: ""; position: absolute; inset: 0; background: var(--ax); transform-origin: 0 50%; transform: scaleX(var(--p, 0.644)); transition: transform 320ms linear; }
+.isl[data-s="done"] b { display: none; }
+.isl .dot { position: absolute; top: 5px; right: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--ax); box-shadow: 0 0 0 2px var(--s0); opacity: 0; transform: scale(0); transition: opacity 120ms ease-out, transform 240ms cubic-bezier(0.16, 1, 0.3, 1); }
+.isl.unread[data-s="idle"] .dot { opacity: 1; transform: none; }
 .me { display: flex; align-items: center; gap: 8px; padding: 3px 10px 3px 3px; border-radius: 999px; }
 .me:hover { background: var(--s2); }
 .me i { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: var(--axc); color: var(--tx); font-style: normal; font-weight: 600; font-size: 11px; }
@@ -365,18 +394,23 @@ button { font: inherit; }
 .rv .art { width: 38px; height: 38px; }
 .rv > svg { color: var(--tf); }
 .rv .ac { display: flex; gap: 2px; }
-.pal { display: none; position: absolute; inset: 0; z-index: 5; background: oklch(0 0 0 / 0.42); justify-content: center; align-items: flex-start; padding-top: 72px; }
-.pal.o { display: flex; }
-.pbox { width: min(560px, calc(100% - 48px)); max-height: 480px; background: var(--s2); border-radius: 16px; box-shadow: 0 24px 64px oklch(0 0 0 / 0.45); display: flex; flex-direction: column; overflow: hidden; animation: in 140ms ease-out; }
-.pin { display: flex; align-items: center; gap: 10px; padding: 0 16px; height: 52px; color: var(--tm); flex: none; }
+.pal { display: flex; visibility: hidden; opacity: 0; position: absolute; inset: 0; z-index: 5; background: oklch(0 0 0 / 0.42); justify-content: center; align-items: flex-start; padding-top: 72px; transition: opacity 100ms ease-out, visibility 0s linear 100ms; }
+.pal.o { visibility: visible; opacity: 1; transition-delay: 0s; }
+.pbox { width: min(560px, calc(100% - 48px)); max-height: 480px; background: var(--s2); border-radius: 12px; box-shadow: 0 0 0 1px var(--s3), 0 24px 64px oklch(0 0 0 / 0.45); display: flex; flex-direction: column; overflow: hidden; transform: translateY(-8px) scale(0.97); transform-origin: 50% 0; transition: transform 120ms ease-out; }
+.pal.o .pbox { transform: none; transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1); }
+.pft { flex: none; height: 36px; display: flex; gap: 16px; align-items: center; padding: 0 16px; border-top: 1px solid var(--s3); color: var(--tf); font-size: 12px; }
+.pft span { display: flex; gap: 6px; align-items: center; }
+.pft kbd { font: 500 10.5px var(--mono); color: var(--tm); }
+.pin { display: flex; align-items: center; gap: 10px; padding: 0 16px; height: 48px; color: var(--tm); flex: none; }
 .pin input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; color: var(--tx); font-size: 15px; }
 .pin input::placeholder { color: var(--tm); }
 .pres { overflow-y: auto; scrollbar-width: none; padding: 0 8px 8px; }
 .pgr .kk { display: block; padding: 10px 10px 4px; color: var(--tf); }
-.pi { display: flex; align-items: center; gap: 12px; width: 100%; height: 40px; padding: 0 10px; border-radius: var(--ctl-r); text-align: left; color: var(--tx); }
+.pi { display: flex; align-items: center; gap: 12px; width: 100%; height: 36px; padding: 0 10px; border-radius: var(--ctl-r); text-align: left; color: var(--tx); }
 .pi svg { color: var(--tm); width: 18px; height: 18px; }
 .pi span { flex: 1; }
 .pi kbd { font: 500 10.5px var(--mono); color: var(--tf); }
+.pi { transition: background-color 80ms ease-out; }
 .pi:hover, .pi.sel { background: var(--s3); }
 .menu { position: absolute; z-index: 4; top: 48px; right: 12px; width: 220px; background: var(--s2); border-radius: 14px; padding: 6px; box-shadow: 0 16px 40px oklch(0 0 0 / 0.4); display: flex; flex-direction: column; gap: 1px; animation: in 140ms ease-out; }
 .menu .mh { padding: 8px 10px 10px; line-height: 1.3; }
@@ -576,7 +610,7 @@ button { font: inherit; }
 .mini .ib[data-mv]:hover { color: var(--tx); }
 .mini .pg { position: absolute; left: 24px; right: 24px; bottom: 5px; height: 2px; border-radius: 1px; background: var(--s3); }
 .mini .pg i { position: absolute; inset: 0 62% 0 0; background: var(--tx); border-radius: 1px; }
-@media (prefers-reduced-motion: reduce) { .mini, .mock.pl-c .mini { transition: none; } .eq b { animation: none; transform: scaleY(0.6); } .body { animation: none; } .mock { transition: none; } .scrub .bar, .play, .li, .ib, .tport button, .sw, .sw::after, .card, .qk, .pill button, .rz, .rz::after { transition: none; } .page.on, .sp.on, .pbox, .menu, .pty { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .mini, .mock.pl-c .mini { transition: none; } .eq b { animation: none; transform: scaleY(0.6); } .body { animation: none; } .mock { transition: none; } .scrub .bar, .play, .li, .ib, .tport button, .sw, .sw::after, .card, .qk, .pill button, .rz, .rz::after { transition: none; } .page.on, .sp.on, .menu, .pty { animation: none; } .pbox.fresh .pi, .pbox.fresh .kk { animation: none; } .pal, .pbox, .tsrch, .pi, .pi .rm, .isl, .isl .ii svg, .isl .ex, .isl .in, .isl b::after, .isl .dot { transition: none; } }
 </style>
 
 <div class="wrap">
@@ -709,7 +743,7 @@ button { font: inherit; }
   <section id="layout">
     <span class="eyebrow">4 · Layout</span>
     <h2>A titlebar, a collapsible library on the left, content in the middle and the player on the right.</h2>
-    <p>The player is the phone player from your screenshots, kept as a column: cover and controls by default, with the cover swapping for lyrics or the queue while the transport stays put. That removes the need for a separate bottom bar and for any now-playing side panel. Try the three buttons at the bottom of the player and the collapse button on the library. Drag the edge of either sidebar to resize it (double-click resets, arrow keys nudge): the library goes from 200 to 360px, the player from 260 to 400px, and the content never drops below 380px, so the player card always keeps its right edge and margin on screen. The buttons above the shell jump between pages; the left-hand page buttons, library items, the account menu, the import chip, <code>Enter</code> in the search box and <code>Ctrl K</code> all navigate too.</p>
+    <p>The player is the phone player from your screenshots, kept as a column: cover and controls by default, with the cover swapping for lyrics or the queue while the transport stays put. That removes the need for a separate bottom bar and for any now-playing side panel. Try the three buttons at the bottom of the player and the collapse button on the library. Drag the edge of either sidebar to resize it (double-click resets, arrow keys nudge): the library goes from 200 to 360px, the player from 260 to 400px, and the content never drops below 380px, so the player card always keeps its right edge and margin on screen. The buttons above the shell jump between pages; the left-hand page buttons, library items, the account menu, the status island, <code>Enter</code> in the search box and <code>Ctrl K</code> all navigate too.</p>
   </section>
 </div>
 
@@ -725,6 +759,9 @@ button { font: inherit; }
     <button class="chip-b" type="button" data-go="settings" aria-pressed="false">Settings</button>
     <button class="chip-b" type="button" data-go="import" aria-pressed="false">Spotify import</button>
     <button class="chip-b" type="button" data-cmd="palette">Command palette</button>
+    <span style="width:12px"></span>
+    <button class="chip-b" type="button" data-isl="run">Island: replay import</button>
+    <button class="chip-b" type="button" data-isl="idle">Island: idle</button>
   </div>
   <div class="mockwrap">
     <div class="mock" id="mock" data-mode="dark" data-density="comfortable" data-party="on">
@@ -768,19 +805,27 @@ button { font: inherit; }
         <symbol id="i-chev" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></symbol>
         <symbol id="i-grid" viewBox="0 0 16 16"><path d="M2.500 2.500H7V7H2.500zM9 2.500h4.500V7H9zM2.500 9H7v4.500H2.500zM9 9h4.500v4.500H9z"/></symbol>
         <symbol id="i-arrow" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></symbol>
+        <symbol id="i-logo" viewBox="0 0 256 256"><path transform="translate(128 128) scale(1.0522) translate(-136 -151.09)" d="M129.87 95.21L130.54 95.14L131.21 95.21L131.71 95.29L132.46 95.51L132.79 95.68L133.29 96.03L133.96 96.71L134.23 97.12L134.47 97.62L134.80 98.79L134.96 100.12L134.96 101.38L134.65 103.79L134.42 104.96L134.05 106.46L133.46 108.47L133.02 109.79L132.32 111.71L131.32 114.21L130.07 117.04L127.44 122.38L126.15 124.79L124.57 127.62L122.82 130.62L120.16 134.96L119.85 135.62L119.67 136.38L119.63 137.12L119.73 137.88L119.95 138.54L120.32 139.21L120.79 139.78L121.38 140.27L122.04 140.63L122.79 140.87L123.54 140.96L124.38 140.89L125.12 140.67L130.88 137.64L139.62 133.26L145.29 130.60L151.46 127.85L156.04 125.93L162.54 123.40L167.62 121.62L171.62 120.37L173.71 119.79L176.38 119.12L178.38 118.69L181.29 118.20L183.54 117.96L184.29 117.95L184.88 117.89L187.21 118.12L187.96 118.29L188.88 118.60L189.62 119.02L190.22 119.54L190.68 120.21L190.88 120.79L190.97 121.62L190.88 122.54L190.44 124.04L190.24 124.54L189.65 125.71L188.32 127.79L187.46 128.96L186.46 130.21L184.63 132.29L183.79 133.14L183.38 133.62L181.29 135.72L180.80 136.12L179.71 137.22L178.71 138.13L176.38 140.21L172.21 143.71L167.04 147.79L163.12 150.73L158.38 154.15L154.46 156.88L149.62 160.13L142.91 164.46L142.22 165.04L141.71 165.71L141.38 166.38L141.18 167.12L141.13 167.96L141.25 168.79L141.53 169.54L141.94 170.21L142.48 170.79L143.12 171.26L143.88 171.59L144.62 171.76L145.46 171.79L157.29 170.46L166.46 169.62L168.12 169.53L169.71 169.38L170.38 169.36L170.88 169.29L172.79 169.20L173.38 169.12L175.54 169.03L176.12 168.96L177.04 168.95L177.62 168.88L178.71 168.87L179.29 168.79L180.38 168.79L181.04 168.71L182.46 168.70L183.12 168.62L184.96 168.62L185.62 168.54L188.46 168.54L189.21 168.46L196.54 168.46L197.21 168.54L199.62 168.54L200.29 168.62L201.62 168.62L202.21 168.70L204.62 168.79L207.79 169.04L212.29 169.54L214.96 169.94L217.04 170.33L219.29 170.87L220.54 171.23L222.04 171.76L223.29 172.31L224.38 172.96L225.21 173.62L225.79 174.29L226.10 174.88L226.29 175.54L226.25 176.38L226.07 177.04L225.82 177.54L225.48 178.04L224.88 178.79L224.29 179.38L223.21 180.29L222.29 180.96L220.96 181.82L219.54 182.65L218.46 183.24L215.71 184.57L211.12 186.49L207.21 187.94L201.96 189.69L197.21 191.13L191.54 192.71L183.62 194.71L178.79 195.83L171.46 197.42L162.12 199.23L155.04 200.48L146.79 201.80L139.88 202.80L132.88 203.71L123.46 204.79L114.88 205.62L108.62 206.12L106.88 206.22L106.29 206.29L105.62 206.30L105.04 206.38L104.29 206.38L103.71 206.46L102.88 206.47L102.29 206.54L101.38 206.55L100.79 206.62L99.79 206.63L99.12 206.71L98.04 206.71L97.38 206.79L95.96 206.80L95.29 206.88L93.54 206.88L92.88 206.96L90.12 206.96L89.38 207.04L81.46 207.04L80.79 206.96L78.54 206.96L77.88 206.88L76.54 206.88L75.96 206.80L74.96 206.79L74.38 206.72L72.46 206.62L67.29 206.13L63.29 205.56L60.46 205.00L58.12 204.38L56.54 203.85L55.62 203.49L54.46 202.90L53.71 202.40L53.38 202.13L52.70 201.46L52.12 200.66L51.46 199.97L50.12 198.96L49.53 198.38L48.71 197.29L48.31 196.62L47.65 195.21L47.04 193.38L46.58 191.54L46.20 189.29L45.88 186.38L45.86 185.79L45.79 185.29L45.78 184.21L45.71 183.62L45.71 180.38L45.78 179.79L45.79 178.54L45.87 177.96L45.88 177.21L46.12 174.21L46.79 168.62L47.52 164.04L48.42 159.46L49.20 155.96L50.20 151.96L51.37 147.79L52.23 144.96L53.37 141.46L54.48 138.29L55.51 135.54L56.68 132.62L57.60 130.46L59.18 126.96L61.22 122.88L62.27 120.96L63.68 118.54L66.02 114.96L67.69 112.71L69.45 110.62L71.37 108.71L72.37 107.88L73.29 107.21L74.12 106.68L74.96 106.26L75.96 105.90L76.71 105.71L77.46 105.62L77.96 105.62L78.62 105.70L79.62 106.01L80.63 106.62L81.79 107.79L82.73 109.21L83.07 109.88L83.47 110.88L84.13 112.96L84.65 115.38L84.88 116.96L85.12 119.29L85.32 122.88L85.49 123.62L85.78 124.29L86.17 124.88L86.62 125.36L87.21 125.79L87.79 126.08L88.46 126.29L89.12 126.37L89.79 126.34L90.46 126.20L90.96 126.01L91.37 125.79L92.12 125.21L94.95 122.04L96.71 120.20L97.12 119.71L98.38 118.45L98.78 117.96L104.21 112.53L104.71 112.11L105.88 110.95L110.21 107.04L112.37 105.21L114.54 103.46L118.04 100.85L120.62 99.12L121.88 98.35L123.96 97.18L125.38 96.51L126.79 95.95L127.79 95.62L128.79 95.37Z"/></symbol>
+        <symbol id="i-cmd" viewBox="0 0 16 16"><path d="m3.500 5 3.500 3-3.500 3M8.500 11.500h4"/></symbol>
         <symbol id="i-check" viewBox="0 0 16 16"><path d="m3 8.500 3.200 3L13 4.500"/></symbol>
       </svg>
 
       <header class="tb">
-        <div class="brand"><i></i><span>Metrolist</span></div>
+        <div class="brand"><svg class="logo" role="img" aria-label="Serafim"><use href="#i-logo"/></svg>
+          <div class="tnav">
+            <button class="ib" id="bk" type="button" aria-label="Back"><svg class="s"><use href="#i-back"/></svg></button>
+            <button class="ib" type="button" aria-label="Forward"><svg class="s"><use href="#i-fwd"/></svg></button>
+          </div>
+        </div>
         <div class="mid">
-          <button class="ib" id="bk" type="button" aria-label="Back"><svg class="s"><use href="#i-back"/></svg></button>
-          <button class="ib" type="button" aria-label="Forward"><svg class="s"><use href="#i-fwd"/></svg></button>
-          <label class="srch"><svg class="s"><use href="#i-search"/></svg><input id="gs" type="search" placeholder="Search songs, albums, artists" aria-label="Search YouTube Music"><kbd data-cmd="palette" title="Command palette">Ctrl K</kbd></label>
+          <button class="tsrch" id="pb" type="button" data-cmd="palette" aria-haspopup="dialog" aria-expanded="false"><svg class="s"><use href="#i-search"/></svg><span>Search or run a command</span><kbd>Ctrl K</kbd></button>
         </div>
         <div class="rt">
-          <button class="imp" type="button" data-go="import" title="Spotify import"><svg><use href="#i-imp"/></svg>Importing 412 / 640<b></b></button>
-          <button class="ib" type="button" aria-label="Notifications"><svg class="s"><use href="#i-bell"/></svg></button>
+          <button class="isl" id="isl" type="button" data-s="import" aria-label="Notifications and Spotify import status" title="Importing from Spotify">
+            <span class="ii"><svg class="ic-b s"><use href="#i-bell"/></svg><svg class="ic-i"><use href="#i-imp"/></svg><svg class="ic-c s"><use href="#i-check"/></svg></span>
+            <span class="ex"><span class="in"><span class="cn"><span id="itx">412 / 640</span><b></b></span></span></span>
+            <i class="dot"></i>
+          </button>
           <button class="ib" id="pt" type="button" aria-label="Listening party" aria-haspopup="dialog" aria-expanded="false"><svg class="s"><use href="#i-party"/></svg><i class="live"></i></button>
           <button class="me" id="me" type="button" aria-haspopup="menu" aria-expanded="false"><i>HY</i>Hireri</button>
         </div>
@@ -1187,7 +1232,9 @@ button { font: inherit; }
       <div class="pal" id="pal" role="dialog" aria-label="Command palette">
         <div class="pbox">
           <label class="pin"><svg class="s"><use href="#i-search"/></svg><input id="pq" type="text" placeholder="Search or type a command" aria-label="Command palette" autocomplete="off"></label>
-          <div class="pres">
+          <div class="pres"><div class="pw">
+            <div id="psg"></div>
+            <div id="pcmd">
             <div class="pgr"><span class="kk">Go to</span>
               <button class="pi sel" type="button" data-go="home"><svg><use href="#i-home"/></svg><span>Home</span></button>
               <button class="pi" type="button" data-go="downloads"><svg><use href="#i-imp"/></svg><span>Downloads</span></button>
@@ -1201,7 +1248,9 @@ button { font: inherit; }
               <button class="pi" type="button" data-cmd="lib"><svg class="s"><use href="#i-col"/></svg><span>Collapse or expand the library</span><kbd>Ctrl B</kbd></button>
               <button class="pi" type="button" data-go="import"><svg><use href="#i-imp"/></svg><span>Review Spotify import</span></button>
             </div>
-          </div>
+            </div>
+          </div></div>
+          <div class="pft"><span><kbd>↑↓</kbd>Navigate</span><span><kbd>↵</kbd>Open</span><span><kbd>Esc</kbd>Close</span></div>
         </div>
       </div>
       <div class="rz rz-l" id="rzl" role="separator" aria-orientation="vertical" aria-label="Resize library" aria-valuemin="200" aria-valuemax="360" aria-valuenow="264" tabindex="0"></div>
@@ -1221,7 +1270,7 @@ button { font: inherit; }
 <div class="wrap" style="margin-top:56px">
   <section>
     <div class="grid2">
-      <div><h3>Titlebar · 52px</h3><p>Brand at the left edge, aligned over the library. Back and forward sit beside one global search that reaches YouTube Music; the library has its own search for saved items only, so the two never compete. The right side holds the Spotify import progress, notifications, the listening party button and the account menu, which is also where the theme and settings live.</p></div>
+      <div><h3>Titlebar · 52px</h3><p>The logo sits at the left edge, over the library, tinted with the accent. Back and forward sit beside one search pill that opens the command palette, the single place to search YouTube Music and run commands; the library has its own search for saved items only, so the two never compete. The right side holds one island that is the notifications button and widens into the Spotify import progress while an import runs, the listening party button and the account menu, which is also where the theme and settings live.</p></div>
       <div><h3>Player · 308px card, right</h3><p>The player is its own card, like the content, with a 10px gap between them. The cover is the default view: it runs the full width of the card and its lower edge fades into a blurred copy of itself that fills the card, which is always dark so text stays legible on any art. Lyrics and Queue each replace it with a compact header (small cover, title, artist, favourite, more) and keep the scrubber, transport and volume in the same place, so nothing the thumb or cursor learned moves. The top half of the card is one flexible slot for the cover, the lyrics or the queue; the scrubber, transport, volume and bottom row stay anchored below it in every view, so nothing there moves when you switch. In Lyrics and Queue the title row slides up beside a small cover (the big cover shrinks into it) and the list fills the slot under it. The bottom row switches views; the middle of that row is a three-part pill for shuffle, repeat and endless, which keeps adding recommendations when the queue ends (the queue previews them under "Endless"). The header above the cover holds the album name and the button that collapses the player. Collapsing slides the card to the right until only a 56px sliver is left at the window edge: the left edge of the cover and its blurred backdrop, under a fade that is part of the card, so it slides in with it, solid on the left and still 60% opaque on the right, with a chevron in the middle. The whole sliver is the button that reopens it. A small floating pill centred on the window then carries cover, title, previous/play/next, a thin progress line, and Lyrics and Queue buttons that reopen the player on that view; tapping the cover or title reopens it on the cover. Volume and the scrubber live in the full player. The whole card scrolls: a square cover, the controls under it, then two info cards (About the artist with a Follow button, and Credits), so a tall player has no dead space and a short one just scrolls. The cards stay under the controls in Lyrics and Queue too; there the lyrics or queue keep at least 380px and the card scrolls to reach them.</p></div>
       <div><h3>Content</h3><p>The header wash is the one place colour from art appears. Track rows are 44px with tabular durations and a tonal hover. The playing row is the only one with accent text. Rows virtualise, since Liked Songs can pass 5,000 items.</p></div>
       <div><h3>Library · 264px, left</h3><p>Four page buttons (Home, Downloads, Local Music, History &amp; stats) sit at the top; there is no separate Library page, because the list below them is the library, then the library with its own search, a sort and view button, filter pills and a list that shows the open item. The button opens Sort by (recents, recently added, alphabetical, creator) and View as: compact list with a dot between title and subtext, the list with covers, a grid of covers only, or a grid with title and subtext under each. Its collapse button sits on the left of the header. Collapsing to 68px only trims text: every icon, cover and the button itself stay exactly where they were, the search stays as an icon, and the filter row shrinks to zero height.</p></div>
@@ -1252,7 +1301,7 @@ button { font: inherit; }
         <tr><td>Settings</td><td>Category list, one panel at a time</td><td>Appearance is live: swatches, mode and density re-theme the shell behind it. Shortcuts are listed so they can be rebound later.</td></tr>
         <tr><td>Spotify import</td><td>Progress, tiles, review rows</td><td>Each uncertain track sits next to its best match with the reason it is uncertain. Accept or skip per row, or accept everything above 90%.</td></tr>
         <tr><td>Listening party</td><td>Popover from the titlebar</td><td>The button sits beside the account pill and shows a dot while a party is live. Not in a party: start one or join with a code. In one: code and copy-link, who is listening and their sync state, two guest permissions, End party.</td></tr>
-        <tr><td>Palette and account menu</td><td>Overlay, popover</td><td><code>Ctrl K</code> or the hint in the search box. Typing filters, arrows move, <code>Enter</code> runs. The menu holds settings, accounts, shortcuts and sign out.</td></tr>
+        <tr><td>Palette and account menu</td><td>Overlay, popover</td><td><code>Ctrl K</code>, <code>/</code> or the search pill. It is also the search box: empty, it lists recent searches; typing adds completions and a few songs, albums and artists above the matching commands. Arrows move, <code>Enter</code> runs. The menu holds settings, accounts, shortcuts and sign out.</td></tr>
       </tbody>
     </table></div>
     <p class="note"><strong>Not designed yet:</strong> Explore, Charts, Podcasts and the full-height player below 960px. Home's mood chips stand in for Moods.</p>
@@ -1425,29 +1474,82 @@ button { font: inherit; }
     [].forEach.call(document.querySelectorAll('.sp'), function (x) { x.classList.toggle('on', x.dataset.s === n); });
   }
   function pis() { return [].filter.call(pal.querySelectorAll('.pi'), function (i) { return !i.hidden; }); }
-  function pick(n) {
+  function pick(n, still) {
     var l = pis();
     [].forEach.call(pal.querySelectorAll('.pi'), function (i) { i.classList.remove('sel'); });
     if (!l.length) return;
-    pk = (n + l.length) % l.length; l[pk].classList.add('sel'); l[pk].scrollIntoView({ block: 'nearest' });
+    pk = (n + l.length) % l.length; l[pk].classList.add('sel'); if (!still) l[pk].scrollIntoView({ block: 'nearest' });
+  }
+  // The palette is also the search: recent searches when empty, completions and a few entities when typing.
+  var QS = ['night bus home', 'night shift', 'night drive playlist', 'hoshi yume', 'hoshi yume live', 'paper lantern ep', 'aoi tsuru', 'train windows', 'window seat, rain', 'quiet hours', 'quiet hours lofi', 'rain sounds'];
+  var ENT = [{ t: 'Song', n: 'Night Bus Home', by: 'Hoshi Yume', go: 'album', o: 0 }, { t: 'Song', n: 'Window Seat, Rain', by: 'Hoshi Yume', go: 'album', o: 40 },
+    { t: 'Artist', n: 'Hoshi Yume', go: 'artist', o: 120 }, { t: 'Artist', n: 'Aoi Tsuru', go: 'artist', o: -70 },
+    { t: 'Album', n: 'Paper Lantern EP', by: 'Hoshi Yume', go: 'album', o: 80 }, { t: 'Album', n: 'Train Windows', by: 'Aoi Tsuru', go: 'album', o: 160 },
+    { t: 'Song', n: 'Quiet Hours', by: 'Aoi Tsuru', go: 'album', o: -130 }, { t: 'Song', n: 'Night Shift', by: 'Hoshi Yume', go: 'album', o: 210 }];
+  var recent = ['night bus home', 'hoshi yume', 'paper lantern ep', 'quiet hours'];
+  var psg = $('psg'), pcmd = $('pcmd'), pbox = pal.querySelector('.pbox');
+  function esc(s) { return s.replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function split(s, q, tag, rest) {
+    var i = q ? s.toLowerCase().indexOf(q) : -1;
+    if (i < 0) return rest(esc(s));
+    return rest(esc(s.slice(0, i))) + '<' + tag + '>' + esc(s.slice(i, i + q.length)) + '</' + tag + '>' + rest(esc(s.slice(i + q.length)));
+  }
+  function qrow(s, q) {
+    return '<button class="pi" type="button" data-go="search" data-q="' + esc(s) + '"><svg class="s"><use href="#i-search"/></svg><span>' + split(s, q, 'em', function (x) { return x && '<b>' + x + '</b>'; }) + '</span></button>';
+  }
+  function erow(e, q) {
+    return '<button class="pi ent" type="button" data-go="' + e.go + '"><div class="art" style="--o:' + e.o + '"></div><span><strong>' + split(e.n, q, 'mark', function (x) { return x; }) + '</strong><small>' + e.t + (e.by ? ' · ' + esc(e.by) : '') + '</small></span></button>';
+  }
+  function sugg(q) {
+    var qs = QS.filter(function (s) { return s.indexOf(q) === 0 && s !== q; }).concat(QS.filter(function (s) { return s.indexOf(q) > 0; })).slice(0, 3);
+    var es = ENT.filter(function (e) { return (e.n + ' ' + (e.by || '')).toLowerCase().indexOf(q) >= 0; }).slice(0, 3);
+    return '<div class="pgr"><span class="kk">Search YouTube Music</span><button class="pi" type="button" data-go="search" data-q="' + esc(q) + '"><svg class="s"><use href="#i-search"/></svg><span>Search for “<b>' + esc(q) + '</b>”</span></button>' + qs.map(function (s) { return qrow(s, q); }).join('') + '</div>' +
+      (es.length ? '<div class="pgr"><span class="kk">Songs, albums and artists</span>' + es.map(function (e) { return erow(e, q); }).join('') + '</div>' : '');
+  }
+  function recents() {
+    return recent.length ? '<div class="pgr"><span class="kk">Recent searches</span>' + recent.slice(0, 3).map(function (s) {
+      return '<button class="pi" type="button" data-go="search" data-q="' + esc(s) + '"><svg class="s"><use href="#i-hist"/></svg><span>' + esc(s) + '</span><i class="rm" role="button" aria-label="Remove ' + esc(s) + '" title="Remove"><svg class="s"><use href="#i-x"/></svg></i></button>';
+    }).join('') + '</div>' : '';
+  }
+  function run(q) {
+    q = q.trim(); if (!q) return;
+    $('sq').textContent = q;
+    recent = [q].concat(recent.filter(function (x) { return x !== q; })).slice(0, 5);
   }
   function setPal(open) {
-    pal.classList.toggle('o', open); setPop(null);
-    if (open) { pq.value = ''; filter(); pq.focus(); }
+    setPop(null);
+    [].forEach.call(document.querySelectorAll('[data-cmd="palette"][aria-expanded]'), function (b) { b.setAttribute('aria-expanded', open); });
+    if (open) {
+      pq.value = ''; filter();
+      // Rows stagger in on open only; the class is dropped so typing never replays it.
+      var n = 0; [].forEach.call(pal.querySelectorAll('.pi, .kk'), function (el) { if (el.offsetParent) el.style.setProperty('--i', n++); });
+      pbox.classList.add('fresh'); clearTimeout(pbox._t); pbox._t = setTimeout(function () { pbox.classList.remove('fresh'); }, 900);
+    }
+    pal.classList.toggle('o', open);
+    if (open) pq.focus();
   }
   function filter() {
-    var q = pq.value.toLowerCase();
-    [].forEach.call(pal.querySelectorAll('.pi'), function (i) { i.hidden = i.textContent.toLowerCase().indexOf(q) < 0; });
-    [].forEach.call(pal.querySelectorAll('.pgr'), function (g) { g.hidden = !g.querySelector('.pi:not([hidden])'); });
-    pick(0);
+    var q = pq.value.trim().toLowerCase();
+    psg.innerHTML = q ? sugg(q) : recents();
+    [].forEach.call(pcmd.querySelectorAll('.pi'), function (i) { i.hidden = i.textContent.toLowerCase().indexOf(q) < 0; });
+    [].forEach.call(pcmd.querySelectorAll('.pgr'), function (g) { g.hidden = !g.querySelector('.pi:not([hidden])'); });
+    pick(0, true);
   }
   function setPop(el, open) {
     pops.forEach(function (p) { var o = p.el === el && open; p.el.hidden = !o; p.btn.setAttribute('aria-expanded', o); });
   }
 
   document.addEventListener('click', function (e) {
-    var g = e.target.closest('[data-go]'), c = e.target.closest('[data-cmd]');
-    if (g) { if (g.dataset.set) setPanel(g.dataset.set); go(g.dataset.go, g.classList.contains('li') ? g : null); setPal(false); setPop(null); }
+    var rm = e.target.closest('.rm');
+    if (rm) {
+      var row = rm.closest('.pi'), s = row.dataset.q, n = pk;
+      row.style.height = row.offsetHeight + 'px'; row.offsetHeight; row.classList.add('gone'); row.style.height = '0px';
+      recent = recent.filter(function (x) { return x !== s; });
+      setTimeout(function () { filter(); pick(n, true); }, 150);
+      return;
+    }
+        var g = e.target.closest('[data-go]'), c = e.target.closest('[data-cmd]');
+    if (g) { if (g.dataset.q) run(g.dataset.q); if (g.dataset.set) setPanel(g.dataset.set); go(g.dataset.go, g.classList.contains('li') ? g : null); setPal(false); setPop(null); }
     else if (c) {
       var k = c.dataset.cmd;
       if (k === 'palette') setPal(!pal.classList.contains('o'));
@@ -1488,12 +1590,8 @@ button { font: inherit; }
     setTimeout(function () { $('cl').textContent = 'Copy link'; }, 1500);
   });
   $('bk').addEventListener('click', function () { if (hist.length) go(hist.pop(), null, true); });
-  $('gs').addEventListener('keydown', function (e) {
-    if (e.key !== 'Enter') return;
-    $('sq').textContent = $('gs').value.trim() || 'night bus';
-    go('search');
-  });
-  pq.addEventListener('input', filter);
+  pq.addEventListener('input', function () { filter(); });
+  pal.addEventListener('mouseover', function (e) { var r = e.target.closest('.pi'), n = r ? pis().indexOf(r) : -1; if (n >= 0 && n !== pk) pick(n, true); });
   pq.addEventListener('keydown', function (e) {
     if (e.key === 'ArrowDown') { e.preventDefault(); pick(pk + 1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); pick(pk - 1); }
@@ -1503,6 +1601,7 @@ button { font: inherit; }
     var k = e.key.toLowerCase();
     if ((e.ctrlKey || e.metaKey) && k === 'k') { e.preventDefault(); setPal(true); }
     else if ((e.ctrlKey || e.metaKey) && k === 'b' && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('col').click(); }
+    else if (k === '/' && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); setPal(true); }
     else if (k === 'escape') { setPal(false); setPop(null); }
   });
   [].forEach.call(document.querySelectorAll('.sc button'), function (b) { b.addEventListener('click', function () { setPanel(b.dataset.s); }); });
@@ -1548,6 +1647,24 @@ button { font: inherit; }
   window.addEventListener('resize', function () {
     var over = used() + MAIN - mock.clientWidth;
     if (over > 0) { var d = Math.min(over, plOpen - 260); setW(Math.max(200, libOpen - (over - d)), plOpen - d); }
+  });
+  // Island: import runs to done, shows a confirmation, then collapses to the bell with an unread dot.
+  var isl = $('isl'), itx = $('itx'), ip = 412, islT;
+  function setIsl(st) {
+    clearTimeout(islT); isl.dataset.s = st; isl.title = { import: 'Importing from Spotify', done: 'Spotify import complete', idle: 'Notifications' }[st];
+    if (st === 'done') { itx.textContent = 'Imported 640 songs'; islT = setTimeout(function () { isl.classList.add('unread'); setIsl('idle'); }, 3200); }
+  }
+  function islTick() {
+    itx.textContent = ip + ' / 640'; isl.style.setProperty('--p', ip / 640);
+    if (ip >= 640) return setIsl('done');
+    ip = Math.min(640, ip + 8 + Math.floor(Math.random() * 20)); islT = setTimeout(islTick, 380);
+  }
+  isl.addEventListener('click', function () { if (isl.dataset.s === 'import') go('import'); else if (isl.dataset.s === 'idle') isl.classList.remove('unread'); });
+  [].forEach.call(document.querySelectorAll('[data-isl]'), function (b) {
+    b.addEventListener('click', function () {
+      if (b.dataset.isl === 'idle') setIsl('idle');
+      else { ip = 412; setIsl('import'); islTick(); }
+    });
   });
   go('album');
 })();
