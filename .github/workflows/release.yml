@@ -57,7 +57,7 @@ jobs:
           pkg=serafin-desktop-${{ github.ref_name }}-${{ matrix.name }}
           mkdir -p "dist/daemon"
           cp -r daemon/build/install/daemon/. dist/daemon/
-          cp client/target/release/metrolist-egui* client/target/release/metrolist-login* dist/
+          cp client/target/release/serafin* dist/
           rm -f dist/*.d dist/*.pdb
           if [ "$RUNNER_OS" = Linux ]; then cp client/egui-app/packaging/serafin.desktop client/egui-app/packaging/serafin.png dist/; fi
           if [ "$RUNNER_OS" = Linux ]; then
@@ -67,7 +67,7 @@ jobs:
             cp -r dist AppDir/usr/bin
             cp client/egui-app/packaging/serafin.desktop client/egui-app/packaging/serafin.png AppDir/
             ln -s serafin.png AppDir/.DirIcon
-            printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/usr/bin/metrolist-egui" "$@"\n' > AppDir/AppRun
+            printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/usr/bin/serafin" "$@"\n' > AppDir/AppRun
             chmod +x AppDir/AppRun
             curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
             chmod +x appimagetool

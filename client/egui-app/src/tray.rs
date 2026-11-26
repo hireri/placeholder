@@ -155,7 +155,7 @@ mod platform {
 
     impl ksni::Tray for Tray {
         fn id(&self) -> String {
-            "metrolist".into()
+            "serafin".into()
         }
         fn title(&self) -> String {
             "Serafin".into()

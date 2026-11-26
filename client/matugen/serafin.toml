@@ -3,7 +3,7 @@
 # ~/.config/matugen/config.toml:
 #   [templates.serafin]
 #   input_path  = '<this file>'
-#   output_path = '~/.config/metrolist-desktop/theme.toml'
+#   output_path = '~/.config/serafin/theme.toml'
 
 [dark]
 s0 = "{{colors.surface.dark.hex}}"

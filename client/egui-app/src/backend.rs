@@ -23,7 +23,17 @@ pub fn data_dir() -> std::path::PathBuf {
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default();
         std::path::PathBuf::from(home).join(".config")
     });
-    base.join("metrolist-desktop")
+    config_dir(&base)
+}
+
+/// `<base>/serafin`, first moving over the folder's old name (`metrolist-desktop`) so settings and sign-ins survive the rename.
+/// The daemon does the same on its side (shims DataStore.kt); whichever starts first wins, the other finds the new folder.
+fn config_dir(base: &std::path::Path) -> std::path::PathBuf {
+    let (dir, old) = (base.join("serafin"), base.join("metrolist-desktop"));
+    if !dir.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &dir);
+    }
+    dir
 }
 
 /// The daemon's stderr (InnerTubeX/Timber output), truncated each run; the place to look when playback fails.
@@ -250,8 +260,8 @@ pub struct Status {
 /// Blocking: opens the login helper window (the credentials go straight from it to the daemon).
 pub fn sign_in(svc: &str) -> Result<(), String> {
     let (url, token) = conn()?;
-    let helper = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("metrolist-login{}", std::env::consts::EXE_SUFFIX)))).unwrap_or_else(|| "metrolist-login".into());
-    let st = Command::new(&helper).arg(svc).env("METROLIST_URL", url).env("METROLIST_TOKEN", token).status().map_err(|e| format!("cannot start login helper {} (build it: cargo build -p metrolist-login): {e}", helper.display()))?;
+    let helper = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("serafin-login{}", std::env::consts::EXE_SUFFIX)))).unwrap_or_else(|| "serafin-login".into());
+    let st = Command::new(&helper).arg(svc).env("METROLIST_URL", url).env("METROLIST_TOKEN", token).status().map_err(|e| format!("cannot start login helper {} (build it: cargo build -p serafin-login): {e}", helper.display()))?;
     if st.success() { Ok(()) } else { Err("sign-in cancelled".into()) }
 }
 
@@ -261,4 +271,22 @@ pub fn sign_out(svc: &str) -> Result<(), String> {
     ureq::delete(&format!("{url}/auth/{svc}")).set("X-Metrolist-Token", token).call().map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(data_dir().join("webview").join(svc));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn old_config_folder_moves_to_the_new_name_once() {
+        let base = std::env::temp_dir().join(format!("serafin-cfg-test-{}", std::process::id()));
+        let old = base.join("metrolist-desktop");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("credentials.json"), "x").unwrap();
+        let dir = super::config_dir(&base);
+        assert_eq!(dir, base.join("serafin"));
+        assert!(dir.join("credentials.json").exists() && !old.exists());
+        std::fs::create_dir_all(&old).unwrap(); // a new folder already exists: the stray old one is left alone
+        super::config_dir(&base);
+        assert!(old.exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
 }

@@ -813,7 +813,7 @@ impl App {
     fn delete_modal(&mut self, ctx: &Context) {
         let Some((id, label)) = self.delete_ask.clone() else { return };
         let mut answer = None;
-        let m = egui::Modal::new(egui::Id::new("delete-playlist")).show(ctx, |ui| {
+        let m = egui::Modal::new(egui::Id::NULL.with("delete-playlist")).show(ctx, |ui| {
             ui.set_width(320.);
             ui.heading("Delete playlist?");
             ui.add_space(6.);

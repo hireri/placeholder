@@ -57,7 +57,7 @@ impl Media {
     /// `wake` is called from souvlaki's thread when a command arrives.
     /// `hwnd` is required on Windows and ignored elsewhere.
     pub fn new(wake: impl Fn() + Send + Sync + 'static, hwnd: Option<*mut std::ffi::c_void>) -> Option<Media> {
-        let config = PlatformConfig { dbus_name: "metrolist", display_name: "Serafin", hwnd };
+        let config = PlatformConfig { dbus_name: "serafin", display_name: "Serafin", hwnd };
         let mut controls = match MediaControls::new(config) {
             Ok(c) => c,
             Err(e) => {
@@ -200,7 +200,7 @@ mod tests {
             .args([
                 "--session",
                 "--print-reply",
-                "--dest=org.mpris.MediaPlayer2.metrolist",
+                "--dest=org.mpris.MediaPlayer2.serafin",
                 "/org/mpris/MediaPlayer2",
                 "org.freedesktop.DBus.Properties.Get",
                 "string:org.mpris.MediaPlayer2.Player",

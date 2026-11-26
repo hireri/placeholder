@@ -12,9 +12,12 @@ import java.io.File
  * Same names, so unmodified upstream code that reads settings compiles against it.
  */
 object DesktopPaths {
-    val dataDir: File = File(
-        System.getProperty("metrolist.dataDir")
-            ?: (System.getenv("XDG_CONFIG_HOME") ?: "${System.getProperty("user.home")}/.config") + "/metrolist-desktop",
+    val dataDir: File = (
+        System.getProperty("metrolist.dataDir")?.let(::File) ?: run {
+            val base = File(System.getenv("XDG_CONFIG_HOME") ?: "${System.getProperty("user.home")}/.config")
+            // The folder was called metrolist-desktop before the rename to Serafin: move it over once (the client does the same).
+            File(base, "serafin").also { new -> File(base, "metrolist-desktop").takeIf { !new.exists() && it.isDirectory }?.renameTo(new) }
+        }
     ).also { it.mkdirs() }
 }
 

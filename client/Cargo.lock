@@ -2592,39 +2592,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metrolist-egui"
-version = "0.0.0"
-dependencies = [
- "cpal",
- "discord-rich-presence",
- "eframe",
- "egui_extras",
- "image",
- "ksni",
- "opus",
- "raw-window-handle",
- "serde",
- "serde_json",
- "souvlaki",
- "symphonia",
- "toml 0.8.23",
- "tray-icon",
- "ureq 2.12.1",
- "winresource",
-]
-
-[[package]]
-name = "metrolist-login"
-version = "0.0.0"
-dependencies = [
- "gtk",
- "serde_json",
- "tao",
- "ureq 2.12.1",
- "wry",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4130,6 +4097,39 @@ name = "send_wrapper"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
+
+[[package]]
+name = "serafin"
+version = "0.0.0"
+dependencies = [
+ "cpal",
+ "discord-rich-presence",
+ "eframe",
+ "egui_extras",
+ "image",
+ "ksni",
+ "opus",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "souvlaki",
+ "symphonia",
+ "toml 0.8.23",
+ "tray-icon",
+ "ureq 2.12.1",
+ "winresource",
+]
+
+[[package]]
+name = "serafin-login"
+version = "0.0.0"
+dependencies = [
+ "gtk",
+ "serde_json",
+ "tao",
+ "ureq 2.12.1",
+ "wry",
+]
 
 [[package]]
 name = "serde"

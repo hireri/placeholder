@@ -1030,7 +1030,7 @@ mod tests {
         assert_eq!(chunk_range(4_500_000, mib, Some(4_600_000)), (4 * mib, 4_599_999));
     }
 
-    /// Live: daemon + network + sound device. `cargo test -p metrolist-egui live_playback -- --ignored --nocapture`
+    /// Live: daemon + network + sound device. `cargo test -p serafin live_playback -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn live_playback() {

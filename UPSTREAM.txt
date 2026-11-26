@@ -14,7 +14,7 @@ Layout
   shims/                source-compatible stand-ins for Android/Timber/DataStore symbols.
   daemon/               our code: Ktor HTTP API on 127.0.0.1 (random port + per-run token),
                         credential store, YouTube/Spotify auth, services.
-  client/               Rust: metrolist-login (wry popup) and metrolist-egui (the app).
+  client/               Rust: serafin-login (wry popup) and serafin (the app).
   metrolist/, vendor/bitchord  git submodules, pinned commits. Dependabot opens a PR when either moves.
 
 Updating
@@ -34,4 +34,4 @@ Known pins / gaps
   - Spotify: sign-in uses the web-player sp_dc/TOTP route (BitChord's). BitChord's constants
     (query hashes) drift; the daemon reads fresh values from the live bundle for the token and
     profile, but SpotifyLibrary (vendored) uses its own hard-coded hashes until the bitchord submodule is bumped.
-  - Credentials are stored in ~/.config/metrolist-desktop/credentials.json (mode 0600).
+  - Credentials are stored in ~/.config/serafin/credentials.json (mode 0600).

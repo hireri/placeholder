@@ -2,7 +2,7 @@
 Type=Application
 Name=Serafin
 Comment=YouTube Music client
-Exec=metrolist-egui
+Exec=serafin
 Icon=serafin
 Categories=AudioVideo;Audio;Player;
 StartupWMClass=serafin

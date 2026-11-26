@@ -69,7 +69,7 @@ fn main() -> eframe::Result {
             ..Default::default()
         };
         let shared = app.clone();
-        eframe::run_native("Metrolist", opts, Box::new(move |cc| {
+        eframe::run_native("Serafin", opts, Box::new(move |cc| {
             // The scrutinee's borrow lasts the whole `match`, so create the app outside it.
             let mut slot = shared.borrow_mut();
             match slot.as_mut() {

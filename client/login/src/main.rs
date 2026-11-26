@@ -1,6 +1,6 @@
 //! Login popup: opens the service's own sign-in page in a wry webview, waits until the session
 //! exists, then hands the credentials straight to the daemon (they never pass through the UI).
-//! Usage: metrolist-login <youtube|spotify>   env: METROLIST_URL, METROLIST_TOKEN, METROLIST_DATA
+//! Usage: serafin-login <youtube|spotify>   env: METROLIST_URL, METROLIST_TOKEN, METROLIST_DATA
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
@@ -37,7 +37,7 @@ fn post(path: &str, body: serde_json::Value) -> Result<(), String> {
 /// Where the webview keeps its cookies; the app deletes this directory on sign-out.
 fn data_dir(service: &str) -> PathBuf {
     let base = std::env::var("METROLIST_DATA").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default()).join(".config/metrolist-desktop")
+        PathBuf::from(std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default()).join(".config/serafin")
     });
     base.join("webview").join(service)
 }
@@ -48,7 +48,7 @@ fn main() {
         "youtube" => (YT_START, "https://music.youtube.com"),
         "spotify" => (SP_START, "https://open.spotify.com"),
         _ => {
-            eprintln!("usage: metrolist-login <youtube|spotify>");
+            eprintln!("usage: serafin-login <youtube|spotify>");
             std::process::exit(2);
         }
     };
