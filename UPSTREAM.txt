@@ -1,37 +1,39 @@
-Metrolist desktop: how this stays in sync with upstream
-=======================================================
+Serafin desktop: where the code comes from
+==========================================
 
-Rule: submodules (metrolist/, vendor/bitchord) are never edited. Upstream (Metrolist) and BitChord
-code is compiled in place; every difference lives in shims/, upstream/src, daemon/.
+Metrolist (MetrolistGroup/Metrolist, GPL-3.0) is a source of code, not a build dependency. Nothing is
+compiled out of a submodule any more: what we use is vendored into this repo and is ours to edit.
+Keep a clone of Metrolist next to this repo for reference, and port from it by hand.
 
-Layout
-  settings.gradle.kts   separate Gradle build; reuses metrolist/gradle/libs.versions.toml, so upstream
-                        version bumps (innertubex, ktor, kotlin...) arrive with each merge.
-  innertube/            upstream :innertube, unmodified (srcDir metrolist/innertube).
-  upstream/             subset of upstream :app, unmodified. THE list of ported files is the
-                        fileTree in upstream/build.gradle.kts. Own adapters: upstream/src/.
-  bitchord/             BitChord's Spotify library from the vendor/bitchord submodule, unmodified.
-  shims/                source-compatible stand-ins for Android/Timber/DataStore symbols.
-  daemon/               our code: Ktor HTTP API on 127.0.0.1 (random port + per-run token),
-                        credential store, YouTube/Spotify auth, services.
-  client/               Rust: serafin-login (wry popup) and serafin (the app).
-  metrolist/, vendor/bitchord  git submodules, pinned commits. Dependabot opens a PR when either moves.
+Vendored from Metrolist v13.7.0 (commit e6fea3b), unmodified at the time of copying
+  innertube/src/main/kotlin    upstream's :innertube module (YouTube API wrapper, models, pages)
+  upstream/src/main/kotlin     lyrics providers (lrclib, kugou, paxsenix, betterlyrics, lyrics/), the Last.fm client,
+                               preference keys (music/constants), InnerTubeXPlayer, PoTokenResult
+  gradle/libs.versions.toml    version catalog; gradlew and gradle/wrapper come from there too
+Our own code
+  shims/      source-compatible stand-ins for the Android/Timber/DataStore symbols the vendored files touch.
+              Now that the files are ours, prefer editing them to remove the dependency over growing a shim.
+  upstream/src, daemon/   adapters and the Ktor HTTP API on 127.0.0.1 (random port + per-run token),
+              credential store, YouTube/Spotify/Last.fm auth, services.
+  client/     Rust: serafin-login (wry popup) and serafin (the app, egui).
+Still a submodule
+  vendor/bitchord   BitChord's Spotify library, compiled in place (see bitchord/build.gradle.kts); Dependabot bumps it.
 
-Updating
-  1. Merge the Dependabot submodule PR (or: git submodule update --remote metrolist vendor/bitchord).
-  2. Clone with --recurse-submodules (or git submodule update --init), then ./sparse.sh to trim them to what the build reads.
-  3. ./check.sh
-     A compile error means upstream changed something a shim or adapter relies on. Extend the
-     shim (or the adapter in upstream/src, daemon/) - never edit the upstream file.
-  4. Bringing another upstream package over: add it to the fileTree in upstream/build.gradle.kts,
-     compile, add shims for whatever the compiler reports.
+Upstream moved on
+  Metrolist v14 is a Kotlin Multiplatform rewrite (shared/, desktopApp/, androidApp/); the :innertube and :app modules we
+  copied no longer exist there and packages became com.metrolist.shared.*. Its shared/commonMain code (listen together,
+  settings, lyrics, Last.fm) is the place to port new features from. YouTube fixes arrive through the innertubex
+  library (com.github.MetrolistGroup.innertubex): bump its version in gradle/libs.versions.toml and run ./check.sh.
 
-Known pins / gaps
-  - Not ported yet: Room database + SyncUtils (library sync/history), listen-together,
-    scrobbling manager, Discord presence. Music recognition is intentionally dropped.
-  - PoToken: upstream mints it in an Android WebView; the stub returns none. Streams resolve
-    through clients that do not need one; bridge to the login helper's webview if that stops working.
-  - Spotify: sign-in uses the web-player sp_dc/TOTP route (BitChord's). BitChord's constants
-    (query hashes) drift; the daemon reads fresh values from the live bundle for the token and
-    profile, but SpotifyLibrary (vendored) uses its own hard-coded hashes until the bitchord submodule is bumped.
+Building
+  ./gradlew :daemon:installDist     the daemon
+  ./check.sh                        daemon tests + build, then cargo check for the client
+
+Known gaps
+  - Not ported yet: Room database + SyncUtils (library sync/history), listen-together. Music recognition is intentionally dropped.
+  - PoToken: upstream mints it in an Android WebView; the stub returns none. Streams resolve through clients that do
+    not need one; bridge to the login helper's webview if that stops working.
+  - Spotify: sign-in uses the web-player sp_dc/TOTP route (BitChord's). BitChord's constants (query hashes) drift; the daemon
+    reads fresh values from the live bundle for the token and profile, but SpotifyLibrary (vendored) uses its own hard-coded
+    hashes until the bitchord submodule is bumped.
   - Credentials are stored in ~/.config/serafin/credentials.json (mode 0600).

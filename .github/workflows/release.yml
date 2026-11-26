@@ -44,7 +44,7 @@ jobs:
           mkdir -p daemon/src/main/resources
           printf 'LASTFM_API_KEY=%s\nLASTFM_SECRET=%s\n' "$LASTFM_API_KEY" "$LASTFM_SECRET" > daemon/src/main/resources/lastfm.properties
       - name: Daemon
-        run: metrolist/gradlew -p . :daemon:installDist
+        run: ./gradlew :daemon:installDist
       - name: Bundled JRE
         run: |
           lib=daemon/build/install/daemon/lib

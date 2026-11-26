@@ -1,5 +1,4 @@
-// Desktop backend build. Separate Gradle build so no upstream file is ever edited:
-// run it with `metrolist/gradlew -p . <task>`.
+// Desktop backend build: `./gradlew <task>`.
 rootProject.name = "metrolist-desktop"
 
 pluginManagement {
@@ -21,10 +20,7 @@ dependencyResolutionManagement {
         google()
         maven("https://jitpack.io")
     }
-    versionCatalogs {
-        // Same catalog as upstream, so version bumps (innertubex, ktor, ...) arrive with every merge.
-        create("libs") { from(files("metrolist/gradle/libs.versions.toml")) }
-    }
+    // gradle/libs.versions.toml is picked up as `libs` automatically. Copied from Metrolist v13.7.0; versions are ours to bump now.
 }
 
 include(":shims", ":innertube", ":upstream", ":bitchord", ":daemon")

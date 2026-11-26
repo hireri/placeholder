@@ -3,8 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-// Upstream's :innertube module, compiled unmodified (it has no Android dependencies).
-sourceSets.main { kotlin.srcDir(rootDir.resolve("metrolist/innertube/src/main/kotlin")) }
+// Vendored from Metrolist v13.7.0's :innertube module (GPL-3.0, see UPSTREAM.txt). It has no Android dependencies.
 
 dependencies {
     api(project(":shims"))

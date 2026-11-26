@@ -1,6 +1,3 @@
-[submodule "metrolist"]
-	path = metrolist
-	url = https://github.com/MetrolistGroup/Metrolist.git
 [submodule "vendor/bitchord"]
 	path = vendor/bitchord
 	url = https://github.com/kushagrasinghx/BitChord
