@@ -1,0 +1,36 @@
+name: canary
+# Live smoke test of the YouTube side (search, home, stream resolve + first bytes). Runs daily because YouTube changes without warning;
+# the innertubex bump workflow also dispatches it on its branch before anyone merges a new version.
+on:
+  schedule:
+    - cron: "43 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Submodules (sparse)
+        run: |
+          git submodule update --init --depth 1 --filter=blob:none
+          ./sparse.sh
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :daemon:installDist
+      - run: ./scripts/canary.py
+      - name: Open an issue when the daily run fails
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create canary --color B60205 --description "YouTube smoke test failing" --force
+          if [ -z "$(gh issue list --label canary --state open --json number -q '.[0].number')" ]; then
+            gh issue create --label canary --title "YouTube canary is failing" --body "The daily live check failed: $RUN. Try bumping innertubex (see the innertubex workflow), or port the parser fix from Metrolist."
+          fi

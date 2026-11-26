@@ -1,0 +1,47 @@
+name: innertubex
+# YouTube fixes arrive as new InnerTubeX releases. Look daily; when there is one, open a PR that bumps gradle/libs.versions.toml and
+# dispatch the build check and the live canary on its branch (pushes by GITHUB_TOKEN do not trigger workflows on their own).
+# Needs Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests".
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Look for a newer release
+        id: v
+        run: |
+          latest=$(gh api repos/MetrolistGroup/innertubex/releases/latest --jq .tag_name)
+          current=$(sed -n 's/^innertubex = "\(.*\)"/\1/p' gradle/libs.versions.toml)
+          echo "current=$current latest=$latest"
+          [[ "$latest" =~ ^v[0-9]+(\.[0-9]+)*$ ]] || { echo "unexpected tag, skipping"; exit 0; }
+          [ "$latest" != "$current" ] || exit 0
+          [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)" = "$latest" ] || exit 0
+          [ -z "$(gh pr list --head "innertubex/$latest" --state all --json number -q '.[0].number')" ] || exit 0
+          echo "bump=$latest" >> "$GITHUB_OUTPUT"
+      - name: Open the PR and dispatch the checks
+        if: steps.v.outputs.bump
+        env:
+          V: ${{ steps.v.outputs.bump }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "innertubex/$V"
+          sed -i "s/^innertubex = \".*\"/innertubex = \"$V\"/" gradle/libs.versions.toml
+          git commit -qam "build(deps): bump innertubex to $V"
+          git push -q origin HEAD
+          gh pr create --base "${{ github.event.repository.default_branch }}" --head "innertubex/$V" --title "build(deps): bump innertubex to $V" \
+            --body "New InnerTubeX release: https://github.com/MetrolistGroup/innertubex/releases/tag/$V. The check and canary workflows were dispatched on this branch; merge when both are green."
+          gh workflow run check.yml --ref "innertubex/$V"
+          gh workflow run canary.yml --ref "innertubex/$V"
