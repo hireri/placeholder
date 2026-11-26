@@ -14,3 +14,4 @@ local.properties
 *.iml
 .vscode/
 .DS_Store
+daemon/src/main/resources/lastfm.properties

@@ -187,6 +187,21 @@ pub fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(path: &str
     send_json("POST", path, body)
 }
 
+/// Blocking DELETE with no body (the daemon answers 204); call from a worker thread.
+pub fn delete(path: &str) -> Result<(), String> {
+    let (url, token) = conn()?;
+    ureq::delete(&format!("{url}{path}")).set("X-Metrolist-Token", token).call().map(drop).map_err(failure)
+}
+
+/// Blocking DELETE answered with JSON; call from a worker thread.
+pub fn delete_json<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
+    let (url, token) = conn()?;
+    match ureq::delete(&format!("{url}{path}")).set("X-Metrolist-Token", token).call() {
+        Ok(r) => r.into_json().map_err(|e| e.to_string()),
+        Err(e) => Err(failure(e)),
+    }
+}
+
 /// Blocking PUT of a JSON body; call from a worker thread.
 pub fn put_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(path: &str, body: &B) -> Result<T, String> {
     send_json("PUT", path, body)

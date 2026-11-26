@@ -33,6 +33,14 @@ const OPUS_MAX_FRAME: usize = 5760;
 // Also bounds the longest crossfade: the old track's tail must still be in the ring when the next one is mixed over it.
 const RING_SECS: usize = 14;
 const POLL: Duration = Duration::from_millis(10);
+/// Upstream's BALANCED loudness level.
+const TARGET_LUFS: f32 = -14.;
+
+/// Same clamp as upstream `normalizationGainMb`: -15 dB..+3 dB.
+fn normalize_gain(lufs: Option<f32>) -> f32 {
+    lufs.map_or(1., |l| 10f32.powf((TARGET_LUFS - l).clamp(-15., 3.) / 20.))
+}
+
 const PAUSED_POLL: Duration = Duration::from_millis(250);
 
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -50,6 +58,9 @@ pub struct StreamInfo {
     pub duration_sec: Option<u32>,
     #[serde(default)]
     pub bitrate: Option<u32>,
+    /// Measured loudness (LUFS) from the player response; None = unknown, no gain.
+    #[serde(default)]
+    pub loudness_lufs: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +163,9 @@ impl Fetcher {
     }
 
     fn request(&self, idx: u64, total: Option<u64>) -> io::Result<(Vec<u8>, Option<u64>)> {
+        if let Some((body, t)) = crate::cache::read(&self.info.url, self.chunk, idx) {
+            return Ok((body, Some(t)));
+        }
         let (start, end) = chunk_range(idx * self.chunk, self.chunk, total);
         let mut req = self.agent.get(&self.info.url).set("Range", &format!("bytes={start}-{end}"));
         for (k, v) in &self.info.headers {
@@ -165,6 +179,7 @@ impl Fetcher {
         let len = end - start + 1;
         let mut body = Vec::with_capacity(len as usize);
         resp.into_reader().take(len).read_to_end(&mut body)?;
+        crate::cache::write(&self.info.url, self.chunk, idx, total, &body);
         Ok((body, total))
     }
 }
@@ -336,6 +351,8 @@ struct Session {
     resample: Option<Resample>,
     duration: Option<f32>,
     cache: (Arc<ChunkCache>, u64),
+    /// Linear gain that brings this track to `TARGET_LUFS`.
+    gain: f32,
 }
 
 impl Session {
@@ -365,7 +382,7 @@ impl Session {
                 .map_err(|e| e.to_string())?;
             Codec::Aac(Box::new(d))
         };
-        Ok(Session { reader, track_id, time_base, codec, tmp: Vec::new(), resample: None, duration, cache })
+        Ok(Session { reader, track_id, time_base, codec, tmp: Vec::new(), resample: None, duration, cache, gain: normalize_gain(info.loudness_lufs) })
     }
 
     /// Seeks the demuxer and decoder and rebases the ring to the actual landing time.
@@ -405,7 +422,11 @@ impl Session {
             let rs = self
                 .resample
                 .get_or_insert_with(|| Resample::new(rate, shared.out_rate, shared.out_ch));
+            let from = pending.len();
             rs.process(&self.tmp, ch, pending);
+            if self.gain != 1. && shared.normalize.load(Relaxed) {
+                pending[from..].iter_mut().for_each(|v| *v *= self.gain);
+            }
             return Ok(true);
         }
     }
@@ -469,6 +490,7 @@ struct Shared {
     /// Crossfade length in seconds (f32 bits); 0 = off. Set from the settings page, read by the decode thread.
     crossfade: AtomicU32,
     gapless: AtomicBool,
+    normalize: AtomicBool,
     /// Stream to continue into when the current one ends; see `Engine::queue_next`.
     next: Mutex<Option<StreamInfo>>,
     out_rate: u32,
@@ -753,6 +775,7 @@ impl Engine {
             volume: AtomicU32::new(1f32.to_bits()),
             crossfade: AtomicU32::new(0f32.to_bits()),
             gapless: AtomicBool::new(true),
+            normalize: AtomicBool::new(true),
             next: Mutex::new(None),
             out_rate,
             out_ch,
@@ -866,6 +889,10 @@ impl Engine {
         *self.shared.next.lock().unwrap() = None;
     }
 
+    pub fn set_normalize(&self, on: bool) {
+        self.shared.normalize.store(on, Relaxed);
+    }
+
     pub fn set_gapless(&self, on: bool) {
         self.shared.gapless.store(on, Relaxed);
     }
@@ -943,6 +970,14 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn normalize_gain_targets_minus_14_and_clamps() {
+        assert_eq!(super::normalize_gain(None), 1.);
+        assert!((super::normalize_gain(Some(-14.)) - 1.).abs() < 1e-6);
+        assert!((super::normalize_gain(Some(-8.)) - 0.501).abs() < 0.01);
+        assert!((super::normalize_gain(Some(-40.)) - 1.413).abs() < 0.01);
+    }
+
+    #[test]
     fn try_push_blends_the_head_of_the_next_track_over_the_old_tail() {
         use std::sync::atomic::{AtomicBool, AtomicU32};
         use std::sync::Mutex;
@@ -953,6 +988,7 @@ mod tests {
             volume: AtomicU32::new(0),
             crossfade: AtomicU32::new(0),
             gapless: AtomicBool::new(true),
+            normalize: AtomicBool::new(true),
             next: Mutex::new(None),
             out_rate: 4,
             out_ch: 1,

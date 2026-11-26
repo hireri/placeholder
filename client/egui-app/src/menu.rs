@@ -138,6 +138,7 @@ const ARTIST: usize = 6;
 const SAVE: usize = 8;
 const REMOVE: usize = 9;
 const LINK: usize = 10;
+const DELETE: usize = 11;
 
 fn track_link(t: &Track) -> String {
     if t.source == "spotify" { format!("https://open.spotify.com/track/{}", t.id) } else { format!("https://music.youtube.com/watch?v={}", t.id) }
@@ -196,7 +197,11 @@ impl App {
                     let lib = if it.r#type == "album" { 2 } else { 1 };
                     let on = self.lib_items.iter().any(|i| i.kind == lib && i.id == it.id);
                     saved = Some(on);
-                    items.push(Item::Action(SAVE, if on { "Remove from library" } else { "Save to library" }, None));
+                    if on && it.editable {
+                        items.push(Item::Action(DELETE, "Delete playlist", None));
+                    } else {
+                        items.push(Item::Action(SAVE, if on { "Remove from library" } else { "Save to library" }, None));
+                    }
                 }
             }
             Target::Queue(i) => {
@@ -249,6 +254,7 @@ impl App {
                             self.open(route, Some((kind, it.id.clone())));
                         }
                     }
+                    DELETE => self.confirm_delete(ctx, &it.id),
                     SAVE => {
                         let kind = if it.r#type == "album" { "albums" } else { "playlists" };
                         self.data.save(ctx, kind, &it.id, !saved.unwrap_or(false));

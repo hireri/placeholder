@@ -70,6 +70,26 @@ pub struct Item {
     /// Songs only: the album they sit on (`None` for singles).
     pub album: Option<String>,
     pub album_id: Option<String>,
+    /// Songs only: marked explicit / a music video rather than the studio track.
+    pub explicit: bool,
+    pub video: bool,
+    /// Playlists only: owned by the user, so it can be deleted.
+    pub editable: bool,
+}
+
+/// Content filters from the settings page (upstream `HideExplicitKey` / `HideVideoSongsKey`); applied as responses arrive.
+pub static HIDE_EXPLICIT: AtomicBool = AtomicBool::new(false);
+pub static HIDE_VIDEO: AtomicBool = AtomicBool::new(false);
+
+fn hidden(explicit: bool, video: bool) -> bool {
+    explicit && HIDE_EXPLICIT.load(Ordering::Relaxed) || video && HIDE_VIDEO.load(Ordering::Relaxed)
+}
+
+pub fn clean_sections(v: &mut Vec<Section>) {
+    for s in v.iter_mut() {
+        s.items.retain(|i| !hidden(i.explicit, i.video));
+    }
+    v.retain(|s| !s.items.is_empty());
 }
 
 impl Item {
@@ -112,6 +132,8 @@ pub struct Track {
     pub artist_id: Option<String>,
     /// Browse id of the album (YouTube only).
     pub album_id: Option<String>,
+    pub explicit: bool,
+    pub video: bool,
     /// Spotify import only: the YouTube counterpart is still being looked up.
     #[serde(default)]
     pub resolving: bool,
@@ -144,8 +166,8 @@ struct ExportReq<'a> {
 
 #[derive(Deserialize)]
 struct ExportRes {
+    id: String,
     added: usize,
-    total: usize,
 }
 
 struct Wanted {
@@ -312,6 +334,12 @@ pub struct Detail {
 
 impl Detail {
     /// What playing this page plays: its track list, or for artists the songs on their shelves.
+    fn clean(mut self) -> Self {
+        self.tracks.retain(|t| !hidden(t.explicit, t.video));
+        clean_sections(&mut self.sections);
+        self
+    }
+
     pub fn songs(&self) -> Vec<Track> {
         if !self.tracks.is_empty() {
             return self.tracks.clone();
@@ -420,7 +448,7 @@ impl Data {
             });
         } else {
             let path = format!("/youtube/{kind}/{id}");
-            r.ensure(ctx, move || backend::get(&path));
+            r.ensure(ctx, move || backend::get::<Detail>(&path).map(Detail::clean));
         }
         r
     }
@@ -437,7 +465,7 @@ impl Data {
     }
 
     /// Creates a YouTube Music playlist from the rows that already matched (unmatched rows are reported, not waited on).
-    pub fn export_spotify(&self, title: &str, tracks: &[Track]) {
+    pub fn export_spotify(self: &Arc<Self>, ctx: &Context, title: &str, tracks: &[Track]) {
         if self.exporting.swap(true, Ordering::SeqCst) {
             crate::toast::info("An export is already running");
             return;
@@ -452,6 +480,7 @@ impl Data {
         let total = tracks.len();
         crate::toast::info(format!("Exporting {} tracks to YouTube Music…", video_ids.len()));
         let exporting = self.exporting.clone();
+        let (me, ctx) = (self.clone(), ctx.clone());
         std::thread::spawn(move || {
             let req = ExportReq { title: &title, video_ids: &video_ids };
             match backend::post_json::<_, ExportRes>("/youtube/playlists", &req) {
@@ -463,12 +492,44 @@ impl Data {
                         format!("Created “{title}” with {} tracks", r.added)
                     };
                     crate::toast::info(msg);
-                    let _ = r.total;
+                    let item = Item { r#type: "playlist".into(), id: r.id, title: title.clone(), editable: true, ..Default::default() };
+                    me.set_saved(1, item, true);
+                    me.library.reset();
                 }
                 Err(e) => crate::toast::error(format!("Couldn't export the playlist: {e}")),
             }
             exporting.store(false, Ordering::SeqCst);
+            ctx.request_repaint();
         });
+    }
+
+    /// Deletes a playlist the user owns. It leaves the sidebar at once; a refusal puts it back, success refetches the library.
+    pub fn delete_playlist(self: &Arc<Self>, ctx: &Context, id: &str) {
+        let item = self.library_item(id).unwrap_or_else(|| self.known_item("playlists", id, "playlist"));
+        self.set_saved(1, item.clone(), false);
+        let (me, ctx) = (self.clone(), ctx.clone());
+        let path = format!("/youtube/playlists/{}", backend::enc(id));
+        std::thread::spawn(move || {
+            match backend::delete(&path) {
+                Ok(()) => {
+                    crate::toast::info("Playlist deleted");
+                    me.details.lock().unwrap().remove(&format!("playlists/{}", item.id));
+                    me.library.reset();
+                }
+                Err(e) => {
+                    me.set_saved(1, item, true);
+                    crate::toast::error(format!("Couldn't delete the playlist: {e}"));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn library_item(&self, id: &str) -> Option<Item> {
+        match &*self.library.lock() {
+            State::Ready(v) => v.iter().find(|(k, i)| *k == 1 && i.id == id).map(|(_, i)| i.clone()),
+            _ => None,
+        }
     }
 
     pub fn song_info(&self, ctx: &Context, id: &str) -> Arc<Remote<Track>> {
@@ -481,14 +542,20 @@ impl Data {
     pub fn search(&self, ctx: &Context, q: &str) -> Arc<Remote<Vec<Track>>> {
         let r = self.searches.lock().unwrap().entry(q.to_string()).or_insert_with(|| Arc::new(Remote::new())).clone();
         let path = format!("/youtube/search?q={}", backend::enc(q));
-        r.ensure(ctx, move || backend::get(&path));
+        r.ensure(ctx, move || backend::get::<Vec<Track>>(&path).map(|mut v| {
+            v.retain(|t| !hidden(t.explicit, t.video));
+            v
+        }));
         r
     }
 
     pub fn suggest(&self, ctx: &Context, q: &str) -> Arc<Remote<Suggest>> {
         let r = self.suggests.lock().unwrap().entry(q.to_string()).or_insert_with(|| Arc::new(Remote::new())).clone();
         let path = format!("/youtube/suggest?q={}", backend::enc(q));
-        r.ensure(ctx, move || backend::get(&path));
+        r.ensure(ctx, move || backend::get::<Suggest>(&path).map(|mut s| {
+            s.items.retain(|i| !hidden(i.explicit, i.video));
+            s
+        }));
         r
     }
 
@@ -506,8 +573,20 @@ impl Data {
     pub fn search_items(&self, ctx: &Context, q: &str, kind: &'static str) -> Arc<Remote<Vec<Item>>> {
         let r = self.item_searches.lock().unwrap().entry(format!("{kind}/{q}")).or_insert_with(|| Arc::new(Remote::new())).clone();
         let path = format!("/youtube/search/items?q={}&type={kind}", backend::enc(q));
-        r.ensure(ctx, move || backend::get(&path));
+        r.ensure(ctx, move || backend::get::<Vec<Item>>(&path).map(|mut v| {
+            v.retain(|i| !hidden(i.explicit, i.video));
+            v
+        }));
         r
+    }
+
+    /// Drops what was fetched under the old content filters so it is fetched again (Spotify imports keep their match progress).
+    pub fn refilter(&self) {
+        self.home.reset();
+        self.details.lock().unwrap().retain(|k, _| k.starts_with("spotify/"));
+        self.searches.lock().unwrap().clear();
+        self.item_searches.lock().unwrap().clear();
+        self.suggests.lock().unwrap().clear();
     }
 
     pub fn load_spotify(&self, ctx: &Context) {
@@ -574,6 +653,9 @@ impl Data {
 
     /// Adds or removes an album (`kind` albums) or playlist from the YouTube Music library. The sidebar and toast update at once; a refusal puts it back.
     pub fn save(self: &Arc<Self>, ctx: &Context, kind: &'static str, id: &str, on: bool) {
+        if !on && kind == "playlists" && self.library_item(id).is_some_and(|i| i.editable) {
+            return self.delete_playlist(ctx, id);
+        }
         let (n, ty) = if kind == "albums" { (2, "album") } else { (1, "playlist") };
         let item = self.known_item(kind, id, ty);
         self.set_saved(n, item.clone(), on);

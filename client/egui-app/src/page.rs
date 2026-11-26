@@ -215,8 +215,9 @@ impl App {
         // Action buttons: below the wash at the top, right-aligned in the row once collapsed.
         let play_w = 14. + 16. + 8. + text_w(&p, "Play", font_w(13., Weight::Semi)) + 18.;
         let mut labels = vec!["Shuffle"];
-        if let Some((_, _, saved)) = save {
-            labels.push(if saved { "Saved" } else { "Save" });
+        if let Some((kind, id, saved)) = save {
+            let owned = saved && kind == "playlists" && self.data.library_item(id).is_some_and(|i| i.editable);
+            labels.push(if owned { "Delete" } else if saved { "Saved" } else { "Save" });
         }
         if matches!(self.sel.as_ref().map(|s| s.0), Some("spotify")) {
             labels.push("Export");
@@ -280,9 +281,10 @@ impl App {
             let hot = tonal(ui, &t, label, b, 8., None);
             if hot.clicked() {
                 if label == "Export" {
-                    self.data.export_spotify(title, tracks);
+                    self.data.export_spotify(ui.ctx(), title, tracks);
                 } else {
                     match save {
+                        Some((_, id, _)) if label == "Delete" => self.confirm_delete(ui.ctx(), id),
                         Some((kind, id, saved)) if label != "Shuffle" => self.data.save(ui.ctx(), kind, id, !saved),
                         _ => self.pl.play_tracks(ui.ctx(), tracks, 0, true),
                     }
@@ -576,7 +578,7 @@ impl App {
             trunc(&p, pos2(l + 8., hd.center().y + 6.), w - 16., "About the artist", font_w(17., Weight::Bold), t.tx);
             const PHOTO: f32 = 132.;
             let tw = (w - 16. - PHOTO - 20. - 20. - 16.).max(0.);
-            let bio = a.description.as_deref().map(|b| wrapped(&p, b, font(13.), t.tm, tw, 4));
+            let bio = a.description.as_deref().filter(|_| self.opts.show_bio).map(|b| wrapped(&p, b, font(13.), t.tm, tw, 4));
             let text_h = 24. + 24. + 8. + bio.as_ref().map_or(0., |g| g.size().y + 10.) + 35.;
             let h = text_h.max(PHOTO) + 40.;
             let (_, row) = ui.allocate_space(vec2(full, h + 24.));
@@ -590,7 +592,7 @@ impl App {
             let mut y = card.min.y + 20.;
             trunc(&p, pos2(tx, y + 12.), tw, &a.item.title, font_w(24., Weight::Bold), t.tx);
             y += 30.;
-            if let Some(m) = a.monthly_listeners.as_deref() {
+            if let Some(m) = a.monthly_listeners.as_deref().filter(|_| self.opts.show_monthly) {
                 trunc(&p, pos2(tx, y + 8.), tw, m, font(13.), t.tm);
             }
             y += 24.;

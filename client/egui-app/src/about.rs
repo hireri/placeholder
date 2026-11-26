@@ -26,7 +26,7 @@ impl App {
         // Bio shows four rows until expanded; "Show more" only when the full text is longer than that.
         let expanded_key = Id::unique(("bio", artist_id.as_deref().unwrap_or("")));
         let expanded = ui.ctx().data_mut(|m| *m.get_temp_mut_or(expanded_key, false));
-        let (bio, more) = match info.and_then(|d| d.description.as_deref()) {
+        let (bio, more) = match info.and_then(|d| d.description.as_deref()).filter(|_| self.opts.show_bio) {
             Some(text) => {
                 let full = wrapped(&p, text, font(12.), t.tm, bw - 32., usize::MAX);
                 let more = full.rows.len() > 4;
@@ -63,10 +63,10 @@ impl App {
         let tw = a.max.x - 16. - tx;
         trunc(&p, pos2(tx, av.min.y + 14.), tw, name, font_w(15., Weight::Bold), t.tx);
         if let Some(d) = info {
-            if let Some(sub) = d.item.subtitle.as_deref() {
+            if let Some(sub) = d.item.subtitle.as_deref().filter(|_| self.opts.show_subs) {
                 trunc(&p, pos2(tx, av.min.y + 36.), tw, sub, font(12.), t.tm);
             }
-            if let Some(m) = d.monthly_listeners.as_deref() {
+            if let Some(m) = d.monthly_listeners.as_deref().filter(|_| self.opts.show_monthly) {
                 trunc(&p, pos2(tx, av.min.y + 54.), tw, m, font(12.), t.tm);
             }
         }

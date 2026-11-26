@@ -36,11 +36,24 @@ pub struct Opts {
     pub video_h: u32,
     /// Show the current song as Discord Rich Presence.
     pub discord: bool,
+    /// Audio cache limit in MB; 0 turns the cache off.
+    pub cache_mb: u16,
+    /// Hide explicit songs / music-video versions from lists and search (daemon flags, filtered on arrival).
+    pub hide_explicit: bool,
+    pub hide_video: bool,
+    /// Artist page parts.
+    pub show_bio: bool,
+    pub show_subs: bool,
+    pub show_monthly: bool,
+    /// Dark mode only: pure black window and sidebar.
+    pub pure_black: bool,
+    /// Scale each track toward -14 LUFS using the loudness YouTube reports.
+    pub normalize: bool,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { compact: false, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true }
+        Opts { compact: false, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true }
     }
 }
 
@@ -144,19 +157,20 @@ impl App {
             return self.picker(&mut pui, panel, which);
         }
         match tab {
-            0 => self.appearance(&mut pui, panel),
             ACCOUNTS => self.accounts(&mut pui, panel),
             KEYS => self.shortcuts(&mut pui, panel),
             _ => {
                 // Tall tabs scroll: `virt` is the full-height panel in scrolled coordinates.
                 let rows = match tab {
-                    1 => 7,
-                    2 => 7,
+                    0 => 7,
+                    1 => 11,
+                    2 => 12,
                     _ => self.data.settings.ready().map_or(1, |d| d.lyrics.order.len().max(1)),
                 };
                 ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(&mut pui, |ui| {
                     let (_, virt) = ui.allocate_space(vec2(panel.width(), rows as f32 * ROW_H + 24.));
                     match tab {
+                        0 => self.appearance(ui, virt),
                         1 => self.playback(ui, virt),
                         2 => self.content(ui, virt),
                         _ => self.lyrics(ui, virt),
@@ -250,6 +264,8 @@ impl App {
         if toggle(ui, &self.t, "custom", right, cy, &mut self.opts.custom) {
             self.reload_custom();
         }
+        let cy = self.setting(ui, panel, 6, "Pure black", "True black surfaces in dark mode, for OLED screens");
+        toggle(ui, &self.t, "pure-black", right, cy, &mut self.opts.pure_black);
     }
 
     fn playback(&mut self, ui: &mut egui::Ui, panel: Rect) {
@@ -274,17 +290,45 @@ impl App {
             self.put(ui, json!({ "audioQuality": Q[sel] }), |d| d.audio_quality = Q[sel].into());
         }
         self.gate(ui, panel, cy, "aq", d.as_ref().err().map(|_| "Needs the daemon, which isn't connected"));
-        let cy = self.setting(ui, panel, i, "Start with Endless on", "Keep adding similar songs when the queue runs out");
+        let cy = self.setting(ui, panel, i + 1, "Start with Endless on", "Keep adding similar songs when the queue runs out");
         toggle(ui, &self.t, "endless", right, cy, &mut self.opts.endless);
-        let cy = self.setting(ui, panel, i + 1, "Play music videos by default", "Show the video instead of the cover when a song has one");
+        let cy = self.setting(ui, panel, i + 2, "Play music videos by default", "Show the video instead of the cover when a song has one");
         toggle(ui, &self.t, "video", right, cy, &mut self.opts.video);
-        let cy = self.setting(ui, panel, i + 2, "Default video quality", "Maximum height of music videos");
+        let cy = self.setting(ui, panel, i + 3, "Default video quality", "Maximum height of music videos");
         let labels = VIDEO_HEIGHTS.map(|h| format!("{h}p"));
         let cur = VIDEO_HEIGHTS.iter().position(|h| *h == self.opts.video_h).unwrap_or(0);
         let sel = segmented(ui, &self.t, "video-h", right, cy, &labels.each_ref().map(String::as_str), cur);
         self.opts.video_h = VIDEO_HEIGHTS[sel];
-        let cy = self.setting(ui, panel, i + 3, "Discord activity", "Show the song you are listening to on your Discord profile");
+        let cy = self.setting(ui, panel, i + 4, "Discord activity", "Show the song you are listening to on your Discord profile");
         toggle(ui, &self.t, "discord", right, cy, &mut self.opts.discord);
+        let cy = self.setting(ui, panel, i + 5, "Normalize volume", "Even out loud and quiet songs using YouTube's loudness data");
+        if toggle(ui, &self.t, "normalize", right, cy, &mut self.opts.normalize) {
+            self.pl.engine.set_normalize(self.opts.normalize);
+        }
+        let cy = self.setting(ui, panel, i + 6, "Sleep timer", &self.sleep.describe());
+        const SLEEP: [&str; 5] = ["Off", "15 min", "30 min", "60 min", "End of song"];
+        let sel = segmented(ui, &self.t, "sleep", right, cy, &SLEEP, self.sleep.slot());
+        if sel != self.sleep.slot() {
+            self.sleep = match (sel, self.pl.song()) {
+                (1..=3, _) => crate::sleep::Sleep::minutes([15, 30, 60][sel - 1]),
+                (4, Some(s)) => crate::sleep::Sleep::EndOfSong(s.title.clone(), s.artist.clone()),
+                _ => Default::default(),
+            };
+        }
+        const CACHE: [u16; 5] = [0, 256, 512, 1024, 2048];
+        let used = crate::cache::usage() as f64 / (1 << 20) as f64;
+        let cy = self.setting(ui, panel, i + 7, "Audio cache", &if self.opts.cache_mb == 0 { format!("Off · {used:.0} MB still on disk") } else { format!("{used:.0} MB of {} MB used", self.opts.cache_mb) });
+        let labels = ["Off", "256 MB", "512 MB", "1 GB", "2 GB"];
+        let sel = segmented(ui, &self.t, "cache-mb", right, cy, &labels, CACHE.iter().position(|m| *m == self.opts.cache_mb).unwrap_or(usize::MAX));
+        if CACHE.get(sel).is_some_and(|m| *m != self.opts.cache_mb) {
+            self.opts.cache_mb = CACHE[sel];
+            crate::cache::set_limit_mb(self.opts.cache_mb);
+        }
+        let cy = self.setting(ui, panel, i + 8, "Clear audio cache", "Delete every cached song from disk");
+        if button(ui, &self.t, "cache-clear", right, cy, "Clear") {
+            crate::cache::clear();
+            crate::toast::info("Audio cache cleared");
+        }
     }
 
     fn content(&mut self, ui: &mut egui::Ui, panel: Rect) {
@@ -336,6 +380,30 @@ impl App {
             }
         }
         self.proxy_buf = Some(buf);
+        let right = panel.max.x - 24.;
+        let mut changed = false;
+        for (i, (key, title, desc)) in [
+            ("hide-explicit", "Hide explicit content", "Leave explicit songs out of lists and search"),
+            ("hide-video", "Hide video songs", "Leave music-video versions out of lists and search"),
+        ].into_iter().enumerate() {
+            let cy = self.setting(ui, panel, 7 + i, title, desc);
+            let v = if i == 0 { &mut self.opts.hide_explicit } else { &mut self.opts.hide_video };
+            changed |= toggle(ui, &self.t, key, right, cy, v);
+        }
+        if changed {
+            crate::data::HIDE_EXPLICIT.store(self.opts.hide_explicit, std::sync::atomic::Ordering::Relaxed);
+            crate::data::HIDE_VIDEO.store(self.opts.hide_video, std::sync::atomic::Ordering::Relaxed);
+            self.data.refilter();
+        }
+        for (i, (key, title, desc)) in [
+            ("show-bio", "Artist description", "Show the biography on artist pages"),
+            ("show-subs", "Subscriber count", "Show how many people subscribe to an artist"),
+            ("show-monthly", "Monthly listeners", "Show an artist's monthly audience"),
+        ].into_iter().enumerate() {
+            let cy = self.setting(ui, panel, 9 + i, title, desc);
+            let v = match i { 0 => &mut self.opts.show_bio, 1 => &mut self.opts.show_subs, _ => &mut self.opts.show_monthly };
+            toggle(ui, &self.t, key, right, cy, v);
+        }
     }
 
     fn lyrics(&mut self, ui: &mut egui::Ui, panel: Rect) {
@@ -423,7 +491,90 @@ impl App {
     }
 
     fn accounts(&mut self, ui: &mut egui::Ui, panel: Rect) {
-        self.accounts_panel(ui, panel, panel.min.y);
+        ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+            let (_, virt) = ui.allocate_space(vec2(panel.width(), 16. + 3. * 84. + 8. + 7. * ROW_H + 24.));
+            self.accounts_panel(ui, virt, virt.min.y);
+            self.lastfm(ui, Rect::from_min_max(pos2(virt.min.x, virt.min.y + 16. + 3. * 84. - 4.), virt.max));
+        });
+    }
+
+    /// Last.fm: browser sign-in (the daemon keeps only the session key) and the scrobbling options.
+    fn lastfm(&mut self, ui: &mut egui::Ui, panel: Rect) {
+        let (t, right) = (self.t, panel.max.x - 24.);
+        let Some(c) = self.scrobbler.cfg() else {
+            trunc(ui.painter(), pos2(panel.min.x + 24., panel.min.y + 34.), panel.width() - 48., "Last.fm: connecting to the daemon…", font(13.), t.tf);
+            return;
+        };
+        let ctx = ui.ctx().clone();
+        if !c.logged_in {
+            if self.scrobbler.waiting() {
+                self.scrobbler.poll_login(&ctx, false);
+                let cy = self.setting(ui, panel, 0, "Waiting for approval", "Approve Serafin on the Last.fm page that just opened");
+                if button(ui, &t, "lfm-done", right, cy, "I've approved it") {
+                    self.scrobbler.poll_login(&ctx, true);
+                }
+                let cy = self.setting(ui, panel, 1, "Cancel sign-in", "");
+                if button(ui, &t, "lfm-cancel", right, cy, "Cancel") {
+                    self.scrobbler.cancel_login();
+                }
+            } else {
+                let mut buf = self.lfm_buf.take().unwrap_or_default();
+                for (i, (key, title, pw)) in [("lfm-key", "API key", false), ("lfm-secret", "API secret", true)].into_iter().enumerate() {
+                    let cy = self.setting(ui, panel, i, title, if i == 0 { "Use your own Last.fm API account instead of the built-in key" } else { "" });
+                    text_field(ui, &t, key, right, cy, &mut buf[i], pw);
+                }
+                let desc = if c.custom_key { "Using your own key" } else { "Using the built-in key" };
+                let cy = self.setting(ui, panel, 2, "Custom key", desc);
+                let ready = !buf[0].trim().is_empty() && !buf[1].trim().is_empty();
+                let rm = c.custom_key && button(ui, &t, "lfm-key-rm", right - 90., cy, "Remove");
+                if button(ui, &t, "lfm-key-save", right, cy, "Save") && ready {
+                    self.scrobbler.set_key(&ctx, &buf[0], &buf[1]);
+                    buf = Default::default();
+                }
+                if rm {
+                    self.scrobbler.set_key(&ctx, "", "");
+                }
+                self.lfm_buf = Some(buf);
+            }
+            return;
+        }
+        let toggles: [(&str, &str, &str, bool); 3] = [
+            ("enabled", "Scrobble songs", "Add what you listen to to your Last.fm profile", c.enabled),
+            ("nowPlaying", "Send now playing", "Show the current song on your Last.fm profile", c.now_playing),
+            ("sendLikes", "Send likes", "Love a song on Last.fm when you like it here", c.send_likes),
+        ];
+        for (i, (key, title, d, on)) in toggles.into_iter().enumerate() {
+            let cy = self.setting(ui, panel, i, title, d);
+            let mut v = on;
+            if toggle(ui, &t, key, right, cy, &mut v) {
+                self.scrobbler.set(&ctx, json!({ key: v }), |c| match i {
+                    0 => c.enabled = v,
+                    1 => c.now_playing = v,
+                    _ => c.send_likes = v,
+                });
+            }
+        }
+        let cy = self.setting(ui, panel, 3, "Scrobble after", "Share of the song that has to play first");
+        const PCT: [f32; 4] = [0.3, 0.5, 0.7, 0.9];
+        let cur = PCT.iter().position(|p| (p - c.delay_percent).abs() < 0.01).unwrap_or(usize::MAX);
+        let sel = segmented(ui, &t, "lfm-pct", right, cy, &["30%", "50%", "70%", "90%"], cur);
+        if sel != cur && sel < PCT.len() {
+            self.scrobbler.set(&ctx, json!({ "delayPercent": PCT[sel] }), |c| c.delay_percent = PCT[sel]);
+        }
+        let cy = self.setting(ui, panel, 4, "Or after at most", "Seconds of play that always count, for long songs");
+        const SECS: [u32; 4] = [60, 120, 180, 240];
+        let cur = SECS.iter().position(|s| *s == c.delay_seconds).unwrap_or(usize::MAX);
+        let sel = segmented(ui, &t, "lfm-secs", right, cy, &["1 min", "2 min", "3 min", "4 min"], cur);
+        if sel != cur && sel < SECS.len() {
+            self.scrobbler.set(&ctx, json!({ "delaySeconds": SECS[sel] }), |c| c.delay_seconds = SECS[sel]);
+        }
+        let cy = self.setting(ui, panel, 5, "Minimum song length", "Shorter songs are never scrobbled");
+        const MIN: [u32; 4] = [0, 30, 60, 120];
+        let cur = MIN.iter().position(|s| *s == c.min_duration).unwrap_or(usize::MAX);
+        let sel = segmented(ui, &t, "lfm-min", right, cy, &["Any", "30 s", "1 min", "2 min"], cur);
+        if sel != cur && sel < MIN.len() {
+            self.scrobbler.set(&ctx, json!({ "minDuration": MIN[sel] }), |c| c.min_duration = MIN[sel]);
+        }
     }
 
     fn shortcuts(&mut self, ui: &mut egui::Ui, panel: Rect) {
@@ -457,6 +608,17 @@ fn toggle(ui: &egui::Ui, t: &crate::theme::Theme, key: &str, right: f32, cy: f32
     if hit.clicked() {
         *on = !*on;
     }
+    hit.clicked()
+}
+
+/// Pill button at the right edge; true when clicked.
+fn button(ui: &egui::Ui, t: &crate::theme::Theme, key: &str, right: f32, cy: f32, text: &str) -> bool {
+    let p = ui.painter();
+    let w = text_w(p, text, font_w(13., Weight::Semi)) + 32.;
+    let r = Rect::from_center_size(pos2(right - w / 2., cy), vec2(w, 36.));
+    let hit = press(ui, ("settings", key), r);
+    p.rect_filled(r, rad(18.), if hit.hovered() { t.s3.lerp_to_gamma(t.tx, 0.1) } else { t.s3 });
+    p.text(r.center(), Align2::CENTER_CENTER, text, font_w(13., Weight::Semi), t.tx);
     hit.clicked()
 }
 

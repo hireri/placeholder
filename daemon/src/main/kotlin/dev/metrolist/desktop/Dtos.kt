@@ -12,7 +12,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable data class SpotifyCreds(val spDc: String)
 
-@Serializable data class StoredCreds(val youtube: YouTubeCreds? = null, val spotify: SpotifyCreds? = null)
+@Serializable data class StoredCreds(val youtube: YouTubeCreds? = null, val spotify: SpotifyCreds? = null, val lastfm: LastFmCreds? = null, val lastfmApp: LastFmAppKey? = null)
 
 @Serializable
 data class TrackDto(
@@ -25,6 +25,8 @@ data class TrackDto(
     val source: String,
     val artistId: String? = null,
     val albumId: String? = null,
+    val explicit: Boolean = false,
+    val video: Boolean = false,
 )
 
 @Serializable
@@ -46,6 +48,8 @@ data class StreamDto(
     /** Track length from the player response; catalogue entries for videos often carry none. */
     val durationSec: Int? = null,
     val bitrate: Int? = null,
+    /** Measured loudness in LUFS as upstream normalization computes it (perceptual, else loudnessDb shifted by the AGGRESSIVE target). */
+    val loudnessLufs: Double? = null,
 )
 
 @Serializable data class LyricsDto(val provider: String, val lrc: String)
@@ -63,6 +67,10 @@ data class ItemDto(
     /** Songs only: the album they sit on, so a song card can open it. Null for singles. */
     val album: String? = null,
     val albumId: String? = null,
+    val explicit: Boolean = false,
+    val video: Boolean = false,
+    /** Playlists only: owned by the signed-in user, so it can be deleted rather than just unsaved. */
+    val editable: Boolean = false,
 )
 
 @Serializable data class SectionDto(val title: String, val items: List<ItemDto>)

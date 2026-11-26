@@ -108,6 +108,10 @@ object Services {
         return CreatedPlaylistDto(id = id, added = added, total = ids.size)
     }
 
+    suspend fun deletePlaylist(id: String) {
+        writeGate.run { YouTube.deletePlaylist(id.removePrefix("VL")) }.getOrThrow()
+    }
+
     private val versionWords = listOf("remix", "live", "acoustic", "instrumental", "unplugged", "extended", "sped up", "slowed", "nightcore", "karaoke", "cover")
 
     private fun normalized(s: String) = Normalizer.normalize(s, Normalizer.Form.NFKD)
@@ -198,6 +202,7 @@ object Services {
             rangeChunkSizeBytes = data.rangeChunkSizeBytes,
             useRangeChunks = data.useRangeChunks,
             bitrate = data.format.bitrate,
+            loudnessLufs = data.audioConfig?.let { it.perceptualLoudnessDb ?: it.loudnessDb?.plus(-7.0) },
             durationSec = data.videoDetails?.lengthSeconds?.toIntOrNull()?.takeIf { it > 0 }
                 ?: data.format.approxDurationMs?.toLongOrNull()?.div(1000)?.toInt(),
         )
@@ -264,9 +269,9 @@ object Services {
     }
 
     private fun YTItem.toItem(): ItemDto? = when (this) {
-        is SongItem -> ItemDto("song", id, title, artists.joinToString { it.name }, thumbnail, duration, artistId = artists.firstOrNull()?.id, album = album?.name, albumId = album?.id)
+        is SongItem -> ItemDto("song", id, title, artists.joinToString { it.name }, thumbnail, duration, artistId = artists.firstOrNull()?.id, album = album?.name, albumId = album?.id, explicit = explicit, video = isVideoSong)
         is AlbumItem -> ItemDto("album", browseId, title, listOfNotNull(artists?.joinToString { it.name }, year?.toString()).joinToString(" · "), thumbnail)
-        is PlaylistItem -> ItemDto("playlist", id, title, author?.name, thumbnail)
+        is PlaylistItem -> ItemDto("playlist", id, title, author?.name, thumbnail, editable = isEditable)
         is ArtistItem -> ItemDto("artist", id, title, null, thumbnail)
         else -> null
     }
@@ -373,5 +378,5 @@ object Services {
         )
     }
 
-    private fun SongItem.toDto() = TrackDto(id, title, artists.map { it.name }, album?.name, duration, thumbnail, "youtube", artists.firstOrNull()?.id, album?.id)
+    private fun SongItem.toDto() = TrackDto(id, title, artists.map { it.name }, album?.name, duration, thumbnail, "youtube", artists.firstOrNull()?.id, album?.id, explicit, isVideoSong)
 }

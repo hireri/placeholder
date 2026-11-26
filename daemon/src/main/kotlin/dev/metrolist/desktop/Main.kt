@@ -48,6 +48,15 @@ private val TokenGuard = { token: String ->
     }
 }
 
+/** A bad value or a refused login is the caller's to fix (400), not a daemon failure. */
+private suspend fun lastFmCall(call: ApplicationCall, block: suspend () -> LastFmDto) {
+    try {
+        call.respond(block())
+    } catch (e: IllegalArgumentException) {
+        call.respond(HttpStatusCode.BadRequest, ErrorDto(e.message ?: "invalid request"))
+    }
+}
+
 fun main() {
     // Handshake: the client picks no port and no secret, the daemon reports both on stdout.
     val token = ByteArray(24).also(SecureRandom()::nextBytes).let { Base64.getUrlEncoder().withoutPadding().encodeToString(it) }
@@ -57,6 +66,7 @@ fun main() {
         SpotifyAuth.setCookie(stored.spotify?.spDc)
         runCatching { YouTubeAuth.apply(stored.youtube) }
         runCatching { Settings.apply() }
+        LastFm.init()
     }
 
     val server = embeddedServer(CIO, host = "127.0.0.1", port = System.getenv("METROLIST_PORT")?.toInt() ?: 0) {
@@ -78,6 +88,17 @@ fun main() {
                     call.respond(HttpStatusCode.BadRequest, ErrorDto(e.message ?: "invalid settings"))
                 }
             }
+
+            get("/lastfm") { call.respond(LastFm.get()) }
+            put("/lastfm/key") { lastFmCall(call) { LastFm.setKey(call.receive()) } }
+            put("/lastfm") { lastFmCall(call) { LastFm.update(call.receive<LastFmSettingsReq>()) } }
+            post("/lastfm/login") { lastFmCall(call) { call.receive<LastFmLoginReq>().let { LastFm.login(it.username, it.password) } } }
+            post("/lastfm/auth/start") { try { call.respond(LastFm.start()) } catch (e: IllegalArgumentException) { call.respond(HttpStatusCode.BadRequest, ErrorDto(e.message ?: "invalid request")) } }
+            post("/lastfm/auth/finish") { lastFmCall(call) { LastFm.finish() } }
+            delete("/lastfm/login") { call.respond(LastFm.logout()) }
+            post("/lastfm/now-playing") { call.respond(LastFm.nowPlaying(call.receive())) }
+            post("/lastfm/scrobble") { call.respond(LastFm.scrobble(call.receive())) }
+            post("/lastfm/love") { call.respond(LastFm.love(call.receive())) }
 
             get("/auth/status") { call.respond(status()) }
             post("/auth/youtube") {
@@ -104,6 +125,7 @@ fun main() {
                 val req = call.receive<CreatePlaylistReq>()
                 call.respond(Services.createPlaylist(req.title, req.videoIds))
             }
+            delete("/youtube/playlists/{id}") { Services.deletePlaylist(call.parameters["id"]!!); call.respond(HttpStatusCode.NoContent) }
             get("/youtube/song/{videoId}") { call.respond(Services.song(call.parameters["videoId"]!!)) }
             get("/youtube/radio/{videoId}") { call.respond(Services.radio(call.parameters["videoId"]!!)) }
             get("/youtube/home") { call.respond(Services.home()) }

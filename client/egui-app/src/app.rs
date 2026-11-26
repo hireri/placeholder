@@ -149,7 +149,12 @@ pub struct App {
     /// OS media controls (MPRIS/SMTC); `None` when the platform backend is unavailable.
     media: Option<Media>,
     discord: crate::discord::Discord,
+    pub scrobbler: crate::scrobble::Scrobbler,
+    pub sleep: crate::sleep::Sleep,
     started: bool,
+    /// Playlist waiting on the delete popup: (id, label).
+    delete_ask: Option<(String, String)>,
+    pub lfm_buf: Option<[String; 2]>,
 }
 
 /// Selectable video heights; the player's floating rect is at most ~720px wide, so 480 is the default.
@@ -222,6 +227,10 @@ impl App {
         pl.endless = prefs.opts.endless;
         pl.engine.set_crossfade(prefs.opts.crossfade as f32);
         pl.engine.set_gapless(prefs.opts.gapless);
+        crate::cache::set_limit_mb(prefs.opts.cache_mb);
+        pl.engine.set_normalize(prefs.opts.normalize);
+        crate::data::HIDE_EXPLICIT.store(prefs.opts.hide_explicit, std::sync::atomic::Ordering::Relaxed);
+        crate::data::HIDE_VIDEO.store(prefs.opts.hide_video, std::sync::atomic::Ordering::Relaxed);
         let t = Theme::idle(true);
         visuals(&cc.egui_ctx, &t);
         App {
@@ -275,7 +284,11 @@ impl App {
             video: None,
             media,
             discord: crate::discord::Discord::new(),
+            scrobbler: Default::default(),
+            sleep: Default::default(),
             started: false,
+            delete_ask: None,
+            lfm_buf: None,
         }
     }
 
@@ -287,6 +300,14 @@ impl App {
     }
 
     /// Name of the first signed-in account, if any.
+    /// The signed-in YouTube Music profile as (avatar, name).
+    fn youtube_user(&self) -> Option<(Option<String>, String)> {
+        match &*self.data.status.lock() {
+            State::Ready(s) if s.youtube.logged_in => s.youtube.user.as_ref().map(|u| (u.avatar_url.clone(), u.name.clone())),
+            _ => None,
+        }
+    }
+
     fn user_name(&self) -> Option<String> {
         match &*self.data.status.lock() {
             State::Ready(s) => [&s.youtube, &s.spotify].into_iter().filter(|s| s.logged_in).find_map(|s| s.user.as_ref().map(|u| u.name.clone())),
@@ -313,9 +334,8 @@ impl App {
 
         // Right cluster, laid out from the right edge: status island, then the profile.
         self.data.status.ensure(&ctx, || crate::backend::get("/auth/status"));
-        let user = self.user_name();
-        let initial = user.as_deref().and_then(|n| n.chars().next()).unwrap_or('?').to_uppercase().to_string();
-        let name = user.unwrap_or_else(|| "Sign in".into());
+        let user = self.youtube_user();
+        let name = user.as_ref().map_or_else(|| "Sign in".into(), |u| u.1.clone());
         let me_w = 3. + 26. + 8. + text_w(&p, &name, font(13.)).min(100.) + 10.;
         let me = Rect::from_min_size(pos2(tb.max.x - 12. - me_w, cy - 16.), vec2(me_w, 32.));
         self.me_btn = me;
@@ -329,8 +349,7 @@ impl App {
         } else if self.me_menu.is_some() {
             p.rect_filled(me, rad(16.), t.s2);
         }
-        p.circle_filled(pos2(me.min.x + 16., cy), 13., t.axc);
-        p.text(pos2(me.min.x + 16., cy), egui::Align2::CENTER_CENTER, initial, font_w(11., Weight::Semi), t.tx);
+        self.avatar(ui, user.as_ref().and_then(|u| u.0.as_deref()), pos2(me.min.x + 16., cy), 13., user.as_ref().map(|u| u.1.as_str()));
         trunc(&p, pos2(me.min.x + 37., cy), 100., &name, font(13.), t.tx);
         self.island(ui, me.min.x - 6., cy);
 
@@ -459,7 +478,7 @@ impl App {
         if k < 1. {
             ctx.request_repaint();
         }
-        const ITEMS: [(&str, Option<&str>); 5] = [("Settings", Some(icon!("gear"))), ("Accounts", None), ("Keyboard shortcuts", None), ("Spotify import", None), ("Sign out", None)];
+        const ITEMS: [(&str, Option<&str>); 4] = [("Settings", Some(icon!("gear"))), ("Accounts", None), ("Keyboard shortcuts", None), ("Spotify import", None)];
         let scr = ctx.content_rect();
         let rect = Rect::from_min_size(pos2(scr.max.x - 12. - 220., scr.min.y + 48. + 6. * (1. - k)), vec2(220., 6. + 52. + ITEMS.len() as f32 * 35. - 1. + 6.));
         let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p) && !self.me_btn.contains(p)));
@@ -484,8 +503,7 @@ impl App {
                     ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                     p.rect_filled(r, rad(8.), t.s3);
                 }
-                let col = if i == ITEMS.len() - 1 { t.tm } else { t.tx };
-                trunc(&p, pos2(r.min.x + 10., r.center().y), r.width() - 20. - 24., label, font(13.), col);
+                trunc(&p, pos2(r.min.x + 10., r.center().y), r.width() - 20. - 24., label, font(13.), t.tx);
                 if let Some(ic) = ic {
                     icon(ui, ic, pos2(r.max.x - 10. - 8., r.center().y), 16., t.tm);
                 }
@@ -501,18 +519,7 @@ impl App {
                 self.settings_tab = [crate::settings::APPEARANCE, crate::settings::ACCOUNTS, crate::settings::KEYS][i];
                 self.go(Route::Settings);
             }
-            3 => self.go(Route::Import),
-            _ => {
-                let status = self.data.status.ready();
-                let on = |svc: &str| status.as_ref().is_some_and(|s| if svc == "youtube" { s.youtube.logged_in } else { s.spotify.logged_in });
-                let out: Vec<_> = ["youtube", "spotify"].into_iter().filter(|s| on(s)).collect();
-                if out.is_empty() {
-                    crate::toast::info("You're not signed in");
-                }
-                for svc in out {
-                    self.data.account(ctx, svc, false);
-                }
-            }
+            _ => self.go(Route::Import),
         }
     }
 
@@ -688,7 +695,7 @@ impl App {
         let was = self.here();
         if l.route == Route::Settings && self.route != Route::Settings {
             // Refetch the daemon's settings each time the page opens.
-            (self.settings_pick, self.proxy_buf) = (None, None);
+            (self.settings_pick, self.proxy_buf, self.lfm_buf) = (None, None, None);
             self.reload_custom();
             self.data.settings.reset();
         }
@@ -794,9 +801,46 @@ impl App {
     }
 
     /// One step of the player while no window exists: advances the queue and serves media keys and tray commands.
+    /// Deleting a playlist is permanent: ask first, unless Shift is held.
+    pub fn confirm_delete(&mut self, ctx: &Context, id: &str) {
+        if ctx.input(|i| i.modifiers.shift) {
+            return self.data.delete_playlist(ctx, id);
+        }
+        let label = self.data.library_item(id).map_or_else(|| "This playlist".into(), |i| format!("“{}”", i.title));
+        self.delete_ask = Some((id.into(), label));
+    }
+
+    fn delete_modal(&mut self, ctx: &Context) {
+        let Some((id, label)) = self.delete_ask.clone() else { return };
+        let mut answer = None;
+        let m = egui::Modal::new(egui::Id::new("delete-playlist")).show(ctx, |ui| {
+            ui.set_width(320.);
+            ui.heading("Delete playlist?");
+            ui.add_space(6.);
+            ui.label(format!("{label} will be permanently deleted from YouTube Music. This can't be undone."));
+            ui.label(egui::RichText::new("Hold Shift to skip this prompt.").weak());
+            ui.add_space(10.);
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(0xc6, 0x28, 0x28))).clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if answer == Some(true) {
+            self.data.delete_playlist(ctx, &id);
+        }
+        if answer.is_some() || m.should_close() {
+            self.delete_ask = None;
+        }
+    }
+
     pub fn headless(&mut self, ctx: &Context) {
         self.pl.tick(ctx);
         if let Some((t, on)) = self.pl.like_event.take() {
+            self.scrobbler.love(ctx, &t, on);
             self.data.mirror_like(t, on);
         }
         self.resolve_play(ctx);
@@ -806,6 +850,11 @@ impl App {
     /// Mirrors the current song to the OS controls and applies their commands. Runs every frame, also while the sidebar is collapsed.
     fn sync_media(&mut self, ctx: &Context) {
         let mut cmds = crate::tray::take_cmds();
+        let (dur, now) = (self.pl.dur(), self.pl.song());
+        self.scrobbler.update(ctx, now.map(|s| (s.title.as_str(), s.artist.as_str(), s.album.as_str())), self.pl.playing, self.pl.pos, dur);
+        if self.sleep.due(now.map(|s| (s.title.as_str(), s.artist.as_str()))) && self.pl.playing {
+            self.pl.toggle(ctx);
+        }
         let cover = self.pl.song().and_then(|s| s.thumbnail.as_deref().map(|u| sized_url(u, 544)));
         let song = self.pl.song().map(|s| (s.title.as_str(), s.artist.as_str(), cover.as_deref()));
         if self.opts.discord {
@@ -874,7 +923,10 @@ impl App {
                 Some(None) => Theme::idle(dark),
             },
         };
-        let want = self.custom.as_ref().map_or(want, |c| want.custom(c));
+        // Artwork theming wins while a cover is driving it; the custom colours apply otherwise.
+        let artwork = self.opts.auto_theme && self.pl.song().is_some_and(|s| s.thumbnail.is_some());
+        let want = self.custom.as_ref().filter(|_| !artwork).map_or(want, |c| want.custom(c));
+        let want = if dark && self.opts.pure_black { want.pure_black() } else { want };
         let now = ctx.input(|i| i.time);
         if want != self.theme_anim.1 {
             // Light/dark flips are instant; everything else eases from what is on screen.
@@ -987,6 +1039,7 @@ impl eframe::App for App {
         }
         self.pl.tick(&ctx);
         if let Some((t, on)) = self.pl.like_event.take() {
+            self.scrobbler.love(&ctx, &t, on);
             self.data.mirror_like(t, on);
         }
         self.resolve_play(&ctx);
@@ -1064,5 +1117,6 @@ impl eframe::App for App {
         self.context_menu(&ctx);
         self.me_dropdown(&ctx);
         self.palette(&ctx);
+        self.delete_modal(&ctx);
     }
 }

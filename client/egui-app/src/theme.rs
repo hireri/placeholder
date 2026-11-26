@@ -11,15 +11,16 @@ pub struct Custom {
     light: HashMap<String, String>,
 }
 
-const TEMPLATE: &str = "# Serafin custom theme. Delete a line to keep the generated colour for it.
+const TEMPLATE: &str = "# Serafin custom theme. Only uncommented lines override the generated (artwork or accent) colours.
 # Names: s0 s1 s2 s3 (window, sidebar, panel, hover), tx tm tf (text), ax on_ax axc (accent, text on accent, accent container)
+# With Pure black on, dark s0 and s1 are pulled towards black after these apply.
 [dark]
-s0 = \"#121214\"
-ax = \"#8ab4ff\"
+# s0 = \"#121214\"
+# ax = \"#8ab4ff\"
 
 [light]
-s0 = \"#fafafa\"
-ax = \"#1a56db\"
+# s0 = \"#fafafa\"
+# ax = \"#1a56db\"
 ";
 
 pub fn theme_path() -> std::path::PathBuf {
@@ -88,11 +89,14 @@ pub struct Theme {
 
 impl Theme {
     pub fn new(hue: f32, ac: f32, nc: f32, dark: bool) -> Self {
+        // Monochrome (ac == 0): the fixed text chroma would otherwise tint everything red at hue 0.
+        let k = if ac == 0. { 0. } else { 1. };
         let c = |l, ch| oklch(l, ch, hue);
+        let t = |l, ch: f32| c(l, ch * k);
         let (s, tx, tm, tf, ax, on_ax, axc) = if dark {
-            ([0.17, 0.205, 0.25, 0.30], c(0.96, 0.008), c(0.72, 0.02), c(0.56, 0.02), c(0.78, ac), c(0.2, 0.03), c(0.32, ac * 0.55))
+            ([0.17, 0.205, 0.25, 0.30], t(0.96, 0.008), t(0.72, 0.02), t(0.56, 0.02), c(0.78, ac), t(0.2, 0.03), c(0.32, ac * 0.55))
         } else {
-            ([0.975, 0.95, 0.925, 0.89], c(0.22, 0.02), c(0.46, 0.02), c(0.6, 0.015), c(0.5, ac), c(0.98, 0.01), c(0.9, ac * 0.5))
+            ([0.975, 0.95, 0.925, 0.89], t(0.22, 0.02), t(0.46, 0.02), t(0.6, 0.015), c(0.5, ac), t(0.98, 0.01), c(0.9, ac * 0.5))
         };
         Theme { hue, dark, tx, tm, tf, ax, on_ax, axc, s0: c(s[0], nc), s1: c(s[1], nc), s2: c(s[2], nc), s3: c(s[3], nc) }
     }
@@ -111,6 +115,13 @@ impl Theme {
     /// Built around a cover's (hue, chroma): vivid covers get a stronger accent and tinted surfaces.
     pub fn tinted((hue, chroma): (f32, f32), dark: bool) -> Self {
         Theme::new(hue, (chroma * 1.4).clamp(0.06, 0.16), (chroma * 0.2).clamp(0.006, 0.026), dark)
+    }
+
+    /// Window and sidebar go true black (OLED); panels and hover keep their tonal steps.
+    pub fn pure_black(mut self) -> Self {
+        self.s0 = Color32::BLACK;
+        self.s1 = mix(Color32::BLACK, self.s1, 0.5);
+        self
     }
 
     /// Overrides colours with the matching mode's table from `c`.

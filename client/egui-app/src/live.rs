@@ -48,6 +48,16 @@ impl App {
         }
     }
 
+    /// Round profile picture; the name's initial on the accent colour while there is none (or it is still loading).
+    pub fn avatar(&self, ui: &egui::Ui, url: Option<&str>, c: egui::Pos2, r: f32, name: Option<&str>) {
+        let p = ui.painter();
+        p.circle_filled(c, r, self.t.axc);
+        p.text(c, Align2::CENTER_CENTER, name.and_then(|n| n.chars().next()).unwrap_or('?').to_uppercase().to_string(), font_w(r * 0.75, Weight::Semi), self.t.tx);
+        if let Some(u) = url {
+            paint_cover(ui, u, Rect::from_center_size(c, vec2(r * 2., r * 2.)), rad(r), Color32::WHITE);
+        }
+    }
+
     /// Opens an item's page: albums, playlists and artists their own, a song the album it sits on (or its single).
     pub(crate) fn open_item(&mut self, _ctx: &egui::Context, it: &Item) {
         if it.r#type == "song" {
@@ -364,7 +374,10 @@ impl App {
             State::Ready(s) => s.youtube.user.clone().filter(|_| s.youtube.logged_in),
             _ => None,
         };
-        d.home.ensure(ui.ctx(), || backend::get("/youtube/home"));
+        d.home.ensure(ui.ctx(), || backend::get::<Vec<Section>>("/youtube/home").map(|mut v| {
+            crate::data::clean_sections(&mut v);
+            v
+        }));
         let g = d.home.lock();
         match &*g {
             State::Ready(s) => self.home_feed(ui, card, top, s, user.as_ref()),
@@ -443,7 +456,7 @@ impl App {
                 let sub = if album {
                     [year, Some(summary(&p.tracks))].into_iter().flatten().collect::<Vec<_>>().join(" · ")
                 } else {
-                    [p.item.subtitle.clone(), (!p.tracks.is_empty()).then(|| summary(&p.tracks))].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+                    [p.item.subtitle.clone().filter(|_| kind != "artists" || self.opts.show_subs), (!p.tracks.is_empty()).then(|| summary(&p.tracks))].into_iter().flatten().collect::<Vec<_>>().join(" · ")
                 };
                 let first = p.tracks.first();
                 let by = first.filter(|_| album).and_then(|t| t.artists.first()).map(|n| (n.as_str(), first.and_then(|t| t.artist_id.as_deref())));
@@ -701,9 +714,8 @@ impl App {
             let p = ui.painter().clone();
             p.rect_filled(row, rad(14.), t.s1);
             let cy = row.center().y;
-            p.circle_filled(pos2(row.min.x + 36., cy), 20., t.axc);
             let who = s.user.as_ref().map(|u| u.name.as_str());
-            p.text(pos2(row.min.x + 36., cy), Align2::CENTER_CENTER, who.and_then(|n| n.chars().next()).unwrap_or('?').to_uppercase().to_string(), font_w(15., Weight::Semi), t.tx);
+            self.avatar(ui, s.user.as_ref().and_then(|u| u.avatar_url.as_deref()).filter(|_| s.logged_in), pos2(row.min.x + 36., cy), 20., who);
             let import = svc == "spotify" && s.logged_in;
             let tx = row.min.x + 68.;
             let tw = row.width() - if import { 380. } else { 220. };
@@ -742,8 +754,49 @@ impl App {
                 d.account(ui.ctx(), svc, !s.logged_in);
             }
         }
+        self.lastfm_card(ui, Rect::from_min_size(pos2(card.min.x + 16., top + 16. + 2. * 84.), vec2(card.width() - 32., 72.)));
         if let Some(e) = err {
-            self.note(ui, card, top + 16. + 2. * 84. - 20., &e);
+            self.note(ui, card, top + 16. + 3. * 84. - 20., &e);
+        }
+    }
+
+    /// Last.fm as a third connection beside YouTube Music and Spotify; its scrobbling options sit under the cards.
+    fn lastfm_card(&mut self, ui: &mut egui::Ui, row: Rect) {
+        let t = self.t;
+        let p = ui.painter().clone();
+        p.rect_filled(row, rad(14.), t.s1);
+        let cy = row.center().y;
+        let c = self.scrobbler.cfg().unwrap_or_default();
+        let who = c.username.as_deref().filter(|_| c.logged_in);
+        self.avatar(ui, c.avatar_url.as_deref().filter(|_| c.logged_in), pos2(row.min.x + 36., cy), 20., who);
+        let (tx, tw) = (row.min.x + 68., row.width() - 220.);
+        trunc(&p, pos2(tx, cy - 9.), tw, "Last.fm", font_w(14., Weight::Semi), t.tx);
+        let line = match who {
+            Some(n) => format!("Signed in as {n}"),
+            None if !c.configured => "Add an API key below to connect".into(),
+            None => "Not signed in".into(),
+        };
+        trunc(&p, pos2(tx, cy + 10.), tw, &line, font(12.), t.tm);
+        let waiting = self.scrobbler.waiting();
+        let text = if waiting { "Waiting…" } else if c.logged_in { "Sign out" } else { "Sign in" };
+        let bw = text_w(&p, text, font_w(13., Weight::Semi)) + 32.;
+        let b = Rect::from_center_size(pos2(row.max.x - 16. - bw / 2., cy), vec2(bw, 36.));
+        let r = ui.interact(b, ui.scope_id().with("acct-lastfm"), egui::Sense::click());
+        let primary = !c.logged_in;
+        p.rect_filled(b, rad(18.), if primary { if r.hovered() { t.ax.gamma_multiply(0.9) } else { t.ax } } else if r.hovered() { t.s3.lerp_to_gamma(t.tx, 0.1) } else { t.s3 });
+        p.text(b.center(), Align2::CENTER_CENTER, text, font_w(13., Weight::Semi), if primary { t.on_ax } else { t.tx });
+        if r.hovered() && !waiting {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if r.clicked() && !waiting {
+            let ctx = ui.ctx().clone();
+            if c.logged_in {
+                self.scrobbler.logout(&ctx);
+            } else if c.configured {
+                self.scrobbler.start_login(&ctx);
+            } else {
+                crate::toast::info("Add a Last.fm API key below first");
+            }
         }
     }
 }

@@ -15,6 +15,7 @@ pub struct LibItem {
     pub by: String,
     /// Index into `FILTERS`: 1 playlist, 2 album, 3 artist.
     pub kind: usize,
+    pub editable: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -57,13 +58,13 @@ impl LibItem {
         let label = ["", "Playlist", "Album", "Artist"][kind];
         let by = i.subtitle.clone().unwrap_or_default();
         let sub = if kind == 3 || by.is_empty() { label.to_string() } else { format!("{label} · {by}") };
-        LibItem { id: i.id, thumb: i.thumbnail, title: i.title, sub, by, kind }
+        LibItem { id: i.id, thumb: i.thumbnail, title: i.title, sub, by, kind, editable: i.editable }
     }
 
     /// As a generic item, for the right-click menu.
     pub fn item(&self) -> crate::data::Item {
         let r#type = ["", "playlist", "album", "artist"][self.kind].to_string();
-        crate::data::Item { r#type, id: self.id.clone(), title: self.title.clone(), thumbnail: self.thumb.clone(), ..Default::default() }
+        crate::data::Item { r#type, id: self.id.clone(), title: self.title.clone(), thumbnail: self.thumb.clone(), editable: self.editable, ..Default::default() }
     }
 
     pub fn endpoint(&self) -> &'static str {

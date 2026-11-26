@@ -97,6 +97,7 @@ impl Discord {
         }
         let mut act = Activity::new()
             .activity_type(ActivityType::Listening)
+            .name("Serafin")
             .status_display_type(StatusDisplayType::Details)
             .details(title)
             .state(artist)
