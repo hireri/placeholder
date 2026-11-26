@@ -1,5 +1,6 @@
 package dev.metrolist.desktop
 
+import com.metrolist.music.lyrics.LyricsUtils
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -135,6 +136,7 @@ fun main() {
             post("/youtube/like/{videoId}") { Services.like(call.parameters["videoId"]!!, call.q("on") == "true"); call.respond(HttpStatusCode.NoContent) }
             post("/youtube/subscribe/{channelId}") { Services.subscribe(call.parameters["channelId"]!!, call.q("on") == "true"); call.respond(HttpStatusCode.NoContent) }
             post("/youtube/save/{kind}/{id}") { Services.save(call.parameters["kind"]!!, call.parameters["id"]!!, call.q("on") == "true"); call.respond(HttpStatusCode.NoContent) }
+            post("/youtube/playback/{videoId}") { Services.registerPlayback(call.parameters["videoId"]!!); call.respond(HttpStatusCode.NoContent) }
             get("/youtube/history") { call.respond(Services.history()) }
             get("/youtube/library/{kind}") { call.respond(Services.library(call.parameters["kind"]!!)) }
             get("/youtube/albums/{id}") { call.respond(Services.album(call.parameters["id"]!!)) }
@@ -151,6 +153,10 @@ fun main() {
             get("/lyrics") {
                 val l = Services.lyrics(call.q("id") ?: "", call.q("title") ?: "", call.q("artist") ?: "", call.q("duration")?.toIntOrNull() ?: -1, call.q("album"))
                 if (l == null) call.respond(HttpStatusCode.NotFound, ErrorDto("no lyrics")) else call.respond(l)
+            }
+
+            post("/romanize") {
+                call.respond(call.receive<List<String>>().map { if (LyricsUtils.isJapanese(it) && !LyricsUtils.isChinese(it)) LyricsUtils.romanizeJapanese(it) else "" })
             }
 
             get("/spotify/playlists") { call.respond(Services.spotifyPlaylists()) }

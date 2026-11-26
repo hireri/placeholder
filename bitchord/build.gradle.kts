@@ -11,6 +11,9 @@ sourceSets.main {
         "com/music/bitchord/data/DebugLog.kt",
         "com/music/bitchord/data/webdav/WebDavAuth.kt",
         "com/music/bitchord/data/spotify/SpotifyLibrary.kt",
+        "com/music/bitchord/data/innertube/potoken/PoTokenPage.kt",
+        "com/music/bitchord/data/innertube/potoken/JavaScriptUtil.kt",
+        "com/music/bitchord/data/innertube/potoken/PoTokenException.kt",
     )
 }
 

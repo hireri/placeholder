@@ -4,7 +4,7 @@ use crate::theme::{mix, oklab, Theme};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use eframe::egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily, VariationCoords};
+use eframe::egui::epaint::text::VariationCoords;
 use eframe::egui::{
     self, load::{SizedTexture, TexturePoll}, text::LayoutJob, Align2, Color32, ColorImage, Context, CornerRadius, FontData, FontFamily, FontId, Image, Painter,
     Pos2, Rect, Response, Sense, TextFormat, TextureHandle, TextureId, TextureOptions, Ui,
@@ -20,12 +20,37 @@ macro_rules! icon {
 }
 
 const ICONS: &[(&str, &[u8])] = &[
+    ("bytes://icons/mplay.svg", include_bytes!("../assets/icons/mplay.svg")),
+    ("bytes://icons/mnext.svg", include_bytes!("../assets/icons/mnext.svg")),
+    ("bytes://icons/mnote.svg", include_bytes!("../assets/icons/mnote.svg")),
+    ("bytes://icons/martist.svg", include_bytes!("../assets/icons/martist.svg")),
+    ("bytes://icons/mopen.svg", include_bytes!("../assets/icons/mopen.svg")),
+    ("bytes://icons/msave.svg", include_bytes!("../assets/icons/msave.svg")),
+    ("bytes://icons/munsave.svg", include_bytes!("../assets/icons/munsave.svg")),
+    ("bytes://icons/mtrash.svg", include_bytes!("../assets/icons/mtrash.svg")),
+    ("bytes://icons/mlink.svg", include_bytes!("../assets/icons/mlink.svg")),
+    ("bytes://icons/mgear.svg", include_bytes!("../assets/icons/mgear.svg")),
+    ("bytes://icons/macct.svg", include_bytes!("../assets/icons/macct.svg")),
+    ("bytes://icons/mkeys.svg", include_bytes!("../assets/icons/mkeys.svg")),
+    ("bytes://icons/mspot.svg", include_bytes!("../assets/icons/mspot.svg")),
+    ("bytes://icons/mpriv.svg", include_bytes!("../assets/icons/mpriv.svg")),
+    ("bytes://icons/homef.svg", include_bytes!("../assets/icons/homef.svg")),
+    ("bytes://icons/impf.svg", include_bytes!("../assets/icons/impf.svg")),
+    ("bytes://icons/dirf.svg", include_bytes!("../assets/icons/dirf.svg")),
+    ("bytes://icons/histf.svg", include_bytes!("../assets/icons/histf.svg")),
+    ("bytes://icons/lyrf.svg", include_bytes!("../assets/icons/lyrf.svg")),
+    ("bytes://icons/quef.svg", include_bytes!("../assets/icons/quef.svg")),
+    ("bytes://icons/partyf.svg", include_bytes!("../assets/icons/partyf.svg")),
     ("bytes://icons/alb.svg", include_bytes!("../assets/icons/alb.svg")),
     ("bytes://icons/aqh.svg", include_bytes!("../assets/icons/aqh.svg")),
     ("bytes://icons/aqs.svg", include_bytes!("../assets/icons/aqs.svg")),
     ("bytes://icons/art.svg", include_bytes!("../assets/icons/art.svg")),
     ("bytes://icons/back.svg", include_bytes!("../assets/icons/back.svg")),
     ("bytes://icons/bell.svg", include_bytes!("../assets/icons/bell.svg")),
+    ("bytes://icons/lock.svg", include_bytes!("../assets/icons/lock.svg")),
+    ("bytes://icons/party.svg", include_bytes!("../assets/icons/party.svg")),
+    ("bytes://icons/crown.svg", include_bytes!("../assets/icons/crown.svg")),
+    ("bytes://icons/group.svg", include_bytes!("../assets/icons/group.svg")),
     ("bytes://icons/gear.svg", include_bytes!("../assets/icons/gear.svg")),
     ("bytes://icons/col.svg", include_bytes!("../assets/icons/col.svg")),
     ("bytes://icons/colr.svg", include_bytes!("../assets/icons/colr.svg")),
@@ -45,6 +70,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("bytes://icons/play.svg", include_bytes!("../assets/icons/play.svg")),
     ("bytes://icons/que.svg", include_bytes!("../assets/icons/que.svg")),
     ("bytes://icons/rep.svg", include_bytes!("../assets/icons/rep.svg")),
+    ("bytes://icons/rep1.svg", include_bytes!("../assets/icons/rep1.svg")),
     ("bytes://icons/rw.svg", include_bytes!("../assets/icons/rw.svg")),
     ("bytes://icons/serafin.svg", include_bytes!("../assets/logo/serafin.svg")),
     ("bytes://icons/search.svg", include_bytes!("../assets/icons/search.svg")),
@@ -64,19 +90,61 @@ const ICONS: &[(&str, &[u8])] = &[
     ("bytes://icons/vidoff.svg", include_bytes!("../assets/icons/vidoff.svg"))
 ];
 
+/// Allo axes besides weight (wght 100..900 is set per entry below). opsz 9..32; egui can't auto-size it, so pick one.
+const ALLO_OPSZ: f32 = 9.;
+
 pub fn install(ctx: &Context) {
     egui_extras::install_image_loaders(ctx);
     for (uri, bytes) in ICONS {
         ctx.include_bytes(*uri, *bytes);
     }
-    // Inter Variable, one font entry per weight so FontId can pick weight through its family.
-    let weights = [("inter-400", 400., FontFamily::Proportional), ("inter-500", 500., w(Weight::Medium)), ("inter-600", 600., w(Weight::Semi)), ("inter-650", 650., w(Weight::Bold)), ("inter-800", 800., w(Weight::Extra))];
-    for (name, wght, fam) in weights {
-        let data = FontData::from_static(include_bytes!("../assets/fonts/InterVariable.ttf"))
-            .tweak(egui::FontTweak { coords: VariationCoords::new([(b"wght", wght)]), ..Default::default() });
-        // Lowest priority would let the default font win; Highest puts Inter first and keeps the defaults as glyph fallback.
-        ctx.add_font(FontInsert::new(name, data, vec![InsertFontFamily { family: fam, priority: FontPriority::Highest }]));
+    set_fonts(ctx, "");
+}
+
+/// Allo (bundled default) in every weight, with the installed font called `user` (if any) ahead of it; the default fonts stay as glyph fallback.
+/// Returns false when no installed font has that family name (the UI then keeps Allo).
+pub fn set_fonts(ctx: &Context, user: &str) -> bool {
+    use fontique::{Collection, CollectionOptions, QueryFamily, QueryStatus, SourceCache};
+    let mut defs = egui::FontDefinitions::default();
+    let fallback = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    // One font entry per weight so FontId can pick weight through its family.
+    let weights = [("400", 400., FontFamily::Proportional), ("500", 500., w(Weight::Medium)), ("600", 600., w(Weight::Semi)), ("650", 650., w(Weight::Bold)), ("800", 800., w(Weight::Extra))];
+    let user = user.trim();
+    let mut coll = Collection::new(CollectionOptions { shared: false, system_fonts: !user.is_empty() });
+    let mut cache = SourceCache::new(Default::default());
+    let mut ok = true;
+    // Japanese glyphs Allo lacks, in a rounded face that suits it.
+    defs.font_data.insert("kosugi".into(), FontData::from_static(include_bytes!("../assets/fonts/KosugiMaru-Regular.ttf")).into());
+    for (tag, wght, fam) in weights {
+        // The installed face closest to this weight (a variable font is also set to it); the same family for every weight of the UI.
+        let mine = (!user.is_empty()).then(|| {
+            let mut q = coll.query(&mut cache);
+            q.set_families([QueryFamily::Named(user)]);
+            q.set_attributes(fontique::Attributes::new(fontique::FontWidth::NORMAL, fontique::FontStyle::Normal, fontique::FontWeight::new(wght)));
+            let mut out = None;
+            q.matches_with(|f| {
+                let d = FontData { index: f.index, ..FontData::from_owned(f.blob.as_ref().to_vec()) };
+                out = Some(d.tweak(egui::FontTweak { coords: VariationCoords::new([(b"wght", wght)]), ..Default::default() }));
+                QueryStatus::Stop
+            });
+            out
+        }).flatten();
+        ok &= mine.is_some() || user.is_empty();
+        let data = FontData::from_static(include_bytes!("../assets/fonts/AlloVariable-Round60.ttf"))
+            .tweak(egui::FontTweak { coords: VariationCoords::new([(b"wght", wght), (b"opsz", ALLO_OPSZ)]), ..Default::default() });
+        defs.font_data.insert(format!("allo-{tag}"), data.into());
+        let mut list = vec![];
+        if let Some(d) = mine {
+            defs.font_data.insert(format!("user-{tag}"), d.into());
+            list.push(format!("user-{tag}"));
+        }
+        list.push(format!("allo-{tag}"));
+        list.push("kosugi".into());
+        list.extend(fallback.iter().cloned());
+        defs.families.insert(fam, list);
     }
+    ctx.set_fonts(defs);
+    ok
 }
 
 #[derive(Clone, Copy)]
@@ -246,6 +314,20 @@ pub fn wrapped(painter: &Painter, text: &str, font: FontId, color: Color32, max_
     job.wrap.max_rows = rows;
     job.wrap.overflow_character = Some('…');
     painter.layout_job(job)
+}
+
+/// The "E" mark: a muted rounded square with the letter knocked out in `bg` (the surface behind it).
+/// `at` is the left-centre of the badge; returns the width to skip, gap included.
+pub fn explicit_badge(painter: &Painter, at: Pos2, bg: Color32, fg: Color32, size: f32) -> f32 {
+    let k = size / 14.;
+    let r = Rect::from_min_size(egui::pos2(at.x, at.y - size / 2.), egui::vec2(size, size));
+    painter.rect_filled(r, rad(3. * k), fg);
+    let (x, y, w, h, b) = (r.min.x + 4.5 * k, r.min.y + 3.5 * k, 5. * k, 7. * k, 1.4 * k);
+    painter.rect_filled(Rect::from_min_size(egui::pos2(x, y), egui::vec2(1.5 * k, h)), 0., bg);
+    for i in 0..3 {
+        painter.rect_filled(Rect::from_min_size(egui::pos2(x, y + (h - b) / 2. * i as f32), egui::vec2(w, b)), 0., bg);
+    }
+    size + 5.
 }
 
 pub fn text_w(painter: &Painter, text: &str, font: FontId) -> f32 {
@@ -577,7 +659,7 @@ impl Gfx {
         while let Ok((k, r)) = self.rx.try_recv() {
             match r {
                 Some((img, tone, luma)) => {
-                    self.arts.insert(k, Art { tex: ctx.load_texture("backdrop", img, TextureOptions::LINEAR), tone, luma });
+                    self.arts.insert(k, Art { tex: ctx.load_texture("backdrop", img, TextureOptions { wrap_mode: egui::TextureWrapMode::MirroredRepeat, ..TextureOptions::LINEAR }), tone, luma });
                 }
                 None => {
                     self.failed.insert(k);

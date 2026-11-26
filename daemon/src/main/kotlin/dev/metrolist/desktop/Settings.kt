@@ -18,6 +18,7 @@ import com.metrolist.music.constants.EnablePaxsenixKey
 import com.metrolist.music.constants.EnableZemerKey
 import com.metrolist.music.constants.LanguageCodeToName
 import com.metrolist.music.constants.LyricsProviderOrderKey
+import com.metrolist.music.constants.PauseListenHistoryKey
 import com.metrolist.music.constants.ProxyEnabledKey
 import com.metrolist.music.constants.ProxyPasswordKey
 import com.metrolist.music.constants.ProxyTypeKey
@@ -42,6 +43,7 @@ data class SettingsDto(
     val contentLanguage: String? = null,
     val contentCountry: String? = null,
     val proxy: ProxyDto? = null,
+    val reportHistory: Boolean? = null,
     val lyrics: LyricsSettingsDto? = null,
     val languages: List<OptionDto>? = null,
     val countries: List<OptionDto>? = null,
@@ -74,6 +76,9 @@ object Settings {
     suspend fun audioQuality(): AudioQuality =
         AudioQuality.entries.firstOrNull { it.name == prefs()[AudioQualityKey] } ?: AudioQuality.AUTO
 
+    /** Upstream stores the opposite ("pause listen history"); the default is to report. */
+    suspend fun reportHistory(): Boolean = prefs()[PauseListenHistoryKey] != true
+
     suspend fun lyricsOrder(): List<String> = LyricsProviderRegistry.deserializeProviderOrder(prefs()[LyricsProviderOrderKey].orEmpty())
 
     suspend fun get(): SettingsDto {
@@ -89,6 +94,7 @@ object Settings {
                 username = p[ProxyUsernameKey].orEmpty(),
                 password = p[ProxyPasswordKey].orEmpty(),
             ),
+            reportHistory = p[PauseListenHistoryKey] != true,
             lyrics = LyricsSettingsDto(
                 providers = LyricsProviderRegistry.getDefaultProviderOrder(),
                 enabled = LyricsProviderRegistry.providerNames.associateWith { LyricsProviderRegistry.getProviderByName(it)!!.isEnabled(Services.context) },
@@ -119,6 +125,7 @@ object Settings {
             req.audioQuality?.let { e[AudioQualityKey] = it }
             req.contentLanguage?.let { e[ContentLanguageKey] = it }
             req.contentCountry?.let { e[ContentCountryKey] = it }
+            req.reportHistory?.let { e[PauseListenHistoryKey] = !it }
             req.proxy?.let { p ->
                 p.enabled?.let { e[ProxyEnabledKey] = it }
                 p.type?.let { e[ProxyTypeKey] = it }

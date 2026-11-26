@@ -141,7 +141,8 @@ impl App {
         }
         let p = ui.painter();
         trunc(p, pos2(art.min.x, art.max.y + 16.), art.width(), &it.title, font_w(13., Weight::Medium), t.tx);
-        trunc(p, pos2(art.min.x, art.max.y + 33.), art.width(), it.subtitle.as_deref().unwrap_or(""), font(12.), t.tm);
+        let badge = if it.explicit && it.r#type == "song" { explicit_badge(p, pos2(art.min.x, art.max.y + 33.), if r.hovered() { t.s2 } else { t.s1 }, t.tm, 13.) } else { 0. };
+        trunc(p, pos2(art.min.x + badge, art.max.y + 33.), art.width() - badge, it.subtitle.as_deref().unwrap_or(""), font(12.), t.tm);
     }
 
     /// One titled, horizontally scrolling row of cards; arrows and edge fades show when more cards are off-screen.
@@ -224,10 +225,11 @@ impl App {
         ui.ctx().data_mut(|d| d.insert_temp(id, off));
         let (left, right) = (ui.ctx().animate_bool_with_time(id.with("fade-l"), off > 1., 0.15), ui.ctx().animate_bool_with_time(id.with("fade-r"), off < max_off - 1., 0.15));
         if left > 0. {
-            fade_h(&p, Rect::from_min_size(view.min, vec2(48., view.height())), t.s1.gamma_multiply(left), false);
+            // The fades run a pixel past the row: at a fractional edge the clip keeps a last column of the card, which would show as a line.
+            fade_h(&p, Rect::from_min_size(view.min - vec2(1., 0.), vec2(49., view.height())), t.s1.gamma_multiply(left), false);
         }
         if right > 0. {
-            fade_h(&p, Rect::from_min_max(pos2(view.max.x - 48., view.min.y), view.max), t.s1.gamma_multiply(right), true);
+            fade_h(&p, Rect::from_min_max(pos2(view.max.x - 48., view.min.y), view.max + vec2(1., 0.)), t.s1.gamma_multiply(right), true);
         }
     }
 
@@ -698,14 +700,15 @@ impl App {
     }
 
     /// Sign-in rows for each service, drawn inside the Settings page's Accounts panel (`card`).
-    pub fn accounts_panel(&mut self, ui: &mut egui::Ui, card: Rect, top: f32) {
+    /// Returns the height it used.
+    pub fn accounts_panel(&mut self, ui: &mut egui::Ui, card: Rect, top: f32) -> f32 {
         let (t, d) = (self.t, self.data.clone());
         d.status.ensure(ui.ctx(), || backend::get("/auth/status"));
         let g = d.status.lock();
         let st = match &*g {
             State::Ready(s) => s.clone(),
-            State::Failed(e) => return self.note(ui, card, top, e),
-            _ => return self.note(ui, card, top, "Connecting to the daemon…"),
+            State::Failed(e) => return self.note_h(ui, card, top, e),
+            _ => return self.note_h(ui, card, top, "Connecting to the daemon…"),
         };
         drop(g);
         let (busy, err) = d.busy.lock().unwrap().clone();
@@ -758,6 +761,13 @@ impl App {
         if let Some(e) = err {
             self.note(ui, card, top + 16. + 3. * 84. - 20., &e);
         }
+        3. * 84. + 12.
+    }
+
+    /// `note` for an offline panel; returns the height used.
+    fn note_h(&self, ui: &egui::Ui, card: Rect, top: f32, text: &str) -> f32 {
+        self.note(ui, card, top, text);
+        44.
     }
 
     /// Last.fm as a third connection beside YouTube Music and Spotify; its scrobbling options sit under the cards.

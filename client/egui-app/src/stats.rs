@@ -75,12 +75,22 @@ impl App {
                 }
                 (0..5).map(move |i| Rect::from_min_size(pos2(panel.min.x, panel.min.y + 52. + i as f32 * 48.), vec2(panel.width(), 48.)))
             };
-            let most = st.top_artists.first().map_or(1, |a| a.1) as f32;
-            for (i, (row, (name, n))) in rows(a, "Top artists", st.top_artists.is_empty()).zip(&st.top_artists).enumerate() {
+            let most = st.top_artists.first().map_or(1, |a| a.2) as f32;
+            for (i, (row, (name, id, n))) in rows(a, "Top artists", st.top_artists.is_empty()).zip(&st.top_artists).enumerate() {
                 let cy = row.center().y;
                 p.text(pos2(row.min.x + 22., cy), Align2::CENTER_CENTER, i + 1, font(13.), t.tf);
-                p.circle_filled(pos2(row.min.x + 56., cy), 16., t.axc);
-                p.text(pos2(row.min.x + 56., cy), Align2::CENTER_CENTER, name.chars().next().unwrap_or('?').to_uppercase().to_string(), font_w(12., Weight::Semi), t.tx);
+                // History only names artists: the picture comes from their page, or a search when no song gave their id.
+                let pic = match id {
+                    Some(id) => match &*d.detail(ui.ctx(), "artists", id).lock() {
+                        State::Ready(x) => x.item.thumbnail.clone(),
+                        _ => None,
+                    },
+                    None => match &*d.search_items(ui.ctx(), name, "artist").lock() {
+                        State::Ready(v) => v.iter().find(|a| a.title.eq_ignore_ascii_case(name)).and_then(|a| a.thumbnail.clone()),
+                        _ => None,
+                    },
+                };
+                self.avatar(ui, pic.as_deref(), pos2(row.min.x + 56., cy), 16., Some(name));
                 let (tx, tw) = (row.min.x + 80., row.width() - 80. - 80.);
                 trunc(&p, pos2(tx, cy - 7.), tw, name, font_w(13., Weight::Medium), t.tx);
                 let bar = Rect::from_min_size(pos2(tx, cy + 8.), vec2(tw, 3.));

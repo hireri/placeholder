@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicI32, AtomicU32};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -33,12 +33,12 @@ const OPUS_MAX_FRAME: usize = 5760;
 // Also bounds the longest crossfade: the old track's tail must still be in the ring when the next one is mixed over it.
 const RING_SECS: usize = 14;
 const POLL: Duration = Duration::from_millis(10);
-/// Upstream's BALANCED loudness level.
-const TARGET_LUFS: f32 = -14.;
+/// Default loudness target, in LUFS.
+const TARGET_LUFS: i8 = -14;
 
 /// Same clamp as upstream `normalizationGainMb`: -15 dB..+3 dB.
-fn normalize_gain(lufs: Option<f32>) -> f32 {
-    lufs.map_or(1., |l| 10f32.powf((TARGET_LUFS - l).clamp(-15., 3.) / 20.))
+fn normalize_gain(lufs: Option<f32>, target: f32) -> f32 {
+    lufs.map_or(1., |l| 10f32.powf((target - l).clamp(-15., 3.) / 20.))
 }
 
 const PAUSED_POLL: Duration = Duration::from_millis(250);
@@ -351,8 +351,8 @@ struct Session {
     resample: Option<Resample>,
     duration: Option<f32>,
     cache: (Arc<ChunkCache>, u64),
-    /// Linear gain that brings this track to `TARGET_LUFS`.
-    gain: f32,
+    /// Loudness YouTube reports for this track; the gain toward the target is derived from it.
+    lufs: Option<f32>,
 }
 
 impl Session {
@@ -382,7 +382,7 @@ impl Session {
                 .map_err(|e| e.to_string())?;
             Codec::Aac(Box::new(d))
         };
-        Ok(Session { reader, track_id, time_base, codec, tmp: Vec::new(), resample: None, duration, cache, gain: normalize_gain(info.loudness_lufs) })
+        Ok(Session { reader, track_id, time_base, codec, tmp: Vec::new(), resample: None, duration, cache, lufs: info.loudness_lufs })
     }
 
     /// Seeks the demuxer and decoder and rebases the ring to the actual landing time.
@@ -424,8 +424,11 @@ impl Session {
                 .get_or_insert_with(|| Resample::new(rate, shared.out_rate, shared.out_ch));
             let from = pending.len();
             rs.process(&self.tmp, ch, pending);
-            if self.gain != 1. && shared.normalize.load(Relaxed) {
-                pending[from..].iter_mut().for_each(|v| *v *= self.gain);
+            if shared.normalize.load(Relaxed) {
+                let gain = normalize_gain(self.lufs, shared.target.load(Relaxed) as f32);
+                if gain != 1. {
+                    pending[from..].iter_mut().for_each(|v| *v *= gain);
+                }
             }
             return Ok(true);
         }
@@ -491,6 +494,8 @@ struct Shared {
     crossfade: AtomicU32,
     gapless: AtomicBool,
     normalize: AtomicBool,
+    /// Loudness target in LUFS.
+    target: AtomicI32,
     /// Stream to continue into when the current one ends; see `Engine::queue_next`.
     next: Mutex<Option<StreamInfo>>,
     out_rate: u32,
@@ -776,6 +781,7 @@ impl Engine {
             crossfade: AtomicU32::new(0f32.to_bits()),
             gapless: AtomicBool::new(true),
             normalize: AtomicBool::new(true),
+            target: AtomicI32::new(TARGET_LUFS as i32),
             next: Mutex::new(None),
             out_rate,
             out_ch,
@@ -893,6 +899,10 @@ impl Engine {
         self.shared.normalize.store(on, Relaxed);
     }
 
+    pub fn set_target(&self, lufs: i8) {
+        self.shared.target.store(lufs as i32, Relaxed);
+    }
+
     pub fn set_gapless(&self, on: bool) {
         self.shared.gapless.store(on, Relaxed);
     }
@@ -971,10 +981,10 @@ mod tests {
 
     #[test]
     fn normalize_gain_targets_minus_14_and_clamps() {
-        assert_eq!(super::normalize_gain(None), 1.);
-        assert!((super::normalize_gain(Some(-14.)) - 1.).abs() < 1e-6);
-        assert!((super::normalize_gain(Some(-8.)) - 0.501).abs() < 0.01);
-        assert!((super::normalize_gain(Some(-40.)) - 1.413).abs() < 0.01);
+        assert_eq!(super::normalize_gain(None, -14.), 1.);
+        assert!((super::normalize_gain(Some(-14.), -14.) - 1.).abs() < 1e-6);
+        assert!((super::normalize_gain(Some(-8.), -14.) - 0.501).abs() < 0.01);
+        assert!((super::normalize_gain(Some(-40.), -14.) - 1.413).abs() < 0.01);
     }
 
     #[test]
@@ -989,6 +999,7 @@ mod tests {
             crossfade: AtomicU32::new(0),
             gapless: AtomicBool::new(true),
             normalize: AtomicBool::new(true),
+            target: std::sync::atomic::AtomicI32::new(-14),
             next: Mutex::new(None),
             out_rate: 4,
             out_ch: 1,

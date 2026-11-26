@@ -12,6 +12,8 @@ pub struct Lyrics {
     /// `(start seconds, text)`; starts are all 0 when `synced` is false.
     pub lines: Vec<(f32, String)>,
     pub synced: bool,
+    /// Romaji per line (empty string where a line is not Japanese); empty when not requested.
+    pub romaji: Vec<String>,
 }
 
 /// Same directory the daemon uses for its data (credentials, settings, webview profiles, daemon.log).
@@ -51,6 +53,11 @@ fn exe_dir() -> Option<std::path::PathBuf> {
     std::env::current_exe().ok().and_then(|p| p.parent().map(Into::into))
 }
 
+/// Hidden-webview helper the daemon uses to mint PoTokens; sits next to the executable like the login helper.
+fn potoken_helper() -> std::path::PathBuf {
+    exe_dir().map(|d| d.join(format!("serafin-potoken{}", std::env::consts::EXE_SUFFIX))).unwrap_or_default()
+}
+
 fn daemon_command() -> Command {
     let script = if cfg!(windows) { "daemon.bat" } else { "daemon" };
     let bundled = exe_dir().map(|d| d.join("daemon").join("bin").join(script)).filter(|p| p.exists());
@@ -82,7 +89,7 @@ fn daemon_command() -> Command {
 /// Blocking on first call: starts the daemon and reads its `{"port":..,"token":..}` handshake line.
 fn conn() -> Result<&'static (String, String), String> {
     CONN.get_or_init(|| {
-        let mut child = daemon_command().env("METROLIST_LOG", "1").stdout(Stdio::piped()).stderr(log_file()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
+        let mut child = daemon_command().env("METROLIST_LOG", "1").env("SERAFIN_POTOKEN_HELPER", potoken_helper()).stdout(Stdio::piped()).stderr(log_file()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).map_err(|e| e.to_string())?;
         if line.trim().is_empty() {
@@ -106,7 +113,7 @@ pub fn stop() {
 }
 
 /// Blocking; call from a worker thread. `Ok(None)` means no provider has lyrics.
-pub fn lyrics(id: &str, title: &str, artist: &str, duration: u32, album: &str) -> Result<Option<Lyrics>, String> {
+pub fn lyrics(id: &str, title: &str, artist: &str, duration: u32, album: &str, romaji: bool) -> Result<Option<Lyrics>, String> {
     let (url, token) = conn()?;
     let r = ureq::get(&format!("{url}/lyrics")).set("X-Metrolist-Token", token)
         .query("id", id).query("title", title).query("artist", artist).query("duration", &duration.to_string()).query("album", album).call();
@@ -115,7 +122,8 @@ pub fn lyrics(id: &str, title: &str, artist: &str, duration: u32, album: &str) -
             let v: serde_json::Value = r.into_json().map_err(|e| e.to_string())?;
             let (provider, lrc) = (v["provider"].as_str().unwrap_or_default(), v["lrc"].as_str().unwrap_or_default());
             let (lines, synced) = parse_lrc(lrc);
-            Ok(Some(Lyrics { provider: provider.into(), lines, synced }))
+            let romaji = if romaji { post_json("/romanize", &lines.iter().map(|l| &l.1).collect::<Vec<_>>()).unwrap_or_default() } else { vec![] };
+            Ok(Some(Lyrics { provider: provider.into(), lines, synced, romaji }))
         }
         Err(ureq::Error::Status(404, _)) => Ok(None),
         Err(e) => Err(e.to_string()),

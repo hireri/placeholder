@@ -356,25 +356,30 @@ pub struct Stats {
     pub songs: usize,
     pub artists: usize,
     pub secs: u32,
-    pub top_artists: Vec<(String, usize)>,
+    /// Name, browse id (known when they were a song's first artist) and plays.
+    pub top_artists: Vec<(String, Option<String>, usize)>,
     pub top_songs: Vec<(Item, usize)>,
 }
 
 impl Stats {
     pub fn new(sections: Vec<Section>) -> Self {
         let mut songs: HashMap<&str, (&Item, usize)> = HashMap::new();
-        let mut artists: HashMap<&str, usize> = HashMap::new();
+        let mut artists: HashMap<&str, (Option<&str>, usize)> = HashMap::new();
         let (mut plays, mut secs) = (0, 0);
         for it in sections.iter().flat_map(|s| &s.items).filter(|i| i.r#type == "song") {
             plays += 1;
             secs += it.duration_sec.unwrap_or(0);
             songs.entry(&it.id).or_insert((it, 0)).1 += 1;
-            for a in it.subtitle.as_deref().unwrap_or("").split(", ").filter(|a| !a.is_empty()) {
-                *artists.entry(a).or_default() += 1;
+            for (i, a) in it.subtitle.as_deref().unwrap_or("").split(", ").filter(|a| !a.is_empty()).enumerate() {
+                let e = artists.entry(a).or_default();
+                e.1 += 1;
+                if i == 0 && e.0.is_none() {
+                    e.0 = it.artist_id.as_deref();
+                }
             }
         }
-        let mut top_artists: Vec<(String, usize)> = artists.iter().map(|(k, n)| (k.to_string(), *n)).collect();
-        top_artists.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut top_artists: Vec<_> = artists.iter().map(|(k, (id, n))| (k.to_string(), id.map(String::from), *n)).collect();
+        top_artists.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
         top_artists.truncate(5);
         let (n_songs, n_artists) = (songs.len(), artists.len());
         let mut by_song: Vec<_> = songs.into_values().collect();

@@ -37,6 +37,7 @@ object Services {
 
     init {
         InnerTubeXPlayer.initialize(context)
+        PoToken.install()
     }
 
     suspend fun search(query: String): List<TrackDto> =
@@ -336,6 +337,12 @@ object Services {
     /** Subscribes or unsubscribes a channel (artist). */
     suspend fun subscribe(channelId: String, on: Boolean) {
         YouTube.subscribeChannel(channelId, on).getOrThrow()
+    }
+
+    /** Registers a play with YouTube so it enters the account history; a no-op when signed out or the setting is off. */
+    suspend fun registerPlayback(videoId: String) {
+        val on = Settings.reportHistory()
+        YouTube.registerPlayback(videoId, generateClientPlaybackNonce()) { on }.getOrThrow()
     }
 
     suspend fun history(): List<SectionDto> =

@@ -37,6 +37,7 @@ import java.io.InputStream
 import java.net.Proxy
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import timber.log.Timber
 
 /**
  * Compatibility facade that keeps Metrolist's parsed response models while InnerTubeX owns
@@ -167,6 +168,7 @@ class InnerTube(
                     writeTimeout(60, TimeUnit.SECONDS)
                     protocols(listOf(okhttp3.Protocol.HTTP_2, okhttp3.Protocol.HTTP_1_1))
                     retryOnConnectionFailure(true)
+                    addInterceptor(::logPlayabilityFailure)
                     cache(okhttp3.Cache(File(System.getProperty("java.io.tmpdir"), "http_cache"), 50L * 1024L * 1024L))
                     configuredProxy?.let(::proxy)
                     configuredProxyAuth?.let { auth ->
@@ -193,6 +195,32 @@ class InnerTube(
             }
         }
 
+    /** InnerTubeX only logs that a player client failed; this records why (status and reason, nothing else). */
+    private fun logPlayabilityFailure(chain: okhttp3.Interceptor.Chain): okhttp3.Response {
+        val response = chain.proceed(chain.request())
+        if ("/player" !in chain.request().url.encodedPath) return response
+        runCatching {
+            val raw = response.peekBody(512 * 1024).bytes()
+            // Ktor decodes content encoding above OkHttp, so the bytes seen here are still compressed.
+            val body =
+                if (response.header("Content-Encoding").equals("gzip", ignoreCase = true)) {
+                    val out = java.io.ByteArrayOutputStream()
+                    runCatching { java.util.zip.GZIPInputStream(raw.inputStream()).copyTo(out) } // a truncated tail throws; the head is enough
+                    out.toString(Charsets.UTF_8)
+                } else {
+                    String(raw, Charsets.UTF_8)
+                }
+            val status = Regex(""""playabilityStatus"\s*:\s*\{\s*"status"\s*:\s*"([A-Z_]+)"""").find(body)?.groupValues?.get(1)
+            if (status != null && status != "OK") {
+                val reason = Regex(""""reason"\s*:\s*"([^"]*)"""").find(body)?.groupValues?.get(1)
+                Timber.tag("PlayerResponse").w("player ${response.code} playability=$status reason=$reason")
+            } else if (status == null) {
+                Timber.tag("PlayerResponse").w("player ${response.code} without playabilityStatus")
+            }
+        }
+        return response
+    }
+
     suspend fun search(
         client: YouTubeClient,
         query: String? = null,
@@ -209,6 +237,28 @@ class InnerTube(
         poToken: String? = null,
     ) = innerTubeX.player(client, videoId, playlistId, signatureTimestamp, poToken)
 
+    private var stsCache: Pair<Long, Int>? = null
+
+    /**
+     * WEB_REMIX proves it runs YouTube's current player by quoting its signatureTimestamp; without one the player
+     * answers UNPLAYABLE and omits playbackTracking, so no play is ever registered. Android gets it from NewPipe.
+     * ponytail: plain URL fetch, ignores the proxy setting; route it through the HttpClient if proxy users need it.
+     */
+    private suspend fun signatureTimestamp(): Int? {
+        stsCache?.takeIf { System.currentTimeMillis() - it.first < 6 * 3_600_000L }?.let { return it.second }
+        return withContext(Dispatchers.IO) {
+            fun fetch(url: String) = java.net.URL(url).openConnection().run {
+                connectTimeout = 10_000
+                readTimeout = 15_000
+                getInputStream().bufferedReader().use { it.readText() }
+            }
+            runCatching {
+                val id = Regex("""player\\?/([0-9a-f]{8})""").find(fetch("https://www.youtube.com/iframe_api"))!!.groupValues[1]
+                Regex("""signatureTimestamp:(\d+)""").find(fetch("https://www.youtube.com/s/player/$id/player_ias.vflset/en_US/base.js"))!!.groupValues[1].toInt()
+            }.getOrNull()?.also { stsCache = System.currentTimeMillis() to it }
+        }
+    }
+
     suspend fun registerPlayback(
         videoId: String,
         cpn: String,
@@ -222,13 +272,13 @@ class InnerTube(
             client = YouTubeClient.WEB_REMIX,
             videoId = videoId,
             playlistId = null,
-            signatureTimestamp = null,
+            signatureTimestamp = signatureTimestamp(),
             poToken = null,
             requestVisitorData = null,
             requestSession = session,
         ).requireSuccess("playbackTracking").body<PlayerResponse>()
         val trackingUrl = requireNotNull(response.playbackTracking?.videostatsPlaybackUrl?.baseUrl) {
-            "No playback tracking URL returned"
+            "No playback tracking URL returned (${response.playabilityStatus.status}: ${response.playabilityStatus.reason})"
         }
         require(Url(trackingUrl).encodedPath == "/api/stats/playback") { "Invalid playback tracking URL" }
         if (transport !== innerTubeX || transport.sessionSnapshot() != session || !isHistoryEnabled()) return false

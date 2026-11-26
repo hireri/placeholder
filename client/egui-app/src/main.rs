@@ -7,6 +7,7 @@ mod about;
 mod app;
 mod audio;
 mod cache;
+mod history;
 mod scrobble;
 mod sleep;
 mod backend;
@@ -18,10 +19,12 @@ mod media;
 mod menu;
 mod page;
 mod palette;
+mod party;
 mod player;
 mod settings;
 mod stats;
 mod theme;
+mod tip;
 mod toast;
 mod tray;
 #[cfg(feature = "video")]
@@ -46,6 +49,12 @@ impl eframe::App for Carry {
         }
     }
 
+    fn logic(&mut self, ctx: &egui::Context, f: &mut eframe::Frame) {
+        if let Some(a) = self.0.borrow_mut().as_mut() {
+            eframe::App::logic(a, ctx, f);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, f: &mut eframe::Frame) {
         if let Some(a) = self.0.borrow_mut().as_mut() {
             eframe::App::ui(a, ui, f);
@@ -65,7 +74,7 @@ fn main() -> eframe::Result {
                 .with_title("Serafin")
                 .with_app_id("serafin")
                 .with_inner_size([1280., 800.])
-                .with_min_inner_size([800., 560.]),
+                .with_min_inner_size([800., 560.]), // grown with the interface scale by `settings::set_scale`
             ..Default::default()
         };
         let shared = app.clone();

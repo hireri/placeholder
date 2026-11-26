@@ -29,6 +29,14 @@ impl Sleep {
         hit
     }
 
+    /// Volume factor 0..=1: ramps down linearly over the last 30 s of a timed sleep.
+    pub fn fade(&self) -> f32 {
+        match self {
+            Sleep::At(t) => (t.saturating_duration_since(Instant::now()).as_secs_f32() / 30.).min(1.),
+            _ => 1.,
+        }
+    }
+
     /// Index into the settings control: Off, 15, 30, 60 minutes, end of song.
     pub fn slot(&self) -> usize {
         match self {

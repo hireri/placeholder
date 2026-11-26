@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 # glow (OpenGL) instead of the default wgpu: far lower idle RAM/VRAM for a 2D UI; no accesskit (system_fonts stays for CJK fallback; Inter has no CJK glyphs).
 eframe = { version = "0.37", default-features = false, features = ["persistence", "glow", "default_fonts", "system_fonts", "clipboard", "links", "wayland", "x11"] }
+# Same build as egui_system_font_provider uses, to look a font up by its family name.
+fontique = { version = "0.11", default-features = false, features = ["system", "fontconfig-dlopen"] }
 egui_extras = { version = "0.37", features = ["svg", "http", "image"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 serde_json.workspace = true
@@ -18,6 +20,9 @@ opus = "0.4"
 souvlaki = { version = "0.9", default-features = false, features = ["use_zbus"] }
 raw-window-handle = "0.6"
 discord-rich-presence = "1.1.0"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+prost = "0.14"
+flate2 = "1"
 
 [features]
 default = ["video"]

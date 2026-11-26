@@ -37,11 +37,11 @@ const SORTS: [(LibSort, &str); 3] = [(LibSort::Recents, "Recents"), (LibSort::Al
 const VIEWS: [(LibView, &str, &str); 4] =
     [(LibView::Compact, icon!("vc"), "Compact list"), (LibView::List, icon!("vl"), "List"), (LibView::Grid, icon!("vg"), "Grid of covers"), (LibView::Grid2, icon!("grid"), "Grid with titles")];
 
-const NAV: [(&str, &str, Route); 4] = [
-    ("Home", icon!("home"), Route::Home),
-    ("Downloads", icon!("imp"), Route::Downloads),
-    ("Local Music", icon!("dir"), Route::Local),
-    ("History & stats", icon!("hist"), Route::History),
+const NAV: [(&str, &str, &str, Route); 4] = [
+    ("Home", icon!("home"), icon!("homef"), Route::Home),
+    ("Downloads", icon!("imp"), icon!("impf"), Route::Downloads),
+    ("Local Music", icon!("dir"), icon!("dirf"), Route::Local),
+    ("History & stats", icon!("hist"), icon!("histf"), Route::History),
 ];
 const FILTERS: [&str; 4] = ["All", "Playlists", "Albums", "Artists"];
 
@@ -95,14 +95,14 @@ impl App {
         let mut y = rect.min.y + 12.;
 
         // Page nav: 4 rows, icon slot fixed 26px from the row's left edge.
-        for (i, (label, ic, route)) in NAV.iter().enumerate() {
+        for (i, (label, ic, icf, route)) in NAV.iter().enumerate() {
             let row = Rect::from_min_size(pos2(x0, y), vec2(x1 - x0, 38.));
             let on = self.route == *route;
             let col = if on { t.tx } else { t.tm };
             if tonal(ui, &t, ("nav", i), row, 10., on.then_some(t.axc)).clicked() {
                 self.go(*route);
             }
-            icon(ui, ic, pos2(row.min.x + 26., row.center().y), 18., col);
+            icon(ui, if on { icf } else { ic }, pos2(row.min.x + 26., row.center().y), 18., col);
             trunc(&p, pos2(row.min.x + 56., row.center().y), 160., label, if on { font_w(13., Weight::Medium) } else { font(13.) }, col.gamma_multiply(ta));
             y += 39.;
         }

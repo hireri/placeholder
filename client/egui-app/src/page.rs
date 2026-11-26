@@ -479,17 +479,19 @@ impl App {
             // The first artist links to its page; the rest of the credit follows in plain text.
             let first_artist = tk.artists.first().map_or("", String::as_str);
             let rest = if tk.artists.len() > 1 { format!(", {}", tk.artists[1..].join(", ")) } else { String::new() };
-            let fw = text_w(p, first_artist, font(13.)).min(cols[2].1);
-            let ar = Rect::from_min_size(pos2(cols[2].0, cy - 9.), vec2(fw, 18.));
+            let badge = if tk.explicit { explicit_badge(p, pos2(cols[2].0, cy), if hot || ix % 2 == 1 { band } else { t.s1 }, if dim { t.tf } else { t.tm }, 14.) } else { 0. };
+            let (ax0, aw) = (cols[2].0 + badge, (cols[2].1 - badge).max(0.));
+            let fw = text_w(p, first_artist, font(13.)).min(aw);
+            let ar = Rect::from_min_size(pos2(ax0, cy - 9.), vec2(fw, 18.));
             let link = !dim && tk.artist_id.is_some() && !first_artist.is_empty();
             let over = link && ui.rect_contains_pointer(ar);
             let p = ui.painter();
-            trunc(p, pos2(cols[2].0, cy), cols[2].1, first_artist, font(13.), if over { t.tx } else if dim { t.tf } else { t.tm });
+            trunc(p, pos2(ax0, cy), aw, first_artist, font(13.), if over { t.tx } else if dim { t.tf } else { t.tm });
             if over {
                 p.line_segment([ar.left_bottom() + vec2(0., -1.), ar.right_bottom() + vec2(0., -1.)], (1., t.tx));
             }
-            if fw < cols[2].1 - 8. {
-                trunc(p, pos2(cols[2].0 + fw, cy), cols[2].1 - fw, &rest, font(13.), if dim { t.tf } else { t.tm });
+            if fw < aw - 8. {
+                trunc(p, pos2(ax0 + fw, cy), aw - fw, &rest, font(13.), if dim { t.tf } else { t.tm });
             }
             if link && press(ui, (sid, "row-artist", ix), ar).clicked() {
                 a.artist = tk.artist_id.clone();

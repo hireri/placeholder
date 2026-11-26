@@ -4,6 +4,7 @@
 //! `animate_bool` (0..1) and every region is drawn into its own clipped child `Ui`. Contents of a
 //! collapsing sidebar keep their size and are simply clipped, as in the design mock.
 
+use crate::tip::Tip;
 use crate::audio;
 use crate::gfx::*;
 use crate::library::{LibItem, LibSort, LibView};
@@ -133,9 +134,13 @@ pub struct App {
     pub pl: Player,
     pub volume: f32,
     pub vol_open: bool,
+    mini_wheel: f32,
+    vol_wheel_at: f64,
     pub opts: Opts,
     /// Category shown on the Settings page.
     pub settings_tab: usize,
+    /// Text in the settings search box.
+    pub settings_q: String,
     /// Language or country list open on the Content tab.
     pub settings_pick: Option<crate::settings::Pick>,
     /// Proxy text fields (server, username, password), seeded from the daemon's settings once they load.
@@ -150,7 +155,19 @@ pub struct App {
     media: Option<Media>,
     discord: crate::discord::Discord,
     pub scrobbler: crate::scrobble::Scrobbler,
+    history: crate::history::History,
+    pub party: crate::party::Party,
+    /// Listening party popover: when it opened, the titlebar button it hangs from, and the code typed to join.
+    pub(crate) party_open: Option<f64>,
+    pub(crate) party_btn: Rect,
+    pub(crate) party_code: String,
+    /// Private session: Discord, YouTube history and Last.fm are paused. Never saved; the time is the last playback.
+    pub private: Option<std::time::Instant>,
     pub sleep: crate::sleep::Sleep,
+    /// The volume is currently lowered by the sleep fade.
+    faded: bool,
+    /// Last arrow-key seek: direction, when, and how many in a row (for progressive seek).
+    seek_run: (f32, f64, u32),
     started: bool,
     /// Playlist waiting on the delete popup: (id, label).
     delete_ask: Option<(String, String)>,
@@ -175,11 +192,14 @@ struct Prefs {
     volume: f32,
     opts: Opts,
     recents: Vec<String>,
+    /// Player modes, kept only while `opts.remember_modes` is on.
+    shuffle: bool,
+    repeat: u8,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, opts: Opts::default(), recents: Vec::new() }
+        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, opts: Opts::default(), recents: Vec::new(), shuffle: false, repeat: 0 }
     }
 }
 
@@ -219,16 +239,29 @@ pub fn anim(ctx: &Context, id: &str, on: bool) -> f32 {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install(&cc.egui_ctx);
-        let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, PREFS)).unwrap_or_default();
+        let mut prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, PREFS)).unwrap_or_default();
+        prefs.opts.sanitize();
         let volume = prefs.volume.clamp(0., 1.);
         let mut pl = Player::new(audio::Engine::new(crate::tray::wake));
         let media = Media::new(crate::tray::wake, os_window(cc));
         pl.engine.set_volume(volume);
         pl.endless = prefs.opts.endless;
+        pl.no_dupes = prefs.opts.no_dupes;
+        if prefs.opts.remember_modes {
+            (pl.shuffle, pl.repeat) = (prefs.shuffle, prefs.repeat);
+        }
+        pl.set_romaji(prefs.opts.romaji);
+        if !prefs.opts.font.is_empty() {
+            set_fonts(&cc.egui_ctx, &prefs.opts.font);
+        }
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        crate::settings::set_scale(&cc.egui_ctx, prefs.opts.ui_scale);
+        crate::settings::set_scroll_speed(&cc.egui_ctx, prefs.opts.scroll_speed);
         pl.engine.set_crossfade(prefs.opts.crossfade as f32);
         pl.engine.set_gapless(prefs.opts.gapless);
         crate::cache::set_limit_mb(prefs.opts.cache_mb);
         pl.engine.set_normalize(prefs.opts.normalize);
+        pl.engine.set_target(prefs.opts.target_lufs);
         crate::data::HIDE_EXPLICIT.store(prefs.opts.hide_explicit, std::sync::atomic::Ordering::Relaxed);
         crate::data::HIDE_VIDEO.store(prefs.opts.hide_video, std::sync::atomic::Ordering::Relaxed);
         let t = Theme::idle(true);
@@ -274,8 +307,11 @@ impl App {
             pl,
             volume,
             vol_open: false,
-            opts: prefs.opts,
+            mini_wheel: 0.,
+            vol_wheel_at: f64::NEG_INFINITY,
+            opts: prefs.opts.clone(),
             settings_tab: 0,
+            settings_q: String::new(),
             settings_pick: None,
             proxy_buf: None,
             video_on: prefs.opts.video,
@@ -285,7 +321,15 @@ impl App {
             media,
             discord: crate::discord::Discord::new(),
             scrobbler: Default::default(),
+            history: Default::default(),
+            party: Default::default(),
+            party_open: None,
+            party_btn: Rect::NOTHING,
+            party_code: String::new(),
+            private: None,
             sleep: Default::default(),
+            faded: false,
+            seek_run: (0., f64::NEG_INFINITY, 0),
             started: false,
             delete_ask: None,
             lfm_buf: None,
@@ -301,14 +345,14 @@ impl App {
 
     /// Name of the first signed-in account, if any.
     /// The signed-in YouTube Music profile as (avatar, name).
-    fn youtube_user(&self) -> Option<(Option<String>, String)> {
+    pub(crate) fn youtube_user(&self) -> Option<(Option<String>, String)> {
         match &*self.data.status.lock() {
             State::Ready(s) if s.youtube.logged_in => s.youtube.user.as_ref().map(|u| (u.avatar_url.clone(), u.name.clone())),
             _ => None,
         }
     }
 
-    fn user_name(&self) -> Option<String> {
+    pub(crate) fn user_name(&self) -> Option<String> {
         match &*self.data.status.lock() {
             State::Ready(s) => [&s.youtube, &s.spotify].into_iter().filter(|s| s.logged_in).find_map(|s| s.user.as_ref().map(|u| u.name.clone())),
             _ => None,
@@ -343,7 +387,7 @@ impl App {
             if self.me_menu.is_some() {
                 self.me_menu = None;
             } else {
-                (self.palette, self.ctx_menu, self.lib_menu, self.vol_open) = (None, None, false, false);
+                (self.palette, self.ctx_menu, self.lib_menu, self.vol_open, self.party_open) = (None, None, false, false, None);
                 self.me_menu = Some(ctx.input(|i| i.time));
             }
         } else if self.me_menu.is_some() {
@@ -351,7 +395,14 @@ impl App {
         }
         self.avatar(ui, user.as_ref().and_then(|u| u.0.as_deref()), pos2(me.min.x + 16., cy), 13., user.as_ref().map(|u| u.1.as_str()));
         trunc(&p, pos2(me.min.x + 37., cy), 100., &name, font(13.), t.tx);
-        self.island(ui, me.min.x - 6., cy);
+        if self.private.is_some() {
+            let c = pos2(me.min.x + 25., cy + 9.);
+            p.circle_filled(c, 8., t.s2);
+            p.circle_filled(c, 6.5, t.ax);
+            icon(ui, icon!("lock"), c, 9., t.on_ax);
+        }
+        self.party_button(ui, pos2(me.min.x - 6. - 16., cy));
+        self.island(ui, me.min.x - 6. - 32. - 4., cy);
 
         // Middle: a search pill centred on the window whatever the clusters beside it do. It only opens the palette.
         let w = (tb.width() - 640.).clamp(140., 300.);
@@ -364,9 +415,10 @@ impl App {
         p.rect_filled(pill, rad(16.), t.s2.lerp_to_gamma(t.s3, hot));
         icon(ui, icon!("search"), pos2(pill.min.x + 20., cy), 16., t.tm);
         let (kbd, kf) = ("Ctrl K", egui::FontId::monospace(10.5));
+        let searched = self.route == Route::Search && !self.submitted.is_empty();
         let kw = text_w(&p, kbd, kf.clone());
         p.text(pos2(pill.max.x - 12., cy), egui::Align2::RIGHT_CENTER, kbd, kf, t.tf);
-        trunc(&p, pos2(pill.min.x + 36., cy), pill.max.x - 12. - kw - 8. - (pill.min.x + 36.), "Search or run a command", font(13.), t.tm);
+        trunc(&p, pos2(pill.min.x + 36., cy), pill.max.x - 12. - kw - 8. - (pill.min.x + 36.), if searched { &self.submitted } else { "Search or run a command" }, font(13.), if searched { t.tx } else { t.tm });
         if r.clicked() {
             self.open_palette(&ctx);
         }
@@ -401,7 +453,7 @@ impl App {
         let p = ui.painter().clone();
         let on = if st == IslState::Idle { 0. } else { 1. };
         let spring = |x| bezier(0.16, 1., 0.3, 1., x);
-        // Digits measure as 8s so the island holds still while the count ticks (Inter's digits are proportional).
+        // Digits measure as 8s so the island holds still while the count ticks (Allo's digits are proportional).
         let probe: String = self.isl.label.chars().map(|c| if c.is_ascii_digit() { '8' } else { c }).collect();
         let lw = text_w(&p, &probe, font(12.));
         let full = 32. + lw + if self.isl.bar { 8. + 44. } else { 0. } + 12.;
@@ -419,7 +471,7 @@ impl App {
 
         // Bell, import arrow and check cross-fade in place, each scaling up from 0.6.
         let c = pos2(rect.min.x + 16., cy);
-        for (i, (uri, shown)) in [(icon!("bell"), IslState::Idle), (icon!("imp"), IslState::Import), (icon!("check"), IslState::Done)].into_iter().enumerate() {
+        for (i, (uri, shown)) in [(icon!("bell"), IslState::Idle), (icon!("impf"), IslState::Import), (icon!("check"), IslState::Done)].into_iter().enumerate() {
             let to = (st == shown) as u8 as f32;
             let (a, s) = (tween(&ctx, Id::unique(("isl-a", i)), to, 0.16, ease_out), tween(&ctx, Id::unique(("isl-s", i)), to, 0.28, spring));
             if a > 0.01 {
@@ -451,7 +503,7 @@ impl App {
         }
 
         let clicked = resp.clicked();
-        resp.on_hover_text(match st {
+        resp.tip(&t, match st {
             IslState::Idle => "Notifications",
             IslState::Import => "Importing from Spotify",
             IslState::Done => "Spotify import complete",
@@ -478,15 +530,16 @@ impl App {
         if k < 1. {
             ctx.request_repaint();
         }
-        const ITEMS: [(&str, Option<&str>); 4] = [("Settings", Some(icon!("gear"))), ("Accounts", None), ("Keyboard shortcuts", None), ("Spotify import", None)];
+        const ITEMS: [(&str, &str); 4] = [("Settings", icon!("mgear")), ("Accounts", icon!("macct")), ("Keyboard shortcuts", icon!("mkeys")), ("Spotify import", icon!("mspot"))];
         let scr = ctx.content_rect();
-        let rect = Rect::from_min_size(pos2(scr.max.x - 12. - 220., scr.min.y + 48. + 6. * (1. - k)), vec2(220., 6. + 52. + ITEMS.len() as f32 * 35. - 1. + 6.));
+        let rect = Rect::from_min_size(pos2(scr.max.x - 12. - 220., scr.min.y + 48. + 6. * (1. - k)), vec2(220., 6. + 52. + (ITEMS.len() + 1) as f32 * 35. - 1. + 6.));
         let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p) && !self.me_btn.contains(p)));
         if outside {
             self.me_menu = None;
             return;
         }
         let mut picked = None;
+        let mut private = self.private.is_some();
         egui::Area::new(Id::unique("me-menu")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
             ui.set_opacity(k);
             ui.allocate_rect(rect, egui::Sense::click()); // clicks on the menu must not reach what lies beneath
@@ -503,20 +556,25 @@ impl App {
                     ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                     p.rect_filled(r, rad(8.), t.s3);
                 }
-                trunc(&p, pos2(r.min.x + 10., r.center().y), r.width() - 20. - 24., label, font(13.), t.tx);
-                if let Some(ic) = ic {
-                    icon(ui, ic, pos2(r.max.x - 10. - 8., r.center().y), 16., t.tm);
-                }
+                icon(ui, ic, pos2(r.min.x + 19., r.center().y), 16., t.tm);
+                trunc(&p, pos2(r.min.x + 36., r.center().y), r.width() - 46., label, font(13.), t.tx);
                 if resp.clicked() {
                     picked = Some(i);
                 }
             }
+            let y = rect.min.y + 6. + 52. + ITEMS.len() as f32 * 35.;
+            icon(ui, icon!("mpriv"), pos2(rect.min.x + 25., y + 17.), 16., t.tm);
+            trunc(&p, pos2(rect.min.x + 42., y + 17.), rect.width() - 42. - 16. - 48., "Private session", font(13.), t.tx);
+            crate::settings::toggle(ui, &t, "me-private", rect.max.x - 16., y + 17., &mut private);
         });
+        if private != self.private.is_some() {
+            self.private = private.then(std::time::Instant::now);
+        }
         let Some(i) = picked else { return };
         self.me_menu = None;
         match i {
             0 | 1 | 2 => {
-                self.settings_tab = [crate::settings::APPEARANCE, crate::settings::ACCOUNTS, crate::settings::KEYS][i];
+                (self.settings_tab, self.settings_q) = ([crate::settings::APPEARANCE, crate::settings::ACCOUNTS, crate::settings::KEYS][i], String::new());
                 self.go(Route::Settings);
             }
             _ => self.go(Route::Import),
@@ -531,6 +589,8 @@ impl App {
         let rect = Rect::from_min_size(pos2(full.center().x - w / 2., full.max.y - 14. - h + rise), vec2(w, h));
         let ui = &mut Self::region(ui, full);
         ui.set_opacity(shown);
+        // Registered before the buttons so it sits above the page but below them: swallows clicks on the bar's background.
+        ui.interact(rect, ui.scope_id().with("mini-block"), egui::Sense::click_and_drag());
         let p = ui.painter().clone();
         shadow(&p, rect, 32., 10, 28, 82);
         p.rect_filled(rect, rad(32.), t.s2);
@@ -539,11 +599,11 @@ impl App {
         // Transport: shuffle, prev, play, next, repeat, endless.
         let x0 = rect.min.x + 40.;
         let play = if self.pl.playing { icon!("pause") } else { icon!("play") };
-        for (i, (ic, s)) in [(icon!("shuf"), 16.), (icon!("rw"), 18.), (play, 24.), (icon!("ff"), 18.), (icon!("rep"), 16.), (icon!("inf"), 18.)].into_iter().enumerate() {
+        for (i, (ic, s)) in [(icon!("shuf"), 16.), (icon!("rw"), 18.), (play, 24.), (icon!("ff"), 18.), (if self.pl.repeat == 2 { icon!("rep1") } else { icon!("rep") }, 16.), (icon!("inf"), 18.)].into_iter().enumerate() {
             let c = pos2(x0 + i as f32 * 40., tc);
             let on = match i {
                 0 => self.pl.shuffle,
-                4 => self.pl.repeat,
+                4 => self.pl.repeat != 0,
                 5 => self.pl.endless,
                 _ => true,
             };
@@ -577,15 +637,34 @@ impl App {
         if glass_button(ui, &t, "mini-fav", at(0), 36., if self.pl.liked { icon!("starf") } else { icon!("star") }, 18., if self.pl.liked { t.ax } else { t.tx }).clicked() {
             self.pl.set_like(ui.ctx());
         }
-        if glass_button(ui, &t, "mini-lyr", at(1), 36., icon!("lyr"), 18., t.tx).clicked() {
+        if glass_button(ui, &t, "mini-lyr", at(1), 36., icon!("lyrf"), 18., t.tx).clicked() {
             self.set_player(Some(PlayerView::Lyrics));
         }
-        if glass_button(ui, &t, "mini-que", at(2), 36., icon!("que"), 18., t.tx).clicked() {
+        if glass_button(ui, &t, "mini-que", at(2), 36., icon!("quef"), 18., t.tx).clicked() {
             self.set_player(Some(PlayerView::Queue));
         }
         let vol_btn = Rect::from_center_size(at(3), vec2(36., 36.));
-        if glass_button(ui, &t, "mini-vol", at(3), 36., if self.volume < 0.35 { icon!("vlo") } else { icon!("vhi") }, 18., t.tx).clicked() {
+        let vol_resp = glass_button(ui, &t, "mini-vol", at(3), 36., if self.volume < 0.35 { icon!("vlo") } else { icon!("vhi") }, 18., t.tx);
+        if vol_resp.clicked() {
             self.vol_open = !self.vol_open;
+        }
+        let pop = Rect::from_center_size(pos2(vol_btn.center().x, rect.min.y - 8. - 70.), vec2(44., 140.));
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        let wheel = std::mem::take(&mut self.mini_wheel);
+        if wheel != 0. && hover.is_some_and(|h| vol_btn.contains(h) || (self.vol_open && pop.contains(h))) {
+            self.volume = (self.volume + wheel * 40. / self.opts.scroll_speed as f32 / 1000.).clamp(0., 1.);
+            self.push_volume();
+        }
+        let pct = format!("{}", (self.volume * 100.).round());
+        if wheel != 0. {
+            self.vol_wheel_at = ui.input(|i| i.time);
+        }
+        let scrolling = ui.input(|i| i.time) - self.vol_wheel_at < 0.8;
+        if !self.vol_open {
+            crate::tip::tip(&vol_resp, &t, &pct, scrolling && vol_btn.contains(hover.unwrap_or_default()));
+            if scrolling {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            }
         }
 
         // Track: cover + title/artist over a thin progress line; opens the sidebar.
@@ -604,19 +683,18 @@ impl App {
         p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * self.pl.frac(), bar.height())), rad(1.), t.tx);
 
         // Volume popup: vertical slider above the button. Its button toggles it; it closes once the pointer leaves both (not while dragging).
-        let pop = Rect::from_center_size(pos2(vol_btn.center().x, rect.min.y - 8. - 70.), vec2(44., 140.));
-        let hover = ui.input(|i| i.pointer.hover_pos());
         let down = ui.input(|i| i.pointer.primary_down());
         let away = !hover.is_some_and(|h| vol_btn.union(pop).expand(4.).contains(h)) && !down;
         self.vol_open = shown > 0.9 && self.vol_open && !away;
         if self.vol_open {
             shadow(&p, pop, 22., 6, 20, 70);
             p.rect_filled(pop, rad(22.), t.s2);
-            let track = Rect::from_x_y_ranges(pop.center().x - 2.0..=pop.center().x + 2.0, pop.min.y + 16.0..=pop.max.y - 16.0);
+            let track = Rect::from_x_y_ranges(pop.center().x - 2.0..=pop.center().x + 2.0, pop.min.y + 16.0..=pop.max.y - 34.0);
+            p.text(pos2(pop.center().x, pop.max.y - 16.), egui::Align2::CENTER_CENTER, &pct, font_w(11., Weight::Medium), t.tm);
             let r = ui.interact(track.expand2(vec2(14., 8.)), ui.scope_id().with("mini-vol-slider"), egui::Sense::click_and_drag());
             if let (true, Some(pt)) = (r.is_pointer_button_down_on(), r.interact_pointer_pos()) {
                 self.volume = ((track.max.y - pt.y) / track.height()).clamp(0., 1.);
-                self.pl.engine.set_volume(self.volume);
+                self.push_volume();
             }
             p.rect_filled(track, rad(2.), t.s3);
             p.rect_filled(Rect::from_min_max(pos2(track.min.x, track.max.y - track.height() * self.volume), track.max), rad(2.), t.tx);
@@ -690,12 +768,22 @@ impl App {
         self.custom_seen = crate::theme::mtime();
     }
 
+    /// Sleep-timer fade factor: 1 unless the fade is on and the timer is in its last seconds.
+    pub fn fade(&self) -> f32 {
+        if self.opts.sleep_fade { self.sleep.fade() } else { 1. }
+    }
+
+    /// Sends the user's volume to the engine, lowered by the sleep fade.
+    fn push_volume(&self) {
+        self.pl.engine.set_volume(self.volume * self.fade());
+    }
+
     /// Makes `l` the current page and returns the one it replaced.
     fn restore(&mut self, l: Loc) -> Loc {
         let was = self.here();
         if l.route == Route::Settings && self.route != Route::Settings {
             // Refetch the daemon's settings each time the page opens.
-            (self.settings_pick, self.proxy_buf, self.lfm_buf) = (None, None, None);
+            (self.settings_pick, self.proxy_buf, self.lfm_buf, self.settings_q) = (None, None, None, String::new());
             self.reload_custom();
             self.data.settings.reset();
         }
@@ -790,6 +878,8 @@ impl App {
     pub fn rebind(&mut self, cc: &eframe::CreationContext<'_>) {
         install(&cc.egui_ctx);
         visuals(&cc.egui_ctx, &self.t);
+        crate::settings::set_scale(&cc.egui_ctx, self.opts.ui_scale);
+        crate::settings::set_scroll_speed(&cc.egui_ctx, self.opts.scroll_speed);
         self.g = Gfx::new();
         #[cfg(feature = "video")]
         {
@@ -840,7 +930,9 @@ impl App {
     pub fn headless(&mut self, ctx: &Context) {
         self.pl.tick(ctx);
         if let Some((t, on)) = self.pl.like_event.take() {
-            self.scrobbler.love(ctx, &t, on);
+            if self.private.is_none() {
+                self.scrobbler.love(ctx, &t, on);
+            }
             self.data.mirror_like(t, on);
         }
         self.resolve_play(ctx);
@@ -849,15 +941,32 @@ impl App {
 
     /// Mirrors the current song to the OS controls and applies their commands. Runs every frame, also while the sidebar is collapsed.
     fn sync_media(&mut self, ctx: &Context) {
+        self.party_tick(ctx);
         let mut cmds = crate::tray::take_cmds();
+        if let Some(t) = &mut self.private {
+            if self.pl.playing {
+                *t = std::time::Instant::now();
+            } else if t.elapsed().as_secs() > 6 * 3600 {
+                self.private = None;
+            }
+        }
+        let private = self.private.is_some();
         let (dur, now) = (self.pl.dur(), self.pl.song());
-        self.scrobbler.update(ctx, now.map(|s| (s.title.as_str(), s.artist.as_str(), s.album.as_str())), self.pl.playing, self.pl.pos, dur);
+        let shared = now.filter(|_| !private);
+        self.scrobbler.update(ctx, shared.map(|s| (s.title.as_str(), s.artist.as_str(), s.album.as_str())), self.pl.playing, self.pl.pos, dur);
+        self.history.update(shared.map(|s| s.vid()), self.pl.playing);
         if self.sleep.due(now.map(|s| (s.title.as_str(), s.artist.as_str()))) && self.pl.playing {
             self.pl.toggle(ctx);
         }
+        let fade = self.fade();
+        if fade < 1. || self.faded {
+            self.pl.engine.set_volume(self.volume * fade);
+            self.faded = fade < 1.;
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
         let cover = self.pl.song().and_then(|s| s.thumbnail.as_deref().map(|u| sized_url(u, 544)));
         let song = self.pl.song().map(|s| (s.title.as_str(), s.artist.as_str(), cover.as_deref()));
-        if self.opts.discord {
+        if self.opts.discord && !private {
             self.discord.update(song, self.pl.playing, self.pl.pos, self.pl.dur());
         } else {
             self.discord.clear();
@@ -886,7 +995,7 @@ impl App {
                 Cmd::SeekBy(by) => self.pl.seek((self.pl.pos + by).max(0.)),
                 Cmd::SetVolume(v) => {
                     self.volume = v.clamp(0., 1.);
-                    self.pl.engine.set_volume(self.volume);
+                    self.push_volume();
                 }
                 _ => {}
             }
@@ -974,16 +1083,23 @@ impl App {
         if hit(alt, Key::ArrowRight) {
             self.forward();
         }
-        for (k, by) in [(Key::ArrowRight, 5.), (Key::ArrowLeft, -5.)] {
+        let step = self.opts.seek_step as f32;
+        for (k, by) in [(Key::ArrowRight, step), (Key::ArrowLeft, -step)] {
             if hit(Modifiers::NONE, k) {
                 let end = self.pl.dur();
+                let now = ctx.input(|i| i.time);
+                let (dir, at, n) = self.seek_run;
+                let n = if by.signum() == dir && now - at < 1.5 { n + 1 } else { 0 };
+                self.seek_run = (by.signum(), now, n);
+                let by = if self.opts.progressive_seek { by + by.signum() * (n as f32 * 5.).min(60. - by.abs()).max(0.) } else { by };
                 self.pl.seek((self.pl.pos + by).clamp(0., if end > 0. { end } else { f32::MAX }));
             }
         }
-        for (k, by) in [(Key::ArrowUp, 0.05), (Key::ArrowDown, -0.05)] {
+        let step = self.opts.vol_step as f32 / 100.;
+        for (k, by) in [(Key::ArrowUp, step), (Key::ArrowDown, -step)] {
             if hit(ctrl, k) {
                 self.volume = (self.volume + by).clamp(0., 1.);
-                self.pl.engine.set_volume(self.volume);
+                self.push_volume();
             }
         }
         if hit(ctrl, Key::S) {
@@ -1023,7 +1139,7 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, opts: self.opts, recents: self.recents.clone() };
+        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, opts: self.opts.clone(), recents: self.recents.clone(), shuffle: self.opts.remember_modes && self.pl.shuffle, repeat: if self.opts.remember_modes { self.pl.repeat } else { 0 } };
         eframe::set_value(storage, PREFS, &p);
     }
 
@@ -1031,18 +1147,18 @@ impl eframe::App for App {
         crate::backend::stop();
     }
 
+    /// Runs before `ui` every frame, and alone when the compositor withholds frames from an unfocused window (Wayland),
+    /// so media keys and playback keep working there.
+    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.headless(ctx);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let full = ui.max_rect();
-        if ctx.input(|i| i.viewport().close_requested()) && crate::tray::hide_on_close() {
+        if ctx.input(|i| i.viewport().close_requested()) && self.opts.close_tray && crate::tray::hide_on_close() {
             crate::tray::hide(&ctx);
         }
-        self.pl.tick(&ctx);
-        if let Some((t, on)) = self.pl.like_event.take() {
-            self.scrobbler.love(&ctx, &t, on);
-            self.data.mirror_like(t, on);
-        }
-        self.resolve_play(&ctx);
         crate::gfx::trim_covers(&ctx);
         self.follow_track(&ctx);
         self.palette_toggle(&ctx);
@@ -1055,7 +1171,6 @@ impl eframe::App for App {
             ctx.memory_mut(|m| m.stop_text_input());
         }
 
-        self.sync_media(&ctx);
         // Mouse back/forward buttons work everywhere, also while a text field has focus.
         let (b4, b5) = ctx.input(|i| (i.pointer.button_pressed(PointerButton::Extra1), i.pointer.button_pressed(PointerButton::Extra2)));
         if b4 {
@@ -1077,6 +1192,15 @@ impl eframe::App for App {
         let pl_r = Rect::from_min_size(pos2(body.max.x - self.player_w + (1. - pl_t) * (self.player_w - PEEK_W - 10.), body.min.y), vec2(self.player_w, body.height()));
         let page_r = Rect::from_min_max(pos2(lib_r.max.x, body.min.y), pos2(pl_r.min.x, body.max.y - 10.));
 
+        if pl_t < 1. {
+            // The floating player owns the wheel over itself (and its volume popup); keep it from scrolling the page underneath.
+            let (w, h) = ((full.width() - 32.).min(760.), 64.);
+            let bar = Rect::from_min_size(pos2(full.center().x - w / 2., full.max.y - 14. - h), vec2(w, h));
+            let zone = if self.vol_open { bar.union(Rect::from_min_max(pos2(bar.max.x - 80., bar.min.y - 160.), bar.max)) } else { bar };
+            if ctx.input(|i| i.pointer.hover_pos()).is_some_and(|h| zone.contains(h)) {
+                self.mini_wheel = ctx.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta).y);
+            }
+        }
         self.library(ui, lib_r, lib_t);
         self.page(ui, page_r);
         if self.lib_open && lib_t > 0.99 {
@@ -1116,6 +1240,7 @@ impl eframe::App for App {
         crate::toast::show(&ctx, &self.t, (1. - pl_t) * 82.);
         self.context_menu(&ctx);
         self.me_dropdown(&ctx);
+        self.party_popover(&ctx);
         self.palette(&ctx);
         self.delete_modal(&ctx);
     }

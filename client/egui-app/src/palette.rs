@@ -40,10 +40,10 @@ const fn e(section: &'static str, label: &'static str, hint: &'static str, icon:
 const GO: &str = "Go to";
 const CMD: &str = "Commands";
 const ENTRIES: &[Entry] = &[
-    e(GO, "Home", "", icon!("home"), Act::Go(Route::Home)),
-    e(GO, "Downloads", "", icon!("imp"), Act::Go(Route::Downloads)),
-    e(GO, "Local Music", "", icon!("dir"), Act::Go(Route::Local)),
-    e(GO, "History & stats", "", icon!("hist"), Act::Go(Route::History)),
+    e(GO, "Home", "", icon!("homef"), Act::Go(Route::Home)),
+    e(GO, "Downloads", "", icon!("impf"), Act::Go(Route::Downloads)),
+    e(GO, "Local Music", "", icon!("dirf"), Act::Go(Route::Local)),
+    e(GO, "History & stats", "", icon!("histf"), Act::Go(Route::History)),
     e(GO, "Settings", "", icon!("gear"), Act::Settings),
     e(CMD, "Show or hide the player", "Ctrl P", icon!("colr"), Act::Player),
     e(CMD, "Collapse or expand the library", "Ctrl B", icon!("col"), Act::Library),
@@ -53,14 +53,19 @@ const ENTRIES: &[Entry] = &[
     e(CMD, "Shuffle", "Ctrl S", icon!("shuf"), Act::Shuffle),
     e(CMD, "Repeat", "Ctrl R", icon!("rep"), Act::Repeat),
     e(CMD, "Like current song", "Ctrl L", icon!("star"), Act::Like),
-    e(CMD, "Show lyrics", "Ctrl 2", icon!("lyr"), Act::View(PlayerView::Lyrics)),
-    e(CMD, "Show queue", "Ctrl 3", icon!("que"), Act::View(PlayerView::Queue)),
+    e(CMD, "Show lyrics", "Ctrl 2", icon!("lyrf"), Act::View(PlayerView::Lyrics)),
+    e(CMD, "Show queue", "Ctrl 3", icon!("quef"), Act::View(PlayerView::Queue)),
 ];
 
 /// Open palette: the text typed, the highlighted row and what is animating.
 pub struct State {
+    /// What the input shows; differs from `base` while an arrow-key highlight previews a recent search or completion.
     query: String,
+    /// What the user typed: the list is built and fetched from this.
+    base: String,
     sel: usize,
+    /// Arrow keys were used since the last edit; until then the highlight follows the "Search for" row.
+    moved: bool,
     opened: f64,
     /// Set when it was dismissed: it fades out over `CLOSE` seconds and is then dropped.
     closing: Option<f64>,
@@ -73,8 +78,8 @@ pub struct State {
 }
 
 impl State {
-    fn new(now: f64) -> Self {
-        State { query: String::new(), sel: 0, opened: now, closing: None, typed: now, last: None, gone: None }
+    fn new(now: f64, query: String) -> Self {
+        State { base: query.clone(), query, sel: 0, moved: false, opened: now, closing: None, typed: now, last: None, gone: None }
     }
 }
 
@@ -127,16 +132,15 @@ fn build(query: &str, recents: &[String], sugg: Option<&Suggest>) -> Vec<Line> {
         push_entries(&mut lines, ENTRIES.iter().collect());
         return lines;
     }
+    if let Some(items) = sugg.map(|s| s.items.iter().take(3).collect::<Vec<_>>()).filter(|v| !v.is_empty()) {
+        lines.push(Line::Head("Songs, albums and artists"));
+        lines.extend(items.into_iter().map(|i| Line::Row(Kind::Entity(i.clone()))));
+    }
     lines.push(Line::Head("Search YouTube Music"));
     lines.push(Line::Row(Kind::Search(q.to_string())));
     if let Some(s) = sugg {
         let ql = q.to_lowercase();
         lines.extend(s.queries.iter().filter(|c| c.to_lowercase() != ql).take(3).map(|c| Line::Row(Kind::Complete(c.clone()))));
-        let items: Vec<_> = s.items.iter().take(3).collect();
-        if !items.is_empty() {
-            lines.push(Line::Head("Songs, albums and artists"));
-            lines.extend(items.into_iter().map(|i| Line::Row(Kind::Entity(i.clone()))));
-        }
     }
     push_entries(&mut lines, filter(q));
     lines
@@ -210,7 +214,13 @@ impl App {
         self.ctx_menu = None;
         self.lib_menu = false;
         self.vol_open = false;
-        self.palette = Some(State::new(ctx.input(|i| i.time)));
+        // On the Search page it reopens on the query shown there, selected so typing replaces it.
+        let query = if self.route == Route::Search { self.submitted.clone() } else { String::new() };
+        let id = Id::unique("palette-input");
+        let mut edit = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        edit.cursor.set_char_range(Some(egui::text::CCursorRange::select_all_str(&query)));
+        edit.store(ctx, id);
+        self.palette = Some(State::new(ctx.input(|i| i.time), query));
     }
 
     /// Ctrl/Cmd+K opens or closes the palette. Runs before `keys`, so it also works while a text field has focus.
@@ -224,6 +234,9 @@ impl App {
     }
 
     fn remember_search(&mut self, q: &str) {
+        if !self.opts.keep_search {
+            return;
+        }
         self.recents.retain(|s| s != q);
         self.recents.insert(0, q.to_string());
         self.recents.truncate(RECENTS);
@@ -256,7 +269,7 @@ impl App {
             }
         }
         // Suggestions are asked for once typing pauses; until they arrive the previous ones stay up.
-        let q = st.query.trim().to_string();
+        let q = st.base.trim().to_string();
         if q.is_empty() {
             st.last = None;
         } else if now - st.typed >= 0.15 {
@@ -267,10 +280,15 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(160));
         }
 
-        let lines = build(&st.query, &self.recents, st.last.as_deref());
+        let lines = build(&st.base, &self.recents, st.last.as_deref());
         let n = lines.iter().filter(|l| matches!(l, Line::Row(_))).count();
         if live && n > 0 && (down || up) {
             st.sel = (st.sel + if down { 1 } else { n - 1 }) % n;
+            st.moved = true;
+        }
+        if !st.moved {
+            let mut rows = lines.iter().filter_map(|l| if let Line::Row(k) = l { Some(k) } else { None });
+            st.sel = rows.position(|k| matches!(k, Kind::Search(_))).unwrap_or(0);
         }
         st.sel = st.sel.min(n.saturating_sub(1));
 
@@ -309,6 +327,19 @@ impl App {
         let foot_r = Rect::from_min_size(pos2(x0, boxr.max.y - FOOT_H), vec2(w, FOOT_H));
 
         let input_id = Id::unique("palette-input");
+        // Like Google: highlighting a recent search or completion with the arrows copies it into the input to edit; any other row restores what was typed.
+        if live && (down || up) {
+            let shown = match lines.iter().filter_map(|l| if let Line::Row(k) = l { Some(k) } else { None }).nth(st.sel) {
+                Some(Kind::Recent(s) | Kind::Complete(s)) => s.clone(),
+                _ => st.base.clone(),
+            };
+            if shown != st.query {
+                let mut edit = egui::text_edit::TextEditState::load(ctx, input_id).unwrap_or_default();
+                edit.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(shown.chars().count()))));
+                edit.store(ctx, input_id);
+                st.query = shown;
+            }
+        }
         let (mut run, mut close) = (None::<Kind>, esc && live);
         Area::new(Id::unique("palette-scrim")).order(Order::Foreground).fixed_pos(scr.min).show(ctx, |ui| {
             let r = ui.allocate_rect(scr, Sense::click());
@@ -334,7 +365,7 @@ impl App {
             let te = ui.put(edit, egui::TextEdit::singleline(&mut st.query).id(input_id).frame(egui::Frame::NONE).font(font(15.)).align(Align2::LEFT_CENTER)
                 .hint_text(egui::RichText::new("Search or type a command").color(t.tm)).desired_width(edit.width()));
             if te.changed() {
-                (st.sel, st.typed) = (0, now);
+                (st.sel, st.typed, st.moved, st.base) = (0, now, false, st.query.clone());
                 ctx.request_repaint(); // the list below was built from the previous text
             }
 
@@ -387,7 +418,7 @@ impl App {
                             let reg = font(13.);
                             match kind {
                                 Kind::Recent(s) => {
-                                    icon(ui, icon!("hist"), pos2(icx, cy), 18., t.tm);
+                                    icon(ui, icon!("histf"), pos2(icx, cy), 18., t.tm);
                                     // The x shows on hover or selection and takes its own clicks.
                                     let xr = Rect::from_center_size(pos2(vr.max.x - 10. - 12., cy), vec2(24., 24.));
                                     let xh = ui.interact(xr, ui.scope_id().with(("palette-rm", i)), Sense::click());
@@ -414,7 +445,7 @@ impl App {
                                 Kind::Complete(c) => {
                                     icon(ui, icon!("search"), pos2(icx, cy), 18., t.tm);
                                     // What was typed stays regular and muted, what YouTube Music adds is bold.
-                                    let (pre, m, post) = split(c, st.query.trim());
+                                    let (pre, m, post) = split(c, st.base.trim());
                                     let semi = font_w(13., Weight::Semi);
                                     rich(&p, pos2(tx, cy), vr.max.x - 10. - tx, &[(pre, semi.clone(), t.tx), (m, reg, t.tm), (post, semi, t.tx)]);
                                 }
@@ -426,7 +457,7 @@ impl App {
                                         paint_cover(ui, &sized_url(u, 96), cover, rad(cr), Color32::WHITE);
                                     }
                                     let tx = cover.max.x + 12.;
-                                    let (pre, m, post) = split(&it.title, st.query.trim());
+                                    let (pre, m, post) = split(&it.title, st.base.trim());
                                     rich(&p, pos2(tx, cy - 8.), vr.max.x - 10. - tx, &[(pre, reg.clone(), t.tx), (m, reg.clone(), t.ax), (post, reg, t.tx)]);
                                     let sub = [Some(type_label(&it.r#type)).filter(|s| !s.is_empty()), it.subtitle.as_deref().filter(|s| !s.is_empty())].into_iter().flatten().collect::<Vec<_>>().join(" · ");
                                     trunc(&p, pos2(tx, cy + 8.), vr.max.x - 10. - tx, &sub, font(12.), t.tm);
@@ -492,7 +523,7 @@ impl App {
         match a {
             Act::Go(r) => self.go(r),
             Act::Settings => {
-                self.settings_tab = crate::settings::APPEARANCE;
+                (self.settings_tab, self.settings_q) = (crate::settings::APPEARANCE, String::new());
                 self.go(Route::Settings);
             }
             Act::Player => self.set_player((!self.player_open).then_some(self.view)),
@@ -550,7 +581,8 @@ mod tests {
             items: (0..5).map(|i| Item { r#type: "song".into(), title: format!("Night {i}"), ..Default::default() }).collect(),
         };
         let typed = rows(&build(" night ", &recents, Some(&sugg)));
-        assert!(matches!(&typed[0], Kind::Search(q) if q == "night"));
+        // Results come first, then "Search for", then the completions.
+        assert!(matches!(&typed[..5], [Kind::Entity(_), Kind::Entity(_), Kind::Entity(_), Kind::Search(q), Kind::Complete(_)] if q == "night"));
         assert_eq!(typed.iter().filter(|k| matches!(k, Kind::Complete(_))).count(), 3);
         assert!(!typed.iter().any(|k| matches!(k, Kind::Complete(c) if c == "night")));
         assert_eq!(typed.iter().filter(|k| matches!(k, Kind::Entity(_))).count(), 3);

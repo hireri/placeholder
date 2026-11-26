@@ -1,7 +1,8 @@
-//! Generic popup menu: rounded surface with shadow, items with trailing icon/check, headings, dividers, segmented icon rows.
+//! Generic popup menu: rounded surface with shadow, items with leading icon or trailing check, headings, dividers, segmented icon rows.
 //! Caller owns the `open` flag (toggle it from the anchor button); the menu closes itself on Esc or a press outside it.
 //! It stays open after a pick so radio-style menus can show the change; set `open = false` to close on pick.
 
+use crate::tip::Tip;
 use crate::app::App;
 use crate::data::{self, State, Track};
 use crate::gfx::*;
@@ -26,7 +27,7 @@ pub enum Item<'a> {
     Divider,
     /// (id, label, checked): radio-style row, checkmark on the right.
     Check(usize, &'a str, bool),
-    /// (id, label, trailing icon).
+    /// (id, label, leading icon).
     Action(usize, &'a str, Option<&'static str>),
     /// Icon-only toggle row: (id, icon, tooltip, selected).
     Seg(&'a [(usize, &'static str, &'a str, bool)]),
@@ -98,9 +99,10 @@ pub fn show(ctx: &Context, t: &Theme, id: &'static str, open: &mut bool, at: egu
                     if hot(ui, k, r, false).clicked() {
                         picked = Some(*id);
                     }
-                    p.text(pos2(r.min.x + 10., r.center().y), Align2::LEFT_CENTER, label, font(13.), t.tx);
+                    let lx = if ic.is_some() { 36. } else { 10. };
+                    p.text(pos2(r.min.x + lx, r.center().y), Align2::LEFT_CENTER, label, font(13.), t.tx);
                     if let Some(ic) = ic {
-                        icon(ui, ic, pos2(r.max.x - 18., r.center().y), 16., t.tm);
+                        icon(ui, ic, pos2(r.min.x + 19., r.center().y), 16., t.tm);
                     }
                 }
                 Item::Seg(segs) => {
@@ -110,7 +112,7 @@ pub fn show(ctx: &Context, t: &Theme, id: &'static str, open: &mut bool, at: egu
                     let bw = (inner.width() - 2. * (segs.len() as f32 - 1.)) / segs.len() as f32;
                     for (n, (id, ic, tip, on)) in segs.iter().enumerate() {
                         let r = Rect::from_min_size(pos2(inner.min.x + n as f32 * (bw + 2.), inner.min.y), vec2(bw, 34.));
-                        let resp = hot(ui, k * 100 + n, r, *on).on_hover_text(*tip);
+                        let resp = hot(ui, k * 100 + n, r, *on).tip(t, tip);
                         if resp.clicked() {
                             picked = Some(*id);
                         }
@@ -139,6 +141,7 @@ const SAVE: usize = 8;
 const REMOVE: usize = 9;
 const LINK: usize = 10;
 const DELETE: usize = 11;
+const SUGGEST: usize = 12;
 
 fn track_link(t: &Track) -> String {
     if t.source == "spotify" { format!("https://open.spotify.com/track/{}", t.id) } else { format!("https://music.youtube.com/watch?v={}", t.id) }
@@ -175,9 +178,13 @@ impl App {
         let mut saved = None;
         match &target {
             Target::Track(tr) => {
-                items.extend([Item::Action(PLAY, "Play", None), Item::Action(NEXT, "Play next", None), Item::Action(QUEUE, "Add to queue", None), Item::Divider, Item::Action(SONG, "Open", None)]);
+                items.extend([Item::Action(PLAY, "Play", Some(icon!("mplay"))), Item::Action(NEXT, "Play next", Some(icon!("mnext"))), Item::Action(QUEUE, "Add to queue", Some(icon!("que")))]);
+                if self.party.is_guest() {
+                    items.push(Item::Action(SUGGEST, "Suggest to the party", Some(icon!("party"))));
+                }
+                items.extend([Item::Divider, Item::Action(SONG, "Open", Some(icon!("mnote")))]);
                 if tr.artist_id.is_some() {
-                    items.push(Item::Action(ARTIST, "Go to artist", None));
+                    items.push(Item::Action(ARTIST, "Go to artist", Some(icon!("martist"))));
                 }
             }
             Target::Item(it) => {
@@ -188,19 +195,19 @@ impl App {
                     };
                 }
                 match &songs {
-                    Some(v) if !v.is_empty() => items.extend([Item::Action(PLAY, "Play", None), Item::Action(SHUFFLE, "Shuffle", None), Item::Action(NEXT, "Play next", None), Item::Action(QUEUE, "Add to queue", None)]),
+                    Some(v) if !v.is_empty() => items.extend([Item::Action(PLAY, "Play", Some(icon!("mplay"))), Item::Action(SHUFFLE, "Shuffle", Some(icon!("shuf"))), Item::Action(NEXT, "Play next", Some(icon!("mnext"))), Item::Action(QUEUE, "Add to queue", Some(icon!("que")))]),
                     Some(_) => {}
                     None => items.push(Item::Heading("Loading songs…")),
                 }
-                items.extend([Item::Divider, Item::Action(OPEN, match it.r#type.as_str() { "artist" => "Go to artist", "album" => "Go to album", _ => "Open playlist" }, None)]);
+                items.extend([Item::Divider, Item::Action(OPEN, match it.r#type.as_str() { "artist" => "Go to artist", "album" => "Go to album", _ => "Open playlist" }, Some(icon!("mopen")))]);
                 if matches!(it.r#type.as_str(), "album" | "playlist") {
                     let lib = if it.r#type == "album" { 2 } else { 1 };
                     let on = self.lib_items.iter().any(|i| i.kind == lib && i.id == it.id);
                     saved = Some(on);
                     if on && it.editable {
-                        items.push(Item::Action(DELETE, "Delete playlist", None));
+                        items.push(Item::Action(DELETE, "Delete playlist", Some(icon!("mtrash"))));
                     } else {
-                        items.push(Item::Action(SAVE, if on { "Remove from library" } else { "Save to library" }, None));
+                        items.push(Item::Action(SAVE, if on { "Remove from library" } else { "Save to library" }, Some(if on { icon!("munsave") } else { icon!("msave") })));
                     }
                 }
             }
@@ -211,15 +218,15 @@ impl App {
                 };
                 let cur = self.pl.is_current(&tr);
                 if !cur {
-                    items.extend([Item::Action(PLAY, "Play now", None), Item::Action(NEXT, "Play next", None), Item::Action(REMOVE, "Remove from queue", None), Item::Divider]);
+                    items.extend([Item::Action(PLAY, "Play now", Some(icon!("mplay"))), Item::Action(NEXT, "Play next", Some(icon!("mnext"))), Item::Action(REMOVE, "Remove from queue", Some(icon!("x"))), Item::Divider]);
                 }
-                items.push(Item::Action(SONG, "Open", None));
+                items.push(Item::Action(SONG, "Open", Some(icon!("mnote"))));
                 if tr.artist_id.is_some() {
-                    items.push(Item::Action(ARTIST, "Go to artist", None));
+                    items.push(Item::Action(ARTIST, "Go to artist", Some(icon!("martist"))));
                 }
             }
         }
-        items.extend([Item::Divider, Item::Action(LINK, "Copy link", None)]);
+        items.extend([Item::Divider, Item::Action(LINK, "Copy link", Some(icon!("mlink")))]);
         let mut open = true;
         let picked = show(ctx, &t, "ctx-menu", &mut open, at, self.ctx_keep, &items);
         if !open || picked.is_some() {
@@ -236,6 +243,7 @@ impl App {
                 }
                 SONG => self.open_song(tr),
                 ARTIST => self.open_artist(tr.artist_id.as_deref().unwrap_or_default()),
+                SUGGEST => self.party.suggest(&tr),
                 _ => {
                     ctx.copy_text(track_link(&tr));
                     crate::toast::info("Link copied");
