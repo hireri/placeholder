@@ -466,7 +466,7 @@ impl App {
         if let Some((_, body)) = self.block(ui, pg, "Mode", "Light, dark, or follow the system", 100.) {
             self.mode_tiles(ui, body);
         }
-        if let Some(cy) = self.row(ui, pg, "Theme from artwork", "Colour the app from the playing cover instead of a fixed accent") {
+        if let Some(cy) = self.row(ui, pg, "Theme from artwork", "Colour the app from the playing cover") {
             toggle(ui, &self.t, "auto-theme", right, cy, &mut self.opts.auto_theme);
         }
         let cols = (((pg.x1 - pg.x0 - 40.) / 40.).floor() as usize).clamp(1, PRESETS.len());
@@ -489,16 +489,16 @@ impl App {
             let k = ui.ctx().animate_bool_with_time_and_easing(id, why.is_some(), 0.2, ease_out);
             self.gate_rect(ui, card.shrink2(vec2(0., 1.)), id, k, why);
         }
-        if let Some(cy) = self.row(ui, pg, "Custom theme", "Colours from theme.toml in the config folder; reloads when this page opens") {
+        if let Some(cy) = self.row(ui, pg, "Custom theme", "theme.toml in config folder; reloads on open") {
             if toggle(ui, &self.t, "custom", right, cy, &mut self.opts.custom) {
                 self.reload_custom();
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Pure black", "True black surfaces in dark mode, for OLED screens") {
+        if let Some(cy) = self.row(ui, pg, "Pure black", "True black surfaces in dark mode, for OLED") {
             toggle(ui, &self.t, "pure-black", right, cy, &mut self.opts.pure_black);
         }
         self.sec(ui, pg, "Display");
-        if let Some(cy) = self.row(ui, pg, "Interface scale", "Size of text and controls across the app") {
+        if let Some(cy) = self.row(ui, pg, "Interface scale", "Size of text and controls") {
             let labels = SCALES.map(|v| format!("{v}%"));
             let cur = SCALES.iter().position(|v| *v == self.opts.ui_scale).unwrap_or(2);
             let sel = segmented(ui, &self.t, "ui-scale", right, cy, &labels.each_ref().map(String::as_str), cur);
@@ -507,7 +507,7 @@ impl App {
                 set_scale(ui.ctx(), self.opts.ui_scale);
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Scroll speed", "How far one mouse-wheel notch scrolls; touchpads are not affected") {
+        if let Some(cy) = self.row(ui, pg, "Scroll speed", "Per mouse-wheel notch; touchpads unaffected") {
             let cur = SCROLL.iter().position(|v| *v == self.opts.scroll_speed).unwrap_or(1);
             let sel = segmented(ui, &self.t, "scroll-speed", right, cy, &["Slow", "Normal", "Fast"], cur);
             if SCROLL[sel] != self.opts.scroll_speed {
@@ -516,14 +516,14 @@ impl App {
             }
         }
         self.sec(ui, pg, "Layout");
-        if let Some(cy) = self.row(ui, pg, "Row density", "Height of track rows in lists") {
+        if let Some(cy) = self.row(ui, pg, "Row density", "Height of track rows") {
             let sel = segmented(ui, &self.t, "density", right, cy, &["Comfortable", "Compact"], self.opts.compact as usize);
             self.opts.compact = sel == 1;
         }
-        if let Some(cy) = self.row(ui, pg, "Tint headers from artwork", "Colour album and artist headers from the cover") {
+        if let Some(cy) = self.row(ui, pg, "Tint headers from artwork", "Album and artist headers") {
             toggle(ui, &self.t, "tint", right, cy, &mut self.opts.tint);
         }
-        if let Some(cy) = self.row(ui, pg, "Font", "Name of an installed font family; empty uses Allo") {
+        if let Some(cy) = self.row(ui, pg, "Font", "Installed font family; empty uses Allo") {
             let id = ui.scope_id().with("font-buf");
             let mut buf = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| self.opts.font.clone());
             if text_field(ui, &self.t, "font", right, cy, &mut buf, false) && buf.trim() != self.opts.font {
@@ -538,7 +538,7 @@ impl App {
             ui.data_mut(|d| d.insert_temp(id, buf));
         }
         self.sec(ui, pg, "Window");
-        if let Some(cy) = self.row(ui, pg, "Keep playing in the tray", "Closing the window hides it to the tray instead of quitting; off quits and stops the music") {
+        if let Some(cy) = self.row(ui, pg, "Keep playing in the tray", "Close hides to tray; off quits and stops music") {
             toggle(ui, &self.t, "close-tray", right, cy, &mut self.opts.close_tray);
         }
     }
@@ -589,12 +589,12 @@ impl App {
             }
             self.gate(ui, pg, cy, "aq", offline);
         }
-        if let Some(cy) = self.row(ui, pg, "Normalize volume", "Even out loud and quiet songs using YouTube's loudness data") {
+        if let Some(cy) = self.row(ui, pg, "Normalize volume", "Evens out loud and quiet songs") {
             if toggle(ui, &self.t, "normalize", right, cy, &mut self.opts.normalize) {
                 self.pl.engine.set_normalize(self.opts.normalize);
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Loudness target", "Level normalization aims for: quiet (-19 LUFS), balanced (-14 LUFS, default) or loud (-11 LUFS)") {
+        if let Some(cy) = self.row(ui, pg, "Loudness target", "Targets -19, -14 (default), -11 LUFS") {
             let cur = LOUD.iter().position(|v| *v == self.opts.target_lufs).unwrap_or(1);
             let sel = segmented(ui, &self.t, "loudness", right, cy, &["Quiet", "Balanced", "Loud"], cur);
             if LOUD[sel] != self.opts.target_lufs {
@@ -615,48 +615,48 @@ impl App {
                 ui.painter().text(pos2(x, cy + 26.), Align2::CENTER_CENTER, lbl, font(11.), self.t.tf);
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Gapless playback", "Play consecutive tracks without a pause between them") {
+        if let Some(cy) = self.row(ui, pg, "Gapless playback", "No pause between consecutive tracks") {
             if toggle(ui, &self.t, "gapless", right, cy, &mut self.opts.gapless) {
                 self.pl.engine.set_gapless(self.opts.gapless);
             }
         }
         self.sec(ui, pg, "Queue");
-        if let Some(cy) = self.row(ui, pg, "Start with Endless on", "Keep adding similar songs when the queue runs out") {
+        if let Some(cy) = self.row(ui, pg, "Start with Endless on", "Adds similar songs when the queue runs out") {
             toggle(ui, &self.t, "endless", right, cy, &mut self.opts.endless);
         }
-        if let Some(cy) = self.row(ui, pg, "Prevent duplicate songs", "Adding a song that is already in the queue does nothing") {
+        if let Some(cy) = self.row(ui, pg, "Prevent duplicate songs", "Adding a queued song does nothing") {
             if toggle(ui, &self.t, "no-dupes", right, cy, &mut self.opts.no_dupes) {
                 self.pl.no_dupes = self.opts.no_dupes;
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Remember shuffle and repeat", "Start the next session with shuffle and repeat as you left them") {
+        if let Some(cy) = self.row(ui, pg, "Remember shuffle and repeat", "Restored in the next session") {
             toggle(ui, &self.t, "remember-modes", right, cy, &mut self.opts.remember_modes);
         }
         self.sec(ui, pg, "Video");
-        if let Some(cy) = self.row(ui, pg, "Play music videos by default", "Show the video instead of the cover when a song has one") {
+        if let Some(cy) = self.row(ui, pg, "Play music videos by default", "Video instead of cover when available") {
             toggle(ui, &self.t, "video", right, cy, &mut self.opts.video);
         }
-        if let Some(cy) = self.row(ui, pg, "Default video quality", "Maximum height of music videos") {
+        if let Some(cy) = self.row(ui, pg, "Default video quality", "Max height of music videos") {
             let labels = VIDEO_HEIGHTS.map(|h| format!("{h}p"));
             let cur = VIDEO_HEIGHTS.iter().position(|h| *h == self.opts.video_h).unwrap_or(0);
             let sel = segmented(ui, &self.t, "video-h", right, cy, &labels.each_ref().map(String::as_str), cur);
             self.opts.video_h = VIDEO_HEIGHTS[sel];
         }
         self.sec(ui, pg, "Controls");
-        if let Some(cy) = self.row(ui, pg, "Seek step", "How far the left and right arrow keys jump") {
+        if let Some(cy) = self.row(ui, pg, "Seek step", "Left and right arrow jump distance") {
             let cur = SEEK.iter().position(|s| *s == self.opts.seek_step).unwrap_or(0);
             let d = stepper(ui, &self.t, "seek-step", right, cy, &format!("{} s", SEEK[cur]), cur > 0, cur + 1 < SEEK.len());
             self.opts.seek_step = SEEK[(cur as i32 + d) as usize];
         }
-        if let Some(cy) = self.row(ui, pg, "Progressive seek", "Repeated arrow-key seeks in one direction jump 5 s further each time, up to 60 s") {
+        if let Some(cy) = self.row(ui, pg, "Progressive seek", "Repeated seeks add 5 s each, up to 60 s") {
             toggle(ui, &self.t, "progressive-seek", right, cy, &mut self.opts.progressive_seek);
         }
-        if let Some(cy) = self.row(ui, pg, "Volume step", "How much Ctrl with the up and down arrows changes the volume") {
+        if let Some(cy) = self.row(ui, pg, "Volume step", "Ctrl with up and down arrows changes volume") {
             let cur = VOL.iter().position(|s| *s == self.opts.vol_step).unwrap_or(0);
             let d = stepper(ui, &self.t, "vol-step", right, cy, &format!("{}%", VOL[cur]), cur > 0, cur + 1 < VOL.len());
             self.opts.vol_step = VOL[(cur as i32 + d) as usize];
         }
-        if let Some(cy) = self.row(ui, pg, "Fade out before sleep", "Lower the volume over the last 30 seconds of the sleep timer") {
+        if let Some(cy) = self.row(ui, pg, "Fade out before sleep", "Lowers volume over the last 30 s of timer") {
             toggle(ui, &self.t, "sleep-fade", right, cy, &mut self.opts.sleep_fade);
         }
         if let Some(cy) = self.row(ui, pg, "Sleep timer", &self.sleep.describe()) {
@@ -677,8 +677,8 @@ impl App {
         self.sec(ui, pg, "Filters");
         let mut changed = false;
         for (key, title, desc) in [
-            ("hide-explicit", "Hide explicit content", "Leave explicit songs out of lists and search"),
-            ("hide-video", "Hide video songs", "Leave music-video versions out of lists and search"),
+            ("hide-explicit", "Hide explicit content", "Hides explicit songs in lists and search"),
+            ("hide-video", "Hide video songs", "Hides music videos in lists and search"),
         ] {
             if let Some(cy) = self.row(ui, pg, title, desc) {
                 let v = if key == "hide-explicit" { &mut self.opts.hide_explicit } else { &mut self.opts.hide_video };
@@ -692,9 +692,9 @@ impl App {
         }
         self.sec(ui, pg, "Artist page");
         for (key, title, desc) in [
-            ("show-bio", "Artist description", "Show the biography on artist pages"),
-            ("show-subs", "Subscriber count", "Show how many people subscribe to an artist"),
-            ("show-monthly", "Monthly listeners", "Show an artist's monthly audience"),
+            ("show-bio", "Artist description", "Biography on artist pages"),
+            ("show-subs", "Subscriber count", ""),
+            ("show-monthly", "Monthly listeners", ""),
         ] {
             if let Some(cy) = self.row(ui, pg, title, desc) {
                 let v = match key { "show-bio" => &mut self.opts.show_bio, "show-subs" => &mut self.opts.show_subs, _ => &mut self.opts.show_monthly };
@@ -710,8 +710,8 @@ impl App {
         self.sec(ui, pg, "Region");
         let name = |list: &[Named], code: &str| if code == SYSTEM { "System default".into() } else { list.iter().find(|n| n.code == code).map_or(code.to_string(), |n| n.name.clone()) };
         for (i, (which, title, desc, cur, list)) in [
-            (Pick::Language, "Content language", "Language of titles and shelves from YouTube Music", &d.content_language, &d.languages),
-            (Pick::Country, "Content country", "Region that decides which music YouTube Music recommends", &d.content_country, &d.countries),
+            (Pick::Language, "Content language", "Language for titles and shelves", &d.content_language, &d.languages),
+            (Pick::Country, "Content country", "Region for music recommendations", &d.content_country, &d.countries),
         ].into_iter().enumerate() {
             let Some(cy) = self.row(ui, pg, title, desc) else { continue };
             if picker_pill(ui, &self.t, ("pick", i), right, cy, &name(list, cur)) {
@@ -719,13 +719,13 @@ impl App {
             }
         }
         self.sec(ui, pg, "Proxy");
-        if let Some(cy) = self.row(ui, pg, "Use a proxy", "Route the daemon's requests through a proxy server") {
+        if let Some(cy) = self.row(ui, pg, "Use a proxy", "Send daemon requests through a proxy") {
             let mut on = d.proxy.enabled;
             if toggle(ui, &self.t, "proxy", right, cy, &mut on) {
                 self.put(ui, json!({ "proxy": { "enabled": on } }), |d| d.proxy.enabled = on);
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Proxy type", "Protocol the proxy speaks") {
+        if let Some(cy) = self.row(ui, pg, "Proxy type", "") {
             const KINDS: [&str; 2] = ["HTTP", "SOCKS"];
             let cur = KINDS.iter().position(|k| *k == d.proxy.r#type).unwrap_or(0);
             let sel = segmented(ui, &self.t, "proxy-type", right, cy, &KINDS, cur);
@@ -761,12 +761,12 @@ impl App {
     fn lyrics(&mut self, ui: &mut egui::Ui, pg: &mut Page) {
         let right = pg.right();
         self.sec(ui, pg, "Lyrics");
-        if let Some(cy) = self.row(ui, pg, "Romanize Japanese", "Show the reading in Latin letters under Japanese lyrics") {
+        if let Some(cy) = self.row(ui, pg, "Romanize Japanese", "Latin reading under Japanese lyrics") {
             if toggle(ui, &self.t, "romaji", right, cy, &mut self.opts.romaji) {
                 self.pl.set_romaji(self.opts.romaji);
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Lyrics size", "Text size of the lyrics in the player") {
+        if let Some(cy) = self.row(ui, pg, "Lyrics size", "Text size in the player") {
             let cur = LYR_SIZES.iter().position(|v| *v == self.opts.lyrics_size).unwrap_or(1);
             let sel = segmented(ui, &self.t, "lyrics-size", right, cy, &["Small", "Medium", "Large"], cur);
             self.opts.lyrics_size = LYR_SIZES[sel];
@@ -807,20 +807,20 @@ impl App {
         let d = self.daemon(ui);
         let offline = d.as_ref().err().map(|_| "Needs the daemon, which isn't connected");
         self.sec(ui, pg, "History");
-        if let Some(cy) = self.row(ui, pg, "Private session", "Pause Discord, YouTube history and Last.fm. Ends after 6 hours without playback or when you quit") {
+        if let Some(cy) = self.row(ui, pg, "Private session", "Pauses Discord, YouTube, Last.fm; ends after 6h idle") {
             let mut on = self.private.is_some();
             if toggle(ui, &self.t, "private", right, cy, &mut on) {
                 self.private = on.then(std::time::Instant::now);
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Send listening history to YouTube", "Songs you play show up in your YouTube Music history") {
+        if let Some(cy) = self.row(ui, pg, "Send listening history to YouTube", "Plays appear in your YouTube Music history") {
             let mut on = d.as_ref().map_or(false, |d| d.report_history);
             if toggle(ui, &self.t, "report-history", right, cy, &mut on) && d.is_ok() {
                 self.put(ui, json!({ "reportHistory": on }), |d| d.report_history = on);
             }
             self.gate(ui, pg, cy, "report-history", offline);
         }
-        if let Some(cy) = self.row(ui, pg, "Remember searches", "Keep recent searches in the command palette") {
+        if let Some(cy) = self.row(ui, pg, "Remember searches", "Recent searches in the command palette") {
             if toggle(ui, &self.t, "keep-search", right, cy, &mut self.opts.keep_search) && !self.opts.keep_search {
                 self.recents.clear();
             }
@@ -844,7 +844,7 @@ impl App {
             pill(ui.painter(), &self.t, card.max.x - 20., card.min.y + 33., &format!("{:.0}%", frac.min(1.) * 100.), self.opts.cache_mb > 0);
             meter(ui.painter(), &self.t, Rect::from_min_size(pos2(body.min.x, body.min.y + 4.), vec2(body.width(), 10.)), frac);
         }
-        if let Some(cy) = self.row(ui, pg, "Cache limit", "Largest size the cache may grow to") {
+        if let Some(cy) = self.row(ui, pg, "Cache limit", "Maximum size the cache can grow to") {
             const CACHE: [u16; 5] = [0, 256, 512, 1024, 2048];
             let labels = ["Off", "256 MB", "512 MB", "1 GB", "2 GB"];
             let sel = segmented(ui, &self.t, "cache-mb", right, cy, &labels, CACHE.iter().position(|m| *m == self.opts.cache_mb).unwrap_or(usize::MAX));
@@ -853,7 +853,7 @@ impl App {
                 crate::cache::set_limit_mb(self.opts.cache_mb);
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Clear audio cache", "Delete every cached song from disk") {
+        if let Some(cy) = self.row(ui, pg, "Clear audio cache", "Deletes all cached songs from disk") {
             if button(ui, &self.t, "cache-clear", right, cy, "Clear") {
                 crate::cache::clear();
                 crate::toast::info("Audio cache cleared");
@@ -887,7 +887,7 @@ impl App {
                 }
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Import preferences", "Replace every setting with the exported file") {
+        if let Some(cy) = self.row(ui, pg, "Import preferences", "Replaces all settings with the exported file") {
             if button(ui, &self.t, "import-opts", right, cy, "Import") {
                 match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|j| serde_json::from_str::<Opts>(&j).map_err(|e| e.to_string())) {
                     Ok(o) => {
@@ -955,13 +955,13 @@ impl App {
         pg.y += self.accounts_panel(ui, wide, pg.y - 16.);
         self.lastfm(ui, pg);
         self.sec(ui, pg, "Discord");
-        if let Some(cy) = self.row(ui, pg, "Discord activity", "Show the song you are listening to on your Discord profile") {
+        if let Some(cy) = self.row(ui, pg, "Discord activity", "Current song on your Discord profile") {
             toggle(ui, &self.t, "discord", pg.right(), cy, &mut self.opts.discord);
         }
-        if let Some(cy) = self.row(ui, pg, "Keep activity when paused", "Show it as paused instead of clearing it") {
+        if let Some(cy) = self.row(ui, pg, "Keep activity when paused", "Show as paused instead of clearing") {
             toggle(ui, &self.t, "discord-paused", pg.right(), cy, &mut self.opts.discord_paused);
         }
-        if let Some(cy) = self.row(ui, pg, "Show listening party", "Show the party size instead of a progress bar") {
+        if let Some(cy) = self.row(ui, pg, "Show listening party", "Party size instead of progress bar") {
             toggle(ui, &self.t, "discord-party", pg.right(), cy, &mut self.opts.discord_party);
         }
         self.sec(ui, pg, "Listening party");
@@ -971,13 +971,13 @@ impl App {
         if let Some(cy) = self.row(ui, pg, "Notify about join requests", "Requests, and the host's answers") {
             toggle(ui, &self.t, "notify-requests", pg.right(), cy, &mut self.opts.notify_requests);
         }
-        if let Some(cy) = self.row(ui, pg, "Notify when people join or leave", "Each time someone comes or goes") {
+        if let Some(cy) = self.row(ui, pg, "Notify when people join or leave", "") {
             toggle(ui, &self.t, "notify-people", pg.right(), cy, &mut self.opts.notify_people);
         }
         if let Some(cy) = self.row(ui, pg, "Notify when the party ends", "Removed, or the party closes") {
             toggle(ui, &self.t, "notify-ended", pg.right(), cy, &mut self.opts.notify_ended);
         }
-        if let Some(cy) = self.row(ui, pg, "Only when Serafin is in the background", "Skip them while the window is in front") {
+        if let Some(cy) = self.row(ui, pg, "Only when Serafin is in the background", "Not while the window is in front") {
             toggle(ui, &self.t, "notify-background", pg.right(), cy, &mut self.opts.notify_background);
         }
     }
@@ -993,7 +993,7 @@ impl App {
         if !c.logged_in {
             if self.scrobbler.waiting() {
                 self.scrobbler.poll_login(&ctx, false);
-                if let Some(cy) = self.row(ui, pg, "Waiting for approval", "Approve Serafin on the Last.fm page that just opened") {
+                if let Some(cy) = self.row(ui, pg, "Waiting for approval", "Approve Serafin on the Last.fm page") {
                     if button(ui, &t, "lfm-done", right, cy, "I've approved it") {
                         self.scrobbler.poll_login(&ctx, true);
                     }
@@ -1006,7 +1006,7 @@ impl App {
             } else {
                 let mut buf = self.lfm_buf.take().unwrap_or_default();
                 for (i, (key, title, pw)) in [("lfm-key", "API key", false), ("lfm-secret", "API secret", true)].into_iter().enumerate() {
-                    if let Some(cy) = self.row(ui, pg, title, if i == 0 { "Use your own Last.fm API account instead of the built-in key" } else { "" }) {
+                    if let Some(cy) = self.row(ui, pg, title, if i == 0 { "Use your own Last.fm API account" } else { "" }) {
                         text_field(ui, &t, key, right, cy, &mut buf[i], pw);
                     }
                 }
@@ -1027,9 +1027,9 @@ impl App {
             return;
         }
         let toggles: [(&str, &str, &str, bool); 3] = [
-            ("enabled", "Scrobble songs", "Add what you listen to to your Last.fm profile", c.enabled),
-            ("nowPlaying", "Send now playing", "Show the current song on your Last.fm profile", c.now_playing),
-            ("sendLikes", "Send likes", "Love a song on Last.fm when you like it here", c.send_likes),
+            ("enabled", "Scrobble songs", "Adds plays to your Last.fm profile", c.enabled),
+            ("nowPlaying", "Send now playing", "Current song on your Last.fm profile", c.now_playing),
+            ("sendLikes", "Send likes", "Love on Last.fm when you like it here", c.send_likes),
         ];
         for (i, (key, title, d, on)) in toggles.into_iter().enumerate() {
             let Some(cy) = self.row(ui, pg, title, d) else { continue };
@@ -1042,7 +1042,7 @@ impl App {
                 });
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Scrobble after", "Share of the song that has to play first") {
+        if let Some(cy) = self.row(ui, pg, "Scrobble after", "Share of the song that must play") {
             const PCT: [f32; 4] = [0.3, 0.5, 0.7, 0.9];
             let cur = PCT.iter().position(|p| (p - c.delay_percent).abs() < 0.01).unwrap_or(usize::MAX);
             let sel = segmented(ui, &t, "lfm-pct", right, cy, &["30%", "50%", "70%", "90%"], cur);
@@ -1050,7 +1050,7 @@ impl App {
                 self.scrobbler.set(&ctx, json!({ "delayPercent": PCT[sel] }), |c| c.delay_percent = PCT[sel]);
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Or after at most", "Seconds of play that always count, for long songs") {
+        if let Some(cy) = self.row(ui, pg, "Or after at most", "Seconds that always count on long songs") {
             const SECS: [u32; 4] = [60, 120, 180, 240];
             let cur = SECS.iter().position(|s| *s == c.delay_seconds).unwrap_or(usize::MAX);
             let sel = segmented(ui, &t, "lfm-secs", right, cy, &["1 min", "2 min", "3 min", "4 min"], cur);
@@ -1100,7 +1100,7 @@ impl App {
     fn about(&mut self, ui: &mut egui::Ui, pg: &mut Page) {
         let right = pg.right();
         self.sec(ui, pg, "Reset");
-        if let Some(cy) = self.row(ui, pg, "Reset preferences", "Put every setting on this page back to its default; sign-ins and the proxy stay") {
+        if let Some(cy) = self.row(ui, pg, "Reset preferences", "Sign-ins and proxy are kept") {
             let id = ui.scope_id().with("reset-armed");
             let armed = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
             if button(ui, &self.t, "reset-opts", right, cy, if armed { "Click again to confirm" } else { "Reset" }) {
