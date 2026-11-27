@@ -1,6 +1,7 @@
 //! Right sidebar: blurred-cover backdrop, cover/lyrics/queue switcher and transport.
 //! Laid out at a fixed 308px from the slot's left edge, so closing just slides it out behind the clip.
 
+use crate::gfx::Calm;
 use crate::tip::Tip;
 use crate::app::{App, PlayerView};
 use crate::audio;
@@ -125,6 +126,9 @@ pub struct Player {
     pub endless: bool,
     /// Adding a song that is already queued does nothing (a setting).
     pub no_dupes: bool,
+    /// A song that fails to play is skipped (a setting), up to `fails` times in a row.
+    pub skip_on_error: bool,
+    fails: usize,
     /// Queue row being dragged by its handle (queue index).
     qdrag: Option<usize>,
     /// Bumped on every reorder so the rows' slide animations restart from their new places instead of replaying.
@@ -194,7 +198,7 @@ fn stream(vid: &str, title: &str, artist: &str) -> Result<(String, audio::Stream
 
 impl Player {
     pub fn new(engine: audio::Engine) -> Self {
-        Player { engine, quality: None, queue: vec![], cur: 0, playing: false, pos: 0., loaded: false, scrub: false, seeks: 0, pending: None, req: 0, retried: false, error: None, shuffle: false, repeat: 0, endless: false, no_dupes: false, qdrag: None, qgen: 0, qgrab: 26., qjump: None, moved: None, more: None, seeded: String::new(), liked: false, like: None, like_event: None, scroll: 0., lyr_anim: LyrAnim::default(), card_scroll: 0., lyr: Lyr::Idle, romaji: false, lyr_size: 1., shown: (PlayerView::Art, f64::NEG_INFINITY), ahead: None, queued: None }
+        Player { engine, quality: None, queue: vec![], cur: 0, playing: false, pos: 0., loaded: false, scrub: false, seeks: 0, pending: None, req: 0, retried: false, error: None, shuffle: false, repeat: 0, endless: false, no_dupes: false, skip_on_error: false, fails: 0, qdrag: None, qgen: 0, qgrab: 26., qjump: None, moved: None, more: None, seeded: String::new(), liked: false, like: None, like_event: None, scroll: 0., lyr_anim: LyrAnim::default(), card_scroll: 0., lyr: Lyr::Idle, romaji: false, lyr_size: 1., shown: (PlayerView::Art, f64::NEG_INFINITY), ahead: None, queued: None }
     }
 
     /// Drops every stored egui timestamp. A new window's `Context` restarts its clock near zero, so times taken from the
@@ -442,11 +446,40 @@ impl Player {
         self.pos = 0.;
     }
 
-    fn fail(&mut self, e: String) {
+    fn fail(&mut self, ctx: &egui::Context, e: String) {
         self.playing = false;
         self.loaded = false;
+        // A queue that is all broken stops after one pass instead of spinning through it.
+        if self.skip_on_error && self.cur + 1 < self.queue.len() && self.fails < self.queue.len() {
+            self.fails += 1;
+            crate::toast::error(format!("Skipped a track that can't play: {e}"));
+            return self.next(ctx);
+        }
         crate::toast::error(format!("Can't play this track: {e}\nDetails: {}", backend::log_path().display()));
         self.error = Some(e);
+    }
+
+    /// The queue as tracks with the current index, for saving between sessions.
+    pub fn snapshot(&self) -> (Vec<Track>, usize) {
+        (self.queue.iter().map(Song::track).collect(), self.cur)
+    }
+
+    /// Puts a saved queue back with the current song paused at `pos`; nothing loads until play is pressed.
+    pub fn restore(&mut self, tracks: &[Track], cur: usize, pos: f32) {
+        if cur < tracks.len() {
+            self.queue = tracks.iter().map(song_of).collect();
+            (self.cur, self.pos) = (cur, pos);
+        }
+    }
+
+    /// Switches to a new engine (another output device) and carries on from where the old one was.
+    pub fn swap_engine(&mut self, ctx: &egui::Context, engine: audio::Engine) {
+        let was_playing = self.playing;
+        self.engine = engine;
+        if self.loaded {
+            self.resolve(ctx, self.pos);
+            self.playing = was_playing;
+        }
     }
 
     /// Where playback actually is: while scrubbing, `pos` follows the pointer instead.
@@ -590,7 +623,7 @@ impl Player {
                     self.retried = true;
                     self.resolve(ctx, self.pos);
                 }
-                audio::Event::Error(e) => self.fail(e),
+                audio::Event::Error(e) => self.fail(ctx, e),
             }
         }
         if let Some((idx, req, res)) = self.pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
@@ -614,7 +647,7 @@ impl Player {
                             self.engine.pause();
                         }
                     }
-                    Err(e) => self.fail(e),
+                    Err(e) => self.fail(ctx, e),
                 }
             }
         }
@@ -632,6 +665,9 @@ impl Player {
         }
         if self.loaded && !self.scrub {
             self.pos = self.engine.position();
+            if self.pos > 1. {
+                self.fails = 0;
+            }
         }
         self.extend_queue(ctx);
         if self.loaded {
@@ -679,7 +715,7 @@ impl Player {
 /// Thin progress/volume bar; grows on hover like the scrubber in the mock. Returns the pointer fraction while pressed.
 fn bar(ui: &egui::Ui, key: &str, rect: Rect, track: Color32, fill: Color32, frac: f32, grow: bool, cached: &[(f32, f32)]) -> Option<f32> {
     let resp = ui.interact(rect.expand2(vec2(0., 6.)), ui.scope_id().with(key), Sense::click_and_drag());
-    let h = if grow { 4. + 2. * ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with((key, "h")), resp.hovered(), 0.12, ease_out) } else { 4. };
+    let h = if grow { 4. + 2. * ui.ctx().calm_bool_ease(ui.scope_id().with((key, "h")), resp.hovered(), 0.12, ease_out) } else { 4. };
     let r = Rect::from_center_size(rect.center(), vec2(rect.width(), h));
     ui.painter().rect_filled(r, rad(h / 2.), track);
     for &(a, b) in cached {
@@ -784,7 +820,7 @@ impl App {
         // 0.575 is where white and dark ink have equal contrast; the faint tiers keep a lightness gap from mid-tone backdrops.
         // The controls sit on the cover's lower 40%; the lyrics/queue body sits on a different band, so it gets its own ink.
         let tones = |ctx: &egui::Context, key: &str, l: f32| {
-            let dark = ctx.animate_value_with_time(ui_id.with(key), if l > 0.575 { 1. } else { 0. }, 0.4);
+            let dark = ctx.calm_value(ui_id.with(key), if l > 0.575 { 1. } else { 0. }, 0.4);
             let ink = |light: f32, gap: f32, dark_l: f32| mix(oklch(light.max((l + gap).min(0.9)), 0.02, t.hue), oklch(dark_l, 0.02, t.hue), dark);
             let theme = Theme {
                 tx: mix(t.tx, oklch(0.18, 0.02, t.hue), dark),
@@ -853,8 +889,8 @@ impl App {
             st.shown = url.clone();
             st.gen += 1;
         }
-        let f = ease_in_out((ctx.animate_value_with_time(id.with("gen"), st.gen as f32, ART_FADE) - st.gen.saturating_sub(1) as f32).clamp(0., 1.));
-        let vf = ctx.animate_bool_with_time_and_easing(id.with("vid"), frame.is_some(), ART_FADE, ease_in_out);
+        let f = ease_in_out((ctx.calm_value(id.with("gen"), st.gen as f32, if reduced_motion() { 0. } else { ART_FADE }) - st.gen.saturating_sub(1) as f32).clamp(0., 1.));
+        let vf = ctx.calm_bool_ease(id.with("vid"), frame.is_some(), ART_FADE, ease_in_out);
         if frame.is_some() {
             st.last = frame.clone();
         } else if vf == 0. {
@@ -872,6 +908,31 @@ impl App {
         }
         if cur_blur.is_none() {
             ui.painter().rect_filled(c, rad(18.), t.s1);
+        }
+
+        // MilkDrop fills the whole card, under everything else.
+        let viz_style = self.opts.viz_style.max(1);
+        let vz = crate::app::anim(ui.ctx(), "pl-viz", view == PlayerView::Viz && viz_style == crate::viz::MILKDROP);
+        if vz > 0.01 {
+            crate::viz_pm::paint(ui, c, &crate::viz::pcm(&self.pl.engine), vz, 18.);
+            // Darkens only behind the header and the controls (nothing in between) so white text stays readable over bright presets.
+            let mut m = egui::Mesh::default();
+            let stops = [(c.min.y, 0.6), (c.min.y + 80., 0.5), (c.min.y + 140., 0.), (scrub.min.y - 80., 0.), (scrub.min.y - 14., 0.62), (c.max.y, 0.72)].map(|(y, a)| (y.clamp(c.min.y, c.max.y), a));
+            for (s, w) in stops.windows(2).enumerate() {
+                for i in (s > 0) as usize..=6 {
+                    let k = i as f32 / 6.;
+                    let e = k * k * (3. - 2. * k);
+                    let (y, a) = (w[0].0 + (w[1].0 - w[0].0) * k, (w[0].1 + (w[1].1 - w[0].1) * e) * vz);
+                    for x in [c.min.x, c.max.x] {
+                        m.colored_vertex(pos2(x, y), Color32::from_black_alpha((a * 255.) as u8));
+                    }
+                    let n = m.vertices.len() as u32;
+                    if n >= 4 {
+                        m.indices.extend([n - 4, n - 3, n - 1, n - 4, n - 1, n - 2]);
+                    }
+                }
+            }
+            ui.painter().add(m);
         }
 
         let wide_a = wide.map(|a| frame.as_ref().map_or(a, |f| f.1));
@@ -948,7 +1009,7 @@ impl App {
         // Video / thumbnail toggle and quality in the floating rect's corner; they fade in while the pointer is over it.
         if wide.is_some() && va < 0.5 && cfg!(feature = "video") {
             let over = ui.rect_contains_pointer(cr);
-            let a = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with("pl-vctl"), over, 0.15, ease_in_out);
+            let a = ui.ctx().calm_bool_ease(ui.scope_id().with("pl-vctl"), over, 0.15, ease_in_out);
             if a > 0. {
                 let at = pos2(cr.max.x - 24., cr.max.y - 24.);
                 p.circle_filled(at, 16., Color32::from_black_alpha(140).gamma_multiply(a));
@@ -982,7 +1043,28 @@ impl App {
         let artist_id = pl.song().and_then(|s| s.artist_id.clone());
 
         // The pointer only moves the shown playhead; playback carries on and the new spot is committed on release.
-        if let Some(f) = bar(ui, "scrub", Rect::from_min_size(scrub.min, vec2(w, 4.)), it.s3, it.tx, pl.frac(), true, &pl.engine.cached(dur)) {
+        let seek = if self.opts.viz_wave {
+            let ctx = ui.ctx().clone();
+            let lv = crate::viz::levels(&ctx, &pl.engine);
+            crate::viz::repaint(&ctx, &lv);
+            let tag = pl.song().map(|s| (s.title.clone(), s.artist.clone()));
+            let key = ui.scope_id().with(("viz-env", &tag));
+            let mut env: Vec<f32> = ctx.data(|d| d.get_temp(key)).filter(|e: &Vec<f32>| e.len() == crate::viz::WAVE_N).unwrap_or_else(|| vec![0.; crate::viz::WAVE_N]);
+            if lv.active() && dur > 0. {
+                let slot = ((pl.frac() * crate::viz::WAVE_N as f32) as usize).min(crate::viz::WAVE_N - 1);
+                let level = (lv.bands.iter().sum::<f32>() / lv.bands.len() as f32 * 2.5).min(1.);
+                env[slot] += (level - env[slot]) * 0.3;
+                ctx.data_mut(|d| d.insert_temp(key, env.clone()));
+            }
+            let seed = tag.map_or(1, |t| { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); t.hash(&mut h); h.finish() });
+            let r = Rect::from_center_size(pos2(scrub.center().x, scrub.min.y + 2.), vec2(w, 18.));
+            crate::viz::waveform(ui.painter(), r, pl.frac(), &lv, &env, seed, it.tx, it.tx.gamma_multiply(0.28));
+            let resp = ui.interact(r.expand2(vec2(0., 4.)), ui.scope_id().with("scrub-wave"), Sense::click_and_drag());
+            resp.is_pointer_button_down_on().then(|| resp.interact_pointer_pos().map(|q| ((q.x - r.min.x) / r.width()).clamp(0., 1.))).flatten()
+        } else {
+            bar(ui, "scrub", Rect::from_min_size(scrub.min, vec2(w, 4.)), it.s3, it.tx, pl.frac(), true, &pl.engine.cached(dur))
+        };
+        if let Some(f) = seek {
             pl.pos = f * dur;
             pl.scrub = true;
         } else if pl.scrub {
@@ -1069,9 +1151,19 @@ impl App {
             p.circle_filled(pos2(x1 - 16., top + 16.), 16., disc);
         }
         if va > 0.01 {
-            trunc(&p, pos2(x0 + 4., top + 16.), w - 44., if album.is_empty() { &title } else { &album }, font_w(13., Weight::Semi), it.tx.gamma_multiply(va));
+            trunc(&p, pos2(x0 + 4., top + 16.), w - if self.opts.viz_style > 0 { 82. } else { 44. }, if album.is_empty() { &title } else { &album }, font_w(13., Weight::Semi), it.tx.gamma_multiply(va));
         }
         let hide = glyph_button(ui, "hide", pos2(x1 - 16., top + 16.), 32., icon!("colr"), 16., if va < 0.5 { it.tx } else { it.tm }).clicked();
+        if self.opts.viz_style > 0 {
+            let at = pos2(x1 - 16. - 38., top + 16.);
+            let on = view == PlayerView::Viz;
+            let disc = if on { it.tx.gamma_multiply(0.9) } else { Color32::from_black_alpha(90).lerp_to_gamma(Color32::from_white_alpha(70), dark).gamma_multiply(1. - va) };
+            p.circle_filled(at, 16., disc);
+            if glyph_button(ui, "viz", at, 32., icon!("viz"), 16., if on { it.s1 } else if va < 0.5 { it.tx } else { it.tm }).clicked() {
+                self.view = if on { PlayerView::Art } else { PlayerView::Viz };
+                pl.scroll = 0.;
+            }
+        }
         // Identity row; in the art view it sits on the cover's lower edge. Title and artist are links.
         let cy = lerp(body_bottom - 50. + 23.0..=ident_top + 23., va);
         let tx = lerp(x0..=small.max.x + 10., va);
@@ -1126,6 +1218,15 @@ impl App {
         let below = Rect::everything_below(cr.max.y);
         match view {
             PlayerView::Art => {}
+            PlayerView::Viz => {
+                let lv = crate::viz::levels(ui.ctx(), &pl.engine);
+                crate::viz::repaint(ui.ctx(), &lv);
+                let area = body.shrink2(vec2(0., 10.));
+                let area = Rect::from_center_size(area.center(), vec2(area.width(), area.height().min(area.width() * 1.1)));
+                if viz_style != crate::viz::MILKDROP {
+                    crate::viz::draw(&p, viz_style, area, &lv, it.tx.gamma_multiply(op));
+                }
+            }
             PlayerView::Lyrics => {
                 // Wider than `body` so the hover highlight's padding isn't clipped flat at the text edge.
                 let mut b = App::region(ui, body.expand2(vec2(GLOW_ROOM, 0.)));
@@ -1175,7 +1276,7 @@ impl App {
                     let mut offs = vec![pl.scroll; n];
                     let mut browsing = false;
                     let mut follow = 0.;
-                    if l.synced {
+                    if l.synced && self.opts.lyrics_follow {
                         let want = cur.map_or(0., |i| ys_end[i] - 30.).clamp(0., max_scroll);
                         let an = &mut pl.lyr_anim;
                         if an.from.len() != n || now - an.seen > 0.3 {
@@ -1213,7 +1314,7 @@ impl App {
                             let mut moving = false;
                             for i in 0..n {
                                 let d = if an.back { c0 - i as isize } else { i as isize - c0 }.clamp(0, 3) as f32;
-                                let k = ((now - an.t0) as f32 - d * LYR_STAGGER) / LYR_DUR;
+                                let k = if reduced_motion() { 1. } else { ((now - an.t0) as f32 - d * LYR_STAGGER) / LYR_DUR };
                                 moving |= k < 1.;
                                 offs[i] = lerp(an.from[i]..=an.to, lyr_ease(k.clamp(0., 1.)));
                             }
@@ -1232,8 +1333,9 @@ impl App {
                         let bw = crate::gfx::text_w(&bp, "Resync", font_w(12., Weight::Semi)) + 28.;
                         Rect::from_min_size(pos2(x1 - bw, area.max.y - 44.), vec2(bw, 30.))
                     });
-                    let hover_ok = l.synced && b.rect_contains_pointer(area) && !btn.is_some_and(|r| ui.rect_contains_pointer(r));
+                    let hover_ok = l.synced && self.opts.lyrics_tap_seek && b.rect_contains_pointer(area) && !btn.is_some_and(|r| ui.rect_contains_pointer(r));
                     let scroll_line = cur.unwrap_or(0);
+                    let lx = |g: &std::sync::Arc<egui::Galley>| if self.opts.lyrics_center { x0 + (w - g.size().x) / 2. } else { x0 };
                     for (i, g) in gs.into_iter().enumerate() {
                         let gap = l.lines[i].1.is_empty();
                         let rh = if gap { gap_row * swell[i] } else { g.size().y + ex(i) + 2. * GLOW_ROOM };
@@ -1244,7 +1346,7 @@ impl App {
                         let row = Rect::from_min_size(pos2(x0 - GLOW_ROOM, top), vec2(w + 2. * GLOW_ROOM, rh));
                         let id = ("lyr-line", i);
                         let hit = hover_ok && ui.rect_contains_pointer(row.intersect(area));
-                        let ha = ctx.animate_bool_with_time_and_easing(ui.scope_id().with(id), hit, 0.18, ease_out);
+                        let ha = ctx.calm_bool_ease(ui.scope_id().with(id), hit, 0.18, ease_out);
                         if ha > 0. {
                             lp.rect_filled(row, rad(10.), it.tx.gamma_multiply(0.10 * ha));
                         }
@@ -1257,7 +1359,7 @@ impl App {
                         let di = i.abs_diff(scroll_line).min(4);
                         let sid = ui.scope_id().with(("lyr-fx", i));
                         let ta = if !l.synced { 0.95 } else if active { 1. } else if browsing { 0.5 } else { LINE_ALPHA[di] };
-                        let tb = if !l.synced || browsing || active { 0. } else { LINE_BLUR[di] };
+                        let tb = if !l.synced || browsing || active || reduced_motion() { 0. } else { LINE_BLUR[di] };
                         let a = tween(&ctx, sid.with("a"), ta, 0.4, lyr_ease);
                         let r = tween(&ctx, sid.with("r"), tb, 0.4, lyr_ease);
                         if gap {
@@ -1269,10 +1371,10 @@ impl App {
                             }
                         } else {
                             let up = rs[i].as_ref().map_or(0., |rg| {
-                                blur_galley(&lp, rg, pos2(x0, top + GLOW_ROOM), it.tx, a * 0.6, r);
+                                blur_galley(&lp, rg, pos2(lx(rg), top + GLOW_ROOM), it.tx, a * 0.6, r);
                                 ex(i)
                             });
-                            blur_galley(&lp, &g, pos2(x0, top + GLOW_ROOM + up), it.tx, a, r);
+                            blur_galley(&lp, &g, pos2(lx(&g), top + GLOW_ROOM + up), it.tx, a, r);
                         }
                     }
                     if let Some(b) = blur {

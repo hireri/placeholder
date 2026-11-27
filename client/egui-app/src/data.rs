@@ -2,10 +2,10 @@
 
 use crate::backend;
 use eframe::egui::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -85,6 +85,23 @@ fn hidden(explicit: bool, video: bool) -> bool {
     explicit && HIDE_EXPLICIT.load(Ordering::Relaxed) || video && HIDE_VIDEO.load(Ordering::Relaxed)
 }
 
+/// Home shelves the user hid, as `HOME_*` bits; applied to the feed as it arrives (shelf titles are all the daemon gives).
+pub static HOME_HIDE: AtomicU8 = AtomicU8::new(0);
+pub const HOME_SHELVES: [(u8, &[&str]); 4] = [(1, &["listen again", "recent"]), (2, &["mood", "genre"]), (4, &["quick picks", "top picks"]), (8, &["short"])];
+pub const HOME_MUSIC_ONLY: u8 = 16;
+
+pub fn clean_home(v: &mut Vec<Section>) {
+    let m = HOME_HIDE.load(Ordering::Relaxed);
+    v.retain(|s| {
+        let t = s.title.to_lowercase();
+        !HOME_SHELVES.iter().any(|(bit, words)| m & bit != 0 && words.iter().any(|w| t.contains(w))) && (m & HOME_MUSIC_ONLY == 0 || !["podcast", "episode"].iter().any(|w| t.contains(w)))
+    });
+    if m & HOME_MUSIC_ONLY != 0 {
+        v.iter_mut().for_each(|s| s.items.retain(|i| !i.video));
+        v.retain(|s| !s.items.is_empty());
+    }
+}
+
 pub fn clean_sections(v: &mut Vec<Section>) {
     for s in v.iter_mut() {
         s.items.retain(|i| !hidden(i.explicit, i.video));
@@ -117,7 +134,7 @@ pub struct Section {
     pub items: Vec<Item>,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Track {
     pub id: String,

@@ -1,0 +1,498 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Serafin Settings Prototype</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+/* Prototype of the Settings page inside the real shell (library rail + page card + player) so the width cost is honest.
+   Tokens match desktop-design.html: surfaces s0..s3, text tx/tm/tf, accent ax/axc, all derived from hue/chroma. */
+:root { --sans: "Inter", system-ui, sans-serif; color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0d0e11; color: #d8dae0; font: 400 13px/1.5 var(--sans); min-height: 100vh; padding: 20px 20px 60px; }
+.bar { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; max-width: 1280px; margin: 0 auto 14px; font-size: 12px; color: #9aa0ab; }
+.bar label { display: flex; align-items: center; gap: 8px; }
+.bar input[type=range] { width: 160px; accent-color: #93a6ff; }
+.bar b { color: #e8eaee; font-weight: 600; min-width: 4ch; display: inline-block; }
+.bar button { font: inherit; color: #d8dae0; background: #1a1d23; border: 1px solid #2a2e37; border-radius: 999px; padding: 4px 12px; cursor: pointer; }
+.bar button[aria-pressed=true] { border-color: #93a6ff; color: #93a6ff; }
+.stage { overflow-x: auto; max-width: 1280px; margin: 0 auto; }
+
+.mock {
+  --h: 265; --ac: 0.13; --nc: 0.012; --z: 1;
+  --s0: oklch(0.17 var(--nc) var(--h)); --s1: oklch(0.205 var(--nc) var(--h)); --s2: oklch(0.25 var(--nc) var(--h)); --s3: oklch(0.30 var(--nc) var(--h));
+  --tx: oklch(0.96 0.008 var(--h)); --tm: oklch(0.72 0.02 var(--h)); --tf: oklch(0.56 0.02 var(--h));
+  --ax: oklch(0.78 var(--ac) var(--h)); --on-ax: oklch(0.2 0.03 var(--h)); --axc: oklch(0.32 calc(var(--ac) * 0.55) var(--h));
+  --w: 1100px; width: var(--w); height: 740px; margin: 0 auto; background: var(--s0); color: var(--tx); border-radius: 12px; overflow: hidden;
+  display: grid; grid-template-columns: var(--lib) minmax(0, 1fr) var(--pl); grid-template-rows: 48px minmax(0, 1fr); --lib: 220px; --pl: 290px;
+  transition: grid-template-columns 300ms cubic-bezier(0.32, 0.72, 0, 1); box-shadow: 0 20px 60px #0008;
+}
+.mock.lib-c { --lib: 64px; } .mock.pl-c { --pl: 56px; }
+.mock[data-mode=light] {
+  --s0: oklch(0.975 var(--nc) var(--h)); --s1: oklch(0.95 var(--nc) var(--h)); --s2: oklch(0.925 var(--nc) var(--h)); --s3: oklch(0.89 var(--nc) var(--h));
+  --tx: oklch(0.22 0.02 var(--h)); --tm: oklch(0.46 0.02 var(--h)); --tf: oklch(0.6 0.015 var(--h));
+  --ax: oklch(0.5 var(--ac) var(--h)); --on-ax: oklch(0.98 0.01 var(--h)); --axc: oklch(0.9 calc(var(--ac) * 0.5) var(--h)); }
+.mock :where(button, input) { font: inherit; color: inherit; } .mock :where(button) { background: none; border: 0; padding: 0; cursor: pointer; }
+.mock svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.mock :focus-visible { outline: 2px solid var(--ax); outline-offset: 2px; }
+
+/* titlebar + side panels (context only) */
+.tb { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 0 12px; }
+.tb .logo { width: 26px; height: 26px; border-radius: 8px; background: var(--ax); }
+.tb .crumb { margin-left: 8px; color: var(--tm); font-weight: 500; }
+.tb .sp { flex: 1; } .tb .me { width: 28px; height: 28px; border-radius: 50%; background: var(--axc); display: grid; place-items: center; font-size: 11px; font-weight: 600; }
+.ib { width: 32px; height: 32px; border-radius: 999px; display: grid; place-items: center; color: var(--tm); }
+.ib:hover { background: var(--s2); color: var(--tx); }
+.lib { padding: 4px 8px 10px 10px; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.lib .li { display: flex; align-items: center; gap: 12px; height: 38px; padding: 0 12px; border-radius: 999px; color: var(--tm); white-space: nowrap; font-weight: 500; }
+.lib .li.on { background: var(--s2); color: var(--tx); }
+.lib .art { width: 24px; height: 24px; border-radius: 5px; background: linear-gradient(140deg, oklch(0.66 0.16 calc(var(--h) + var(--o))), oklch(0.34 0.1 calc(var(--h) + var(--o) - 90))); flex: none; }
+.mock.lib-c .li span { display: none; }
+.pl { margin: 0 10px 10px 0; background: var(--s1); border-radius: 18px; padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+.pl .cover { aspect-ratio: 1; border-radius: 10px; background: linear-gradient(140deg, oklch(0.66 0.16 calc(var(--h) + 50)), oklch(0.34 0.1 calc(var(--h) - 40))); }
+.pl .ti { font-weight: 650; font-size: 15px; } .pl .ar { color: var(--tm); }
+.pl .scrub { height: 4px; border-radius: 2px; background: var(--s3); position: relative; } .pl .scrub i { position: absolute; inset: 0 62% 0 0; background: var(--tx); border-radius: 2px; }
+.pl .tp { display: flex; justify-content: center; gap: 6px; } .pl .tp .ib { width: 40px; height: 40px; color: var(--tx); }
+.mock.pl-c .pl > *:not(.tp) { display: none; } .mock.pl-c .pl { padding: 10px 6px; } .mock.pl-c .tp .ib:not(.pp) { display: none; }
+
+/* the page card */
+.mn { margin: 0 10px 10px 0; background: var(--s1); border-radius: 18px; min-width: 0; display: flex; flex-direction: column; overflow: hidden; position: relative; container-type: inline-size; container-name: pg; }
+.head { display: flex; align-items: center; padding: 16px 22px 4px; min-height: 64px; }
+.hl { flex: 1; display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 6px 0 14px; border-radius: 999px; background: var(--s0); color: var(--tm); }
+.hl:focus-within { box-shadow: 0 0 0 2px var(--ax); } .hl input { flex: 1; min-width: 0; border: 0; background: none; outline: 0; font-size: 14px; color: var(--tx); } .hl input::placeholder { color: var(--tm); }
+.hl .x { visibility: hidden; } .searching .hl .x { visibility: visible; }
+.hp { display: flex; align-items: center; gap: 6px; } .hp[hidden], .hl[hidden] { display: none; } .hp h2 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.015em; } .hp .ib { margin-left: -8px; width: 36px; height: 36px; color: var(--tx); }
+.land { display: flex; flex-direction: column; gap: 20px; } .searching .land, .inpage .land { display: none; }
+.cr { display: flex; align-items: center; gap: 14px; min-height: 62px; padding: 10px 16px; width: 100%; text-align: left; transition: background-color 90ms; }
+.cr + .cr { border-top: 1px solid color-mix(in oklch, var(--s3) 60%, transparent); } .cr:hover { background: var(--s3); } .cr:active { background: color-mix(in oklch, var(--s3), var(--tx) 8%); }
+.cr svg.i { width: 20px; height: 20px; color: var(--ax); } .cr .tx { flex: 1; min-width: 0; } .cr .t { font-weight: 550; font-size: 14px; } .cr .d { color: var(--tm); font-size: 12px; } .cr .cv { color: var(--tm); }
+.scroll { flex: 1; overflow-y: auto; padding: 22px 22px 32px; scrollbar-width: none; }
+.scroll::-webkit-scrollbar { display: none; }
+.pg { zoom: var(--z); display: flex; flex-direction: column; gap: 20px; }
+.page { display: none; flex-direction: column; gap: 20px; } .page.on, .searching .page { display: flex; }
+
+/* sections and rows */
+.sec { display: flex; flex-direction: column; gap: 8px; }
+.sh { display: flex; align-items: center; gap: 8px; padding: 0 4px; font-weight: 600; font-size: 12px; color: var(--tm); letter-spacing: 0.01em; }
+.sh small { color: var(--tm); font-weight: 500; margin-left: 2px; display: none; } .searching .sh small { display: inline; }
+.card { background: var(--s2); border-radius: 16px; overflow: hidden; }
+.r { display: flex; align-items: center; gap: 16px; min-height: 54px; padding: 9px 16px; }
+.r + .r { border-top: 1px solid color-mix(in oklch, var(--s3) 60%, transparent); }
+.r .tx { flex: 1; min-width: 0; } .r .t { color: var(--tx); font-weight: 500; } .r .d { color: var(--tm); font-size: 12px; margin-top: 1px; }
+.r.hide, .sec.hide, .page.hide { display: none !important; }
+.stack { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
+.stack .top { display: flex; align-items: center; gap: 12px; } .stack .top .tx { flex: 1; }
+
+/* controls */
+.sw { width: 38px; height: 22px; border-radius: 11px; background: var(--s3); position: relative; flex: none; transition: background-color 150ms; }
+.sw::after { content: ""; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--tm); transition: transform 150ms cubic-bezier(0.32, 0.72, 0, 1), background-color 150ms; }
+.sw[aria-pressed=true] { background: var(--ax); } .sw[aria-pressed=true]::after { transform: translateX(16px); background: var(--on-ax); }
+.seg { display: flex; padding: 2px; border-radius: 10px; background: var(--s1); flex: none; }
+.seg button { height: 26px; padding: 0 12px; border-radius: 8px; color: var(--tm); font-weight: 500; white-space: nowrap; transition: background-color 150ms, color 150ms; }
+.seg button:hover { background: var(--s2); } .seg button[aria-pressed=true] { background: var(--axc); color: var(--tx); }
+.btn { height: 34px; padding: 0 16px; border-radius: 999px; background: var(--s3); font-weight: 600; white-space: nowrap; flex: none; }
+.btn:hover { background: color-mix(in oklch, var(--s3), var(--tx) 10%); }
+.btn.pri { background: var(--ax); color: var(--on-ax); } .btn.pri:hover { background: color-mix(in oklch, var(--ax), white 10%); }
+.pill { height: 26px; padding: 0 10px; border-radius: 999px; background: var(--s1); color: var(--tm); display: inline-flex; align-items: center; gap: 6px; font-weight: 550; font-size: 12px; flex: none; white-space: nowrap; }
+.pill.ok { background: var(--axc); color: var(--tx); } .pill.ok::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ax); }
+.pick { height: 32px; padding: 0 10px 0 12px; border-radius: 8px; background: var(--s1); display: inline-flex; align-items: center; gap: 8px; min-width: 150px; justify-content: space-between; font-weight: 500; flex: none; }
+.pick:hover { background: var(--s3); } .pick svg { color: var(--tm); }
+.step { display: flex; align-items: center; border-radius: 10px; background: var(--s1); flex: none; }
+.step button { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; color: var(--tm); } .step button:hover { background: var(--s3); color: var(--tx); }
+.step output { min-width: 52px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+.field { height: 32px; width: 200px; border-radius: 8px; background: var(--s1); border: 0; padding: 0 12px; outline: 0; flex: none; } .field:focus { box-shadow: inset 0 0 0 2px var(--ax); }
+.range { appearance: none; width: 100%; height: 24px; background: none; margin: 0; cursor: pointer; }
+.range::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(to right, var(--ax) var(--p, 0%), var(--s3) var(--p, 0%)); }
+.range::-webkit-slider-thumb { appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--ax); margin-top: -6px; transition: transform 100ms; }
+.range:active::-webkit-slider-thumb { transform: scale(1.2); }
+.ticks { display: flex; justify-content: space-between; color: var(--tm); font-size: 11px; padding: 0 2px; font-variant-numeric: tabular-nums; }
+
+/* appearance: mode tiles, swatches */
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.tile { display: flex; flex-direction: column; gap: 8px; align-items: stretch; text-align: left; color: var(--tm); font-weight: 550; }
+.tile .pv { aspect-ratio: 16 / 9; border-radius: 12px; box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--tx) 14%, transparent); overflow: hidden; position: relative; transition: box-shadow 150ms; }
+.tile[aria-pressed=true] { color: var(--tx); } .tile[aria-pressed=true] .pv { box-shadow: 0 0 0 2px var(--ax); }
+.tile .lab { display: flex; align-items: center; gap: 8px; } .tile .lab i { width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--tf); display: grid; place-items: center; }
+.tile[aria-pressed=true] .lab i { background: var(--ax); box-shadow: none; } .tile[aria-pressed=true] .lab i::after { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--on-ax); }
+.pv .a { position: absolute; inset: 0; display: grid; grid-template-columns: 22% 1fr 26%; gap: 4px; padding: 5px; }
+.pv .a i { border-radius: 5px; display: block; } .pv .a i:nth-child(2) { background: var(--c2); } .pv .a i:nth-child(1), .pv .a i:nth-child(3) { background: var(--c1); }
+.pv .a::before { content: ""; position: absolute; inset: 0; background: var(--c0); z-index: -1; } .pv .a { isolation: isolate; }
+.pv .a u { position: absolute; left: 30%; top: 22%; width: 28%; height: 6px; border-radius: 3px; background: var(--cx); }
+.pv.dk { --c0: #14161b; --c1: #1b1e25; --c2: #23272f; --cx: oklch(0.78 var(--ac) var(--h)); } .pv.lt { --c0: #f1f2f5; --c1: #e6e8ec; --c2: #fff; --cx: oklch(0.5 var(--ac) var(--h)); }
+.pv.sys .half { position: absolute; inset: 0; clip-path: polygon(0 0, 100% 0, 0 100%); }
+.pv.sys .half.b { clip-path: polygon(100% 0, 100% 100%, 0 100%); }
+.swatches { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 8px; }
+.sx { width: 100%; aspect-ratio: 1; border: 0; border-radius: 50%; position: relative; background: oklch(0.7 var(--c) var(--hh)); } .sx.mono { background: linear-gradient(135deg, #ddd, #666); }
+.sx[aria-pressed=true]::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid var(--tx); }
+.sx:hover { transform: scale(1.06); } .sx { transition: transform 100ms; }
+.gated { opacity: 0.45; pointer-events: none; }
+
+/* playback: crossfade card */
+.xf { height: 70px; border-radius: 12px; background: var(--s1); padding: 8px 12px; } .xf svg { width: 100%; height: 100%; display: block; }
+.xf .ta { fill: color-mix(in oklch, var(--tm) 55%, transparent); } .xf .tb2 { fill: color-mix(in oklch, var(--ax) 70%, transparent); } .xf .mid { stroke: var(--tf); stroke-dasharray: 3 4; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; } .chips button { height: 30px; padding: 0 14px; border-radius: 999px; background: var(--s1); color: var(--tm); font-weight: 550; }
+.chips button[aria-pressed=true] { background: var(--axc); color: var(--tx); }
+
+/* library */
+.prov { display: flex; align-items: center; gap: 12px; } .prov .n { width: 22px; height: 22px; border-radius: 7px; background: var(--s1); color: var(--tm); display: grid; place-items: center; font-size: 11px; font-weight: 700; }
+.mv { display: flex; } .mv .ib { width: 28px; height: 28px; }
+
+/* storage */
+.meter { height: 10px; border-radius: 5px; background: var(--s1); overflow: hidden; display: flex; } .meter i { display: block; height: 100%; background: var(--ax); transition: width 300ms; } .meter i + i { background: color-mix(in oklch, var(--ax) 45%, var(--s1)); }
+.mstat { display: flex; justify-content: space-between; color: var(--tm); font-variant-numeric: tabular-nums; } .mstat b { color: var(--tx); font-weight: 650; font-size: 20px; letter-spacing: -0.01em; } .mstat b small { font-size: 13px; color: var(--tm); font-weight: 500; }
+.legend { display: flex; gap: 16px; color: var(--tm); font-size: 12px; } .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ax); margin-right: 6px; } .legend i.b { background: color-mix(in oklch, var(--ax) 45%, var(--s1)); }
+
+/* accounts */
+.acct { display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 16px; background: var(--s2); }
+.acct .av { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 15px; background: var(--axc); flex: none; }
+.acct .av.y { background: oklch(0.55 0.2 25); color: #fff; } .acct .av.s { background: oklch(0.65 0.18 150); color: #072; } .acct .av.l { background: oklch(0.5 0.2 25); color: #fff; } .acct .av.d { background: oklch(0.55 0.15 275); color: #fff; }
+.acct .tx { flex: 1; min-width: 0; } .acct .t { font-weight: 600; font-size: 14px; } .acct .d { color: var(--tm); font-size: 12px; }
+
+/* system */
+.keys { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 28px; padding: 6px 18px; }
+.k { display: flex; align-items: center; justify-content: space-between; height: 40px; border-bottom: 1px solid color-mix(in oklch, var(--s3) 50%, transparent); } .k div { display: flex; gap: 4px; }
+kbd { font: 600 11.5px var(--sans); min-width: 24px; height: 24px; padding: 0 7px; border-radius: 7px; background: var(--s3); box-shadow: 0 1px 0 color-mix(in oklch, var(--tx) 12%, transparent); display: inline-grid; place-items: center; color: var(--tx); }
+.empty { color: var(--tm); padding: 40px 4px; display: none; } .searching.none .empty { display: block; }
+.notes { max-width: 1280px; margin: 18px auto 0; color: #9aa0ab; font-size: 12.5px; line-height: 1.6; } .notes b { color: #e8eaee; }
+</style>
+
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18c1.2 0 1.8-.8 1.8-1.7 0-.5-.2-.9-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1 .8-1.7 1.8-1.7H17a4 4 0 0 0 4-4c0-4-4-8-9-8Z"/><circle cx="7.5" cy="11" r=".6"/><circle cx="10" cy="7" r=".6"/><circle cx="15" cy="7.5" r=".6"/></symbol>
+<symbol id="play" viewBox="0 0 24 24"><path d="M7 5v14l12-7z"/></symbol>
+<symbol id="lib" viewBox="0 0 24 24"><path d="M5 4v16M10 4v16"/><path d="m14.5 5.5 4.5-1.4 1.4 14.5-4.5 1.4z" transform="translate(-1 0)"/></symbol>
+<symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+<symbol id="user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></symbol>
+<symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8"/></symbol>
+<symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></symbol>
+<symbol id="x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+<symbol id="chev" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+<symbol id="minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol><symbol id="plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></symbol>
+<symbol id="up" viewBox="0 0 24 24"><path d="m7 14 5-5 5 5"/></symbol><symbol id="down" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+<symbol id="home" viewBox="0 0 24 24"><path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/></symbol>
+<symbol id="note" viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></symbol>
+<symbol id="lyr" viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h13"/></symbol>
+<symbol id="globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.6 2.4 3.6 5.2 3.6 8.5s-1 6.1-3.6 8.5c-2.6-2.4-3.6-5.2-3.6-8.5s1-6.1 3.6-8.5Z"/></symbol>
+<symbol id="filter" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></symbol>
+<symbol id="disk" viewBox="0 0 24 24"><ellipse cx="12" cy="6.5" rx="7.5" ry="3"/><path d="M4.5 6.5v11c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-11M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"/></symbol>
+<symbol id="eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+<symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+<symbol id="wave" viewBox="0 0 24 24"><path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 10v4M21.5 12h-.5"/></symbol>
+<symbol id="queue" viewBox="0 0 24 24"><path d="M4 7h12M4 12h12M4 17h7M18 14v6l4-3z"/></symbol>
+<symbol id="zoom" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+<symbol id="win" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M3.5 9.5h17"/></symbol>
+<symbol id="key" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></symbol>
+<symbol id="folder" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2H10l2 2.5h6.5a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+<symbol id="reset" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.6-5.9M4 4v4.5h4.5"/></symbol>
+<symbol id="back" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol><symbol id="fwd" viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"/></symbol>
+<symbol id="next" viewBox="0 0 24 24"><path d="M6 5v14l9-7zM18 5v14"/></symbol><symbol id="prev" viewBox="0 0 24 24"><path d="M18 5v14L9 12zM6 5v14"/></symbol>
+<symbol id="link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+</defs></svg>
+
+<div class="bar">
+  <label>Accent <span id="accbar" style="display:flex;gap:6px"></span></label>
+  <label>Window width <input id="w" type="range" min="760" max="1280" step="10" value="1100"><b id="wv">1100</b></label>
+  <button id="bl" aria-pressed="false">Collapse library</button>
+  <button id="bp" aria-pressed="false">Collapse player</button>
+  <button id="bm" aria-pressed="false">Light</button>
+</div>
+
+<div class="stage"><div class="mock" id="m" data-mode="dark">
+  <div class="tb">
+    <div class="logo"></div><button class="ib" aria-label="Back"><svg class="i"><use href="#back"/></svg></button><button class="ib" aria-label="Forward"><svg class="i"><use href="#fwd"/></svg></button>
+    <span class="crumb">Settings</span><span class="sp"></span><div class="me">A</div>
+  </div>
+  <aside class="lib">
+    <div class="li"><svg class="i"><use href="#home"/></svg><span>Home</span></div>
+    <div class="li"><svg class="i"><use href="#search"/></svg><span>Search</span></div>
+    <div class="li"><svg class="i"><use href="#lib"/></svg><span>Library</span></div>
+    <div class="li" style="margin-top:10px"><span class="art" style="--o:0"></span><span>Late Night Drive</span></div>
+    <div class="li"><span class="art" style="--o:80"></span><span>Focus</span></div>
+    <div class="li"><span class="art" style="--o:160"></span><span>Liked songs</span></div>
+    <div class="li"><span class="art" style="--o:240"></span><span>Road trip</span></div>
+  </aside>
+
+  <main class="mn">
+    <div class="head">
+      <div class="hl" id="hl"><svg class="i"><use href="#search"/></svg><input id="q" placeholder="Search settings" aria-label="Search settings"><button class="ib x" id="qx" aria-label="Clear"><svg class="i"><use href="#x"/></svg></button></div>
+      <div class="hp" id="hp" hidden><button class="ib" id="bk" aria-label="Back to settings"><svg class="i"><use href="#back"/></svg></button><h2 id="ht"></h2></div>
+    </div>
+    <div class="scroll"><div class="pg" id="pg"><div class="land" id="land"></div>
+
+      <!-- APPEARANCE -->
+      <div class="page" data-p="0" data-name="Appearance">
+        <section class="sec"><div class="sh">Theme<small></small></div>
+          <div class="card">
+            <div class="stack r" data-k="mode light dark system follow the system" style="display:block;border:0"><div class="top"><div class="tx"><div class="t">Mode</div><div class="d">Light, dark, or follow the system</div></div></div>
+              <div class="tiles" id="tiles" style="margin-top:14px">
+                <button class="tile" data-m="system"><div class="pv sys"><div class="half a-dk"><div class="a pv dk" style="position:absolute;inset:0"><i></i><i></i><i></i><u></u></div></div><div class="half b"><div class="a pv lt" style="position:absolute;inset:0"><i></i><i></i><i></i><u></u></div></div></div><span class="lab"><i></i>System</span></button>
+                <button class="tile" data-m="light"><div class="pv lt"><div class="a"><i></i><i></i><i></i><u></u></div></div><span class="lab"><i></i>Light</span></button>
+                <button class="tile" data-m="dark" aria-pressed="true"><div class="pv dk"><div class="a"><i></i><i></i><i></i><u></u></div></div><span class="lab"><i></i>Dark</span></button>
+              </div></div>
+            <div class="r" data-k="theme from artwork accent cover"><div class="tx"><div class="t">Theme from artwork</div><div class="d">Colour the app from the playing cover instead of a fixed accent</div></div><button class="sw" id="art" aria-pressed="true" aria-label="Theme from artwork"></button></div>
+            <div class="stack r" id="accrow" data-k="accent colour preset" style="display:block"><div class="top"><div class="tx"><div class="t">Accent colour</div><div class="d" id="accd">Blue · used when the theme isn't taken from artwork</div></div></div><div class="swatches" id="swatches" style="margin-top:14px"></div></div>
+            <div class="r" data-k="pure black oled"><div class="tx"><div class="t">Pure black</div><div class="d">True black surfaces in dark mode, for OLED screens</div></div><button class="sw" aria-pressed="false" aria-label="Pure black"></button></div>
+            <div class="r" data-k="custom theme toml"><div class="tx"><div class="t">Custom theme</div><div class="d">Colours from theme.toml in the config folder</div></div><button class="sw" aria-pressed="false" aria-label="Custom theme"></button></div>
+          </div></section>
+        <section class="sec"><div class="sh">Display<small></small></div>
+          <div class="card"><div class="r" data-k="ui scale zoom size"><div class="tx"><div class="t">UI scale</div><div class="d">Make everything smaller to fit more, or larger to read. Applies live.</div></div>
+            <div class="seg" data-seg="scale"><button>80%</button><button>90%</button><button aria-pressed="true">100%</button><button>110%</button><button>125%</button><button>150%</button></div></div>
+            <div class="r" data-k="row density compact comfortable"><div class="tx"><div class="t">Row density</div><div class="d">Height of track rows in lists</div></div><div class="seg" data-seg><button aria-pressed="true">Comfortable</button><button>Compact</button></div></div>
+            <div class="r" data-k="tint headers artwork"><div class="tx"><div class="t">Tint headers from artwork</div><div class="d">Colour album and artist headers from the cover</div></div><button class="sw" aria-pressed="true" aria-label="Tint"></button></div>
+            <div class="r" data-k="font family"><div class="tx"><div class="t">Font</div><div class="d">Name of an installed font family; empty uses Allo</div></div><input class="field" placeholder="Allo" aria-label="Font"></div>
+          </div></section>
+        <section class="sec"><div class="sh">Window<small></small></div>
+          <div class="card"><div class="r" data-k="keep playing tray close quit"><div class="tx"><div class="t">Keep playing in the tray</div><div class="d">Closing the window hides it to the tray; off quits and stops the music</div></div><button class="sw" aria-pressed="true" aria-label="Tray"></button></div></div></section>
+      </div>
+
+      <!-- PLAYBACK -->
+      <div class="page" data-p="1" data-name="Playback">
+        <section class="sec"><div class="sh">Audio<small></small></div>
+          <div class="card">
+            <div class="stack r" data-k="crossfade overlap fade" style="display:block"><div class="top"><div class="tx"><div class="t">Crossfade</div><div class="d">Overlap the end of a song with the start of the next</div></div><span class="pill" id="xv">6 s</span></div>
+              <div class="xf" style="margin-top:12px"><svg id="xs" viewBox="0 0 300 54" preserveAspectRatio="none"></svg></div>
+              <input class="range" id="xr" type="range" min="0" max="12" value="6" style="margin-top:6px"><div class="ticks"><span>Off</span><span>3 s</span><span>6 s</span><span>9 s</span><span>12 s</span></div></div>
+            <div class="r" data-k="audio quality auto low high"><div class="tx"><div class="t">Audio quality</div><div class="d">Stream quality for songs</div></div><div class="seg" data-seg><button aria-pressed="true">Auto</button><button>Low</button><button>High</button></div></div>
+            <div class="r" data-k="normalize volume loudness"><div class="tx"><div class="t">Normalize volume</div><div class="d">Even out loud and quiet songs using YouTube's loudness data</div></div><button class="sw" aria-pressed="true" aria-label="Normalize"></button></div>
+            <div class="r" data-k="gapless"><div class="tx"><div class="t">Gapless playback</div><div class="d">Play consecutive tracks without a pause between them</div></div><button class="sw" aria-pressed="true" aria-label="Gapless"></button></div>
+          </div></section>
+        <section class="sec"><div class="sh">Queue<small></small></div>
+          <div class="card">
+            <div class="r" data-k="endless similar songs queue"><div class="tx"><div class="t">Start with Endless on</div><div class="d">Keep adding similar songs when the queue runs out</div></div><button class="sw" aria-pressed="false" aria-label="Endless"></button></div>
+            <div class="r" data-k="duplicate songs queue"><div class="tx"><div class="t">Prevent duplicate songs</div><div class="d">Adding a song that is already in the queue does nothing</div></div><button class="sw" aria-pressed="true" aria-label="Duplicates"></button></div>
+            <div class="r" data-k="remember shuffle repeat"><div class="tx"><div class="t">Remember shuffle and repeat</div><div class="d">Keep both modes when the app restarts</div></div><button class="sw" aria-pressed="true" aria-label="Remember"></button></div>
+          </div></section>
+        <section class="sec"><div class="sh">Controls<small></small></div>
+          <div class="card">
+            <div class="r" data-k="seek step arrow keys"><div class="tx"><div class="t">Seek step</div><div class="d">How far the left and right arrow keys jump</div></div><div class="step" data-step="5,10,15" data-u=" s" data-i="0"><button aria-label="Less"><svg class="i"><use href="#minus"/></svg></button><output>5 s</output><button aria-label="More"><svg class="i"><use href="#plus"/></svg></button></div></div>
+            <div class="r" data-k="volume step"><div class="tx"><div class="t">Volume step</div><div class="d">How much Ctrl with the up and down arrows changes the volume</div></div><div class="step" data-step="2,5,10" data-u="%" data-i="1"><button aria-label="Less"><svg class="i"><use href="#minus"/></svg></button><output>5%</output><button aria-label="More"><svg class="i"><use href="#plus"/></svg></button></div></div>
+            <div class="stack r" data-k="sleep timer" style="display:block"><div class="top"><div class="tx"><div class="t">Sleep timer</div><div class="d">Stop playback after a while</div></div></div><div class="chips" data-seg style="margin-top:12px"><button aria-pressed="true">Off</button><button>15 min</button><button>30 min</button><button>60 min</button><button>End of song</button></div></div>
+          </div></section>
+        <section class="sec"><div class="sh">Video<small></small></div>
+          <div class="card">
+            <div class="r" data-k="music videos default"><div class="tx"><div class="t">Play music videos by default</div><div class="d">Show the video instead of the cover when a song has one</div></div><button class="sw" aria-pressed="true" aria-label="Video"></button></div>
+            <div class="r" data-k="video quality height"><div class="tx"><div class="t">Default video quality</div><div class="d">Maximum height of music videos</div></div><div class="seg" data-seg><button aria-pressed="true">480p</button><button>720p</button><button>1080p</button></div></div>
+          </div></section>
+      </div>
+
+      <!-- LIBRARY -->
+      <div class="page" data-p="2" data-name="Library">
+        <section class="sec"><div class="sh">Region<small></small></div>
+          <div class="card">
+            <div class="r" data-k="content language"><div class="tx"><div class="t">Content language</div><div class="d">Language of titles and shelves from YouTube Music</div></div><button class="pick">English <svg class="i"><use href="#chev"/></svg></button></div>
+            <div class="r" data-k="content country region"><div class="tx"><div class="t">Content country</div><div class="d">Region that decides which music YouTube Music recommends</div></div><button class="pick">System default <svg class="i"><use href="#chev"/></svg></button></div>
+          </div></section>
+        <section class="sec"><div class="sh">Filters<small></small></div>
+          <div class="card">
+            <div class="r" data-k="hide explicit"><div class="tx"><div class="t">Hide explicit content</div><div class="d">Leave explicit songs out of lists and search</div></div><button class="sw" aria-pressed="false" aria-label="Explicit"></button></div>
+            <div class="r" data-k="hide video songs"><div class="tx"><div class="t">Hide video songs</div><div class="d">Leave music-video versions out of lists and search</div></div><button class="sw" aria-pressed="false" aria-label="Video songs"></button></div>
+            <div class="r" data-k="artist description bio"><div class="tx"><div class="t">Artist description</div><div class="d">Show the biography on artist pages</div></div><button class="sw" aria-pressed="true" aria-label="Bio"></button></div>
+            <div class="r" data-k="subscriber count"><div class="tx"><div class="t">Subscriber count</div><div class="d">Show how many people subscribe to an artist</div></div><button class="sw" aria-pressed="true" aria-label="Subs"></button></div>
+            <div class="r" data-k="monthly listeners"><div class="tx"><div class="t">Monthly listeners</div><div class="d">Show an artist's monthly audience</div></div><button class="sw" aria-pressed="true" aria-label="Monthly"></button></div>
+          </div></section>
+        <section class="sec"><div class="sh">Lyrics<small></small></div>
+          <div class="card" id="prov">
+            <div class="r" data-k="romanize japanese romaji"><div class="tx"><div class="t">Romanize Japanese</div><div class="d">Show the reading in Latin letters under Japanese lyrics</div></div><button class="sw" aria-pressed="false" aria-label="Romaji"></button></div>
+            <div class="r" data-k="lyrics providers priority order"><div class="tx"><div class="t">Providers</div><div class="d">Tried top to bottom; the first with lyrics wins</div></div></div>
+          </div></section>
+        <section class="sec"><div class="sh">Proxy<small></small></div>
+          <div class="card">
+            <div class="r" data-k="use proxy"><div class="tx"><div class="t">Use a proxy</div><div class="d">Route the daemon's requests through a proxy server</div></div><button class="sw" aria-pressed="false" aria-label="Proxy"></button></div>
+            <div class="r" data-k="proxy type http socks"><div class="tx"><div class="t">Proxy type</div><div class="d">Protocol the proxy speaks</div></div><div class="seg" data-seg><button aria-pressed="true">HTTP</button><button>SOCKS</button></div></div>
+            <div class="r" data-k="proxy server host port"><div class="tx"><div class="t">Proxy server</div><div class="d">host:port</div></div><input class="field" aria-label="Proxy server"></div>
+          </div></section>
+      </div>
+
+      <!-- STORAGE -->
+      <div class="page" data-p="3" data-name="Storage">
+        <section class="sec"><div class="sh">Audio cache<small></small></div>
+          <div class="card"><div class="stack r" data-k="audio cache limit storage disk" style="display:block;border:0">
+            <div class="mstat"><b id="cu">312 <small>MB of 512 MB</small></b><span id="cp">61%</span></div>
+            <div class="meter" style="margin-top:10px"><i id="m1" style="width:42%"></i><i id="m2" style="width:19%"></i></div>
+            <div class="legend" style="margin-top:10px"><span><i></i>Songs you played</span><span><i class="b"></i>Prefetched next song</span></div>
+            <div style="display:flex;gap:12px;align-items:center;margin-top:16px;flex-wrap:wrap"><div class="seg" data-seg="cache"><button>Off</button><button>256 MB</button><button aria-pressed="true">512 MB</button><button>1 GB</button><button>2 GB</button></div><span style="flex:1"></span><button class="btn">Clear cache</button></div>
+          </div></div></section>
+        <section class="sec"><div class="sh">Backup<small></small></div>
+          <div class="card"><div class="r" data-k="export import preferences backup"><div class="tx"><div class="t">Preferences</div><div class="d">Save every setting on these pages to a file, or load one from another machine</div></div><button class="btn">Import</button><button class="btn">Export</button></div></div></section>
+        <section class="sec"><div class="sh">Files<small></small></div>
+          <div class="card">
+            <div class="r" data-k="data folder"><div class="tx"><div class="t">Data folder</div><div class="d">~/.config/serafin</div></div><button class="btn">Open</button></div>
+            <div class="r" data-k="log file"><div class="tx"><div class="t">Log file</div><div class="d">~/.config/serafin/daemon.log</div></div><button class="btn">Open</button></div>
+          </div></section>
+      </div>
+
+      <!-- PRIVACY -->
+      <div class="page" data-p="4" data-name="Privacy">
+        <section class="sec"><div class="sh">Privacy<small></small></div>
+          <div class="card">
+            <div class="r" data-k="private session"><div class="tx"><div class="t">Private session</div><div class="d">Pause Discord, YouTube history and Last.fm. Ends after 6 hours without playback or when you quit</div></div><button class="sw" aria-pressed="false" aria-label="Private"></button></div>
+            <div class="r" data-k="send listening history youtube"><div class="tx"><div class="t">Send listening history to YouTube</div><div class="d">Songs you play show up in your YouTube Music history</div></div><button class="sw" aria-pressed="true" aria-label="History"></button></div>
+            <div class="r" data-k="remember searches"><div class="tx"><div class="t">Remember searches</div><div class="d">Keep recent searches in the command palette</div></div><button class="sw" aria-pressed="true" aria-label="Searches"></button></div>
+            <div class="r" data-k="clear search history"><div class="tx"><div class="t">Clear search history</div><div class="d">3 recent searches saved</div></div><button class="btn">Clear</button></div>
+          </div></section>
+              </div>
+
+      <!-- ACCOUNTS -->
+      <div class="page" data-p="5" data-name="Accounts">
+        <section class="sec"><div class="sh">Accounts</div>
+          <div class="acct"><div class="av y">Y</div><div class="tx"><div class="t">YouTube Music</div><div class="d">Signed in as Aveline</div></div><span class="pill ok">Connected</span><button class="btn">Sign out</button></div>
+          <div class="acct"><div class="av s">S</div><div class="tx"><div class="t">Spotify</div><div class="d">Not signed in</div></div><button class="btn pri">Sign in</button></div>
+          <div class="acct"><div class="av l">L</div><div class="tx"><div class="t">Last.fm</div><div class="d">Signed in as hireri · scrobbling on</div></div><span class="pill ok">Connected</span><button class="btn">Sign out</button></div>
+          <div class="acct"><div class="av d">D</div><div class="tx"><div class="t">Discord</div><div class="d">Rich Presence: Listening to Serafin</div></div><button class="sw" aria-pressed="true" aria-label="Discord"></button></div>
+        </section>
+        <section class="sec"><div class="sh">Scrobbling<small></small></div>
+          <div class="card">
+            <div class="r" data-k="scrobble songs lastfm"><div class="tx"><div class="t">Scrobble songs</div><div class="d">Add what you listen to to your Last.fm profile</div></div><button class="sw" aria-pressed="true" aria-label="Scrobble"></button></div>
+            <div class="r" data-k="now playing lastfm"><div class="tx"><div class="t">Send now playing</div><div class="d">Show the current song on your Last.fm profile</div></div><button class="sw" aria-pressed="true" aria-label="Now playing"></button></div>
+            <div class="r" data-k="send likes love lastfm"><div class="tx"><div class="t">Send likes</div><div class="d">Love a song on Last.fm when you like it here</div></div><button class="sw" aria-pressed="false" aria-label="Likes"></button></div>
+            <div class="r" data-k="scrobble after percent"><div class="tx"><div class="t">Scrobble after</div><div class="d">Share of the song that has to play first</div></div><div class="seg" data-seg><button>30%</button><button aria-pressed="true">50%</button><button>70%</button><button>90%</button></div></div>
+          </div></section>
+      </div>
+
+      <!-- SYSTEM -->
+      <div class="page" data-p="6" data-name="System">
+        <section class="sec"><div class="sh">Keyboard shortcuts<small></small></div>
+          <div class="card"><div class="keys" id="keys" data-k="keyboard shortcuts keys"></div></div></section>
+        <section class="sec"><div class="sh">Reset<small></small></div>
+          <div class="card">
+            <div class="r" data-k="reset preferences defaults"><div class="tx"><div class="t">Reset preferences</div><div class="d">Put every setting back to its default; sign-ins and the proxy stay</div></div><button class="btn" id="reset">Reset</button></div>
+          </div></section>
+      </div>
+
+      <div class="empty" id="empty">No settings match your search.</div>
+    </div></div>
+  </main>
+
+  <aside class="pl">
+    <div class="cover"></div><div><div class="ti">Midnight City</div><div class="ar">M83</div></div>
+    <div class="scrub"><i></i></div>
+    <div class="tp"><button class="ib"><svg class="i"><use href="#prev"/></svg></button><button class="ib pp"><svg class="i" style="fill:currentColor;stroke:none;width:22px;height:22px"><use href="#play"/></svg></button><button class="ib"><svg class="i"><use href="#next"/></svg></button></div>
+  </aside>
+</div></div>
+
+<div class="notes"><b>What to look at.</b> No tabs, no modals: Settings is a grouped list (Metrolist's structure) and each row opens a full page with a back arrow; the titlebar back button does the same, so it rides on Serafin's existing history. Search lives on the landing and filters every page's rows. Try UI scale, accent, mode; collapse the side panels to see the width it costs.</div>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const m = $('#m');
+const ic = n => `<svg class="i"><use href="#${n}"/></svg>`;
+const CATS = [
+  ['Interface', [['Appearance', 'palette', 'Dark · Blue accent · 100% scale']]],
+  ['Player & content', [['Playback', 'play', 'Crossfade, queue, seek and volume steps'], ['Library', 'lib', 'Region, filters, lyrics, proxy']]],
+  ['Data', [['Storage', 'disk', '312 MB audio cache · backup · files'], ['Privacy', 'lock', 'Private session, history, searches']]],
+  ['Connections', [['Accounts', 'user', 'YouTube Music, Spotify, Last.fm, Discord']]],
+  ['System', [['System', 'gear', 'Keyboard shortcuts, reset']]],
+];
+const NAMES = CATS.flatMap(g => g[1].map(c => c[0]));
+let view = null;
+$('#land').innerHTML = CATS.map(([g, items]) => `<section class="sec"><div class="sh">${g}</div><div class="card">${items.map(([n, i, d]) => `<button class="cr" data-i="${NAMES.indexOf(n)}">${ic(i)}<span class="tx"><div class="t">${n}</div><div class="d">${d}</div></span><span class="cv">${ic('fwd')}</span></button>`).join('')}</div></section>`).join('');
+function show(i) {
+  view = i; closeSearch(true);
+  $$('.page').forEach(p => p.classList.toggle('on', +p.dataset.p === i));
+  $('#pg').classList.toggle('inpage', i !== null);
+  $('#hl').hidden = i !== null; $('#hp').hidden = i === null; $('#ht').textContent = i === null ? '' : NAMES[i];
+  $('.crumb').textContent = i === null ? 'Settings' : 'Settings › ' + NAMES[i];
+  $('.scroll').scrollTop = 0;
+}
+$('#land').onclick = e => { const b = e.target.closest('.cr'); if (b) show(+b.dataset.i); };
+$('#bk').onclick = () => show(null);
+$('.tb .ib').onclick = () => show(null);
+
+// toggles, segmented groups, steppers
+document.addEventListener('click', e => {
+  const sw = e.target.closest('.sw'); if (sw) return sw.setAttribute('aria-pressed', sw.getAttribute('aria-pressed') !== 'true');
+  const b = e.target.closest('[data-seg] > button'); if (b) {
+    $$('button', b.parentNode).forEach(x => x.setAttribute('aria-pressed', x === b));
+    const k = b.parentNode.dataset.seg;
+    if (k === 'scale') m.style.setProperty('--z', parseInt(b.textContent) / 100);
+    if (k === 'cache') cache(b.textContent);
+  }
+  const st = e.target.closest('.step button'); if (st) {
+    const s = st.closest('.step'), v = s.dataset.step.split(',').map(Number); let i = +s.dataset.i;
+    i = Math.max(0, Math.min(v.length - 1, i + (st === s.firstElementChild ? -1 : 1))); s.dataset.i = i; $('output', s).textContent = v[i] + s.dataset.u;
+  }
+});
+
+// mode
+function setMode(v) {
+  m.dataset.mode = v === 'light' ? 'light' : 'dark';
+  $$('#tiles .tile').forEach(t => t.setAttribute('aria-pressed', t.dataset.m === v));
+  $('#bm').setAttribute('aria-pressed', v === 'light'); $('#bm').textContent = v === 'light' ? 'Dark' : 'Light';
+}
+$('#tiles').onclick = e => { const t = e.target.closest('.tile'); if (t) setMode(t.dataset.m); };
+$('#bm').onclick = () => setMode(m.dataset.mode === 'light' ? 'dark' : 'light');
+
+// accents (hue, chroma, neutral chroma) = theme.rs PRESETS
+const AC = [['Blue', 265, .13, .012], ['Violet', 295, .14, .014], ['Pink', 350, .14, .012], ['Red', 25, .15, .012], ['Orange', 55, .14, .011], ['Amber', 85, .13, .010], ['Green', 150, .13, .010], ['Teal', 190, .10, .009], ['Sky', 235, .12, .011], ['Monochrome', 0, 0, 0]];
+function setAccent(i) {
+  const [n, h, c, nc] = AC[i]; m.style.setProperty('--h', h); m.style.setProperty('--ac', c); m.style.setProperty('--nc', nc);
+  $$('#swatches .sx').forEach((s, j) => s.setAttribute('aria-pressed', j === i)); $('#accd').textContent = n + " · used when the theme isn't taken from artwork";
+  document.documentElement.style.setProperty('--hh', h);
+}
+$('#swatches').innerHTML = AC.map((a, i) => `<button class="sx${a[2] ? '' : ' mono'}" style="--hh:${a[1]};--c:${a[2] * 1.6}" title="${a[0]}" aria-label="${a[0]}" data-i="${i}"></button>`).join('');
+$('#accbar').innerHTML = AC.map((a, i) => `<button data-i="${i}" title="${a[0]}" style="width:18px;height:18px;border-radius:50%;border:0;cursor:pointer;background:${a[2] ? `oklch(0.72 ${a[2] * 1.4} ${a[1]})` : 'linear-gradient(135deg,#ddd,#666)'}"></button>`).join('');
+$('#swatches').onclick = e => { const s = e.target.closest('.sx'); if (s) setAccent(+s.dataset.i); };
+$('#accbar').onclick = e => { const s = e.target.closest('button'); if (s) setAccent(+s.dataset.i); };
+$('#art').onclick = () => $('#accrow').classList.toggle('gated', $('#art').getAttribute('aria-pressed') === 'true');
+$('#accrow').classList.remove('gated'); setAccent(0);
+
+// shell width / collapse
+$('#w').oninput = e => { m.style.setProperty('--w', e.target.value + 'px'); $('#wv').textContent = e.target.value; };
+for (const [id, cls] of [['bl', 'lib-c'], ['bp', 'pl-c']]) $('#' + id).onclick = e => { const on = m.classList.toggle(cls); e.target.setAttribute('aria-pressed', on); };
+
+// crossfade graph: two ramps overlapping for N seconds
+function xf() {
+  const v = +$('#xr').value, r = $('#xr'); r.style.setProperty('--p', v / 12 * 100 + '%'); $('#xv').textContent = v ? v + ' s' : 'Off';
+  const W = 300, H = 54, mid = 150, half = v / 12 * 70, a0 = mid - half, a1 = mid + half;
+  const out = v ? `M0 6 H${a0} L${a1} ${H} H0Z` : `M0 6 H${mid} V${H} H0Z`;
+  const inn = v ? `M${W} 6 H${a1} L${a0} ${H} H${W}Z` : `M${W} 6 H${mid} V${H} H${W}Z`;
+  $('#xs').innerHTML = `<path class="ta" d="${out}"/><path class="tb2" d="${inn}"/><line class="mid" x1="${mid}" x2="${mid}" y1="0" y2="${H}"/>`;
+}
+$('#xr').oninput = xf; xf();
+
+// cache meter
+function cache(txt) {
+  const lim = { Off: 0, '256 MB': 256, '512 MB': 512, '1 GB': 1024, '2 GB': 2048 }[txt], used = 312;
+  $('#cu').innerHTML = lim ? `${Math.min(used, lim)} <small>MB of ${txt}</small>` : `${used} <small>MB still on disk</small>`;
+  const p = lim ? Math.min(100, used / lim * 100) : 100; $('#cp').textContent = lim ? Math.round(p) + '%' : 'Off';
+  $('#m1').style.width = p * .69 + '%'; $('#m2').style.width = p * .31 + '%';
+}
+
+// lyric providers
+const PROV = ['LrcLib', 'BetterLyrics', 'KuGou', 'Paxsenix'];
+function prov() {
+  $$('#prov .r.p').forEach(x => x.remove());
+  PROV.forEach((n, i) => { const d = document.createElement('div'); d.className = 'r p'; d.dataset.k = 'lyrics provider ' + n.toLowerCase();
+    d.innerHTML = `<div class="prov"><span class="n">${i + 1}</span></div><div class="tx"><div class="t">${n}</div></div><div class="mv"><button class="ib" data-d="-1" aria-label="Move up">${ic('up')}</button><button class="ib" data-d="1" aria-label="Move down">${ic('down')}</button></div><button class="sw" aria-pressed="true" aria-label="${n}"></button>`;
+    d.querySelector('.mv').onclick = e => { const b = e.target.closest('button'); if (!b) return; const j = i + +b.dataset.d; if (j < 0 || j >= PROV.length) return; [PROV[i], PROV[j]] = [PROV[j], PROV[i]]; prov(); };
+    $('#prov').append(d); });
+}
+prov();
+
+// shortcuts
+const SC = [['Play / pause', 'Space'], ['Next track', 'Ctrl →'], ['Previous track', 'Ctrl ←'], ['Seek forward', '→'], ['Seek back', '←'], ['Volume up', 'Ctrl ↑'], ['Volume down', 'Ctrl ↓'], ['Shuffle', 'Ctrl S'], ['Repeat', 'Ctrl R'], ['Like song', 'Ctrl L'], ['Player: artwork', 'Ctrl 1'], ['Player: lyrics', 'Ctrl 2'], ['Player: queue', 'Ctrl 3'], ['Collapse library', 'Ctrl B'], ['Show / hide player', 'Ctrl P'], ['Back', 'Alt ←'], ['Forward', 'Alt →'], ['Command palette', 'Ctrl K']];
+$('#keys').innerHTML = SC.map(([n, k]) => `<div class="k"><span>${n}</span><div>${k.split(' ').map(x => `<kbd>${x}</kbd>`).join('')}</div></div>`).join('');
+
+// search: results are every page's matching rows, flat; the landing list is hidden meanwhile
+const q = $('#q'), pg = $('#pg');
+function closeSearch(quiet) { q.value = ''; if (!quiet) filter(); else { pg.classList.remove('searching', 'none'); $$('.hide').forEach(x => x.classList.remove('hide')); } }
+$('#qx').onclick = () => { closeSearch(); q.focus(); };
+q.onkeydown = e => { if (e.key === 'Escape') closeSearch(); };
+q.oninput = filter;
+function filter() {
+  const s = q.value.trim().toLowerCase(); pg.classList.toggle('searching', !!s);
+  let any = false;
+  $$('.page').forEach(p => {
+    let pAny = false;
+    $$('.sec', p).forEach(sec => {
+      const rows = $$('.r', sec); let sAny = false;
+      rows.forEach(r => { const hit = !s || (r.textContent + ' ' + (r.dataset.k || '')).toLowerCase().includes(s); r.classList.toggle('hide', !hit); sAny ||= hit; });
+      if (!rows.length) sAny = !s || sec.textContent.toLowerCase().includes(s);
+      sec.classList.toggle('hide', !sAny); pAny ||= sAny; any ||= sAny;
+      const sm = $('.sh small', sec); if (sm) sm.textContent = '· ' + p.dataset.name;
+    });
+    p.classList.toggle('hide', !pAny && !!s);
+  });
+  pg.classList.toggle('none', !!s && !any);
+}
+$('#reset').onclick = e => { const b = e.target; if (b.dataset.a) { b.textContent = 'Reset'; delete b.dataset.a; } else { b.textContent = 'Click again to confirm'; b.dataset.a = 1; } };
+show(null);
+</script>

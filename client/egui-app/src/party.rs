@@ -3,6 +3,7 @@
 //! the UI thread sends messages and applies what arrives once per frame. The host's player goes out as playback actions,
 //! a guest's player follows them. Positions and times on the wire are milliseconds.
 
+use crate::gfx::Calm;
 use crate::app::App;
 use crate::data::Track;
 use crate::gfx::*;
@@ -1059,7 +1060,7 @@ impl App {
         let motion = !reduced_motion();
         let ks: Vec<f32> = self.party.faces.iter().map(|f| {
             let on = if live.iter().any(|l| l.0 == f.0) { 1. } else { 0. };
-            if motion { ctx.animate_value_with_time(Id::unique("party-face").with(&f.0), on, 0.28) } else { on }
+            if motion { ctx.calm_value(Id::unique("party-face").with(&f.0), on, 0.28) } else { on }
         }).collect();
         let keep: Vec<bool> = self.party.faces.iter().zip(&ks).map(|(f, k)| *k > 0.001 || live.iter().any(|l| l.0 == f.0)).collect();
         let mut it = keep.iter();
@@ -1070,7 +1071,7 @@ impl App {
         let shown: Vec<&(usize, f32)> = faces.iter().take(SHOWN).collect();
         // Alone in the party, the party icon sits behind your picture; it tucks away when someone else arrives.
         let alone = if live.len() <= 1 { 1. } else { 0. };
-        let ik = if motion { ctx.animate_value_with_time(Id::unique("party-alone"), alone, 0.28) } else { alone };
+        let ik = if motion { ctx.calm_value(Id::unique("party-alone"), alone, 0.28) } else { alone };
         let stack = if shown.is_empty() { 0. } else { D + STEP * (ik + shown.iter().map(|f| f.1).sum::<f32>() - 1.).max(0.) };
         let chip = if extra > 0 { STEP } else { 0. };
         let w = if self.party.room.is_some() { (stack + chip + 14.).max(32.) } else { 32. };

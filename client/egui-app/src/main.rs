@@ -28,8 +28,12 @@ mod theme;
 mod tip;
 mod toast;
 mod tray;
+mod update;
 #[cfg(feature = "video")]
 mod video;
+mod viz;
+mod viz_gl;
+mod viz_pm;
 
 use eframe::egui;
 use std::{cell::RefCell, rc::Rc, time::Duration};

@@ -1,5 +1,6 @@
 //! Pages backed by the daemon: home feed, album/artist/playlist detail and the account settings.
 
+use crate::gfx::Calm;
 use crate::app::{App, Route};
 use crate::backend;
 use crate::data::{Item, Section, State, Track};
@@ -9,10 +10,9 @@ use crate::page::{Look, HEAD, HERO_H, HERO_MIN};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, ScrollArea};
 use std::borrow::Cow;
 
-const GAP: f32 = 8.;
 /// Seconds a carousel arrow takes to slide the row.
 const CAR_SLIDE: f64 = 0.45;
-const CHIPS: [(&str, &str); 5] = [("All", ""), ("Songs", "song"), ("Albums", "album"), ("Playlists", "playlist"), ("Artists", "artist")];
+pub const CHIPS: [(&str, &str); 5] = [("All", ""), ("Songs", "song"), ("Albums", "album"), ("Playlists", "playlist"), ("Artists", "artist")];
 const SEARCH_CHIPS: [&str; 5] = ["All", "Songs", "Videos", "Albums", "Artists"];
 const TOP_W: f32 = 340.;
 const TOP_H: f32 = 196.;
@@ -64,6 +64,7 @@ impl App {
             return self.open_song(it.track());
         }
         let Some((kind, route)) = target(it) else { return };
+        self.peek = Some(it.clone());
         self.open(route, Some((kind, it.id.clone())));
     }
 
@@ -87,7 +88,7 @@ impl App {
     /// Cards open on click, this plays.
     pub fn play_badge(&self, ui: &egui::Ui, cell: Rect, at: egui::Pos2, size: f32, key: impl std::hash::Hash + std::fmt::Debug) -> bool {
         let over = ui.rect_contains_pointer(cell);
-        let a = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with(("play-badge-a", &key)), over, 0.16, crate::gfx::ease_out);
+        let a = ui.ctx().calm_bool_ease(ui.scope_id().with(("play-badge-a", &key)), over, 0.16, crate::gfx::ease_out);
         if a <= 0. {
             return false;
         }
@@ -152,9 +153,9 @@ impl App {
         let all: Vec<&Item> = items.collect();
         // fixed card width: a narrower window clips cards instead of resizing them
         let cw = 160.;
-        let cols = (((w + GAP) / (cw + GAP)) as usize).max(1);
-        let step = cw + GAP;
-        let max_off = (all.len() as f32 * step - GAP - w).max(0.);
+        let cols = (((w + self.gap()) / (cw + self.gap())) as usize).max(1);
+        let step = cw + self.gap();
+        let max_off = (all.len() as f32 * step - self.gap() - w).max(0.);
         let id = ui.scope_id().with(("carousel", title));
         let off: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.);
         // Arrow slide (from, to, start time). Clicks while it runs extend its target, so repeated clicks keep moving forward.
@@ -190,6 +191,8 @@ impl App {
             let r = press(ui, ("show-all", title), b);
             p.text(b.center(), Align2::CENTER_CENTER, "Show all", f, if r.hovered() { t.tx } else { t.tm });
             if r.clicked() {
+                let sub = if self.route == Route::Home { "From YouTube Music" } else { "" };
+                self.shelf = Some((title.to_string(), sub.to_string(), all.iter().map(|i| (*i).clone()).collect()));
                 self.open(Route::Shelf, Some(("shelf", title.to_string())));
             }
             rx -= bw + 4.;
@@ -212,7 +215,7 @@ impl App {
         }
         let out = area.show(&mut rui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
-            let (_, r) = ui.allocate_space(vec2((all.len() as f32 * step - GAP).max(w), view.height()));
+            let (_, r) = ui.allocate_space(vec2((all.len() as f32 * step - self.gap()).max(w), view.height()));
             let vis = ui.clip_rect();
             for (c, &it) in all.iter().enumerate() {
                 let cell = Rect::from_min_size(pos2(r.min.x + c as f32 * step, r.min.y), vec2(cw, cw + 40.));
@@ -223,7 +226,7 @@ impl App {
         });
         let off = out.state.clamped_offset().x;
         ui.ctx().data_mut(|d| d.insert_temp(id, off));
-        let (left, right) = (ui.ctx().animate_bool_with_time(id.with("fade-l"), off > 1., 0.15), ui.ctx().animate_bool_with_time(id.with("fade-r"), off < max_off - 1., 0.15));
+        let (left, right) = (ui.ctx().calm_bool(id.with("fade-l"), off > 1., 0.15), ui.ctx().calm_bool(id.with("fade-r"), off < max_off - 1., 0.15));
         if left > 0. {
             // The fades run a pixel past the row: at a fractional edge the clip keeps a last column of the card, which would show as a line.
             fade_h(&p, Rect::from_min_size(view.min - vec2(1., 0.), vec2(49., view.height())), t.s1.gamma_multiply(left), false);
@@ -236,7 +239,7 @@ impl App {
     /// Every item of a shelf in a wrapped grid, virtualised by row.
     pub fn wall(&mut self, ui: &mut egui::Ui, card: Rect, top: f32, items: &[&Item], salt: &str) {
         let (l, w) = (card.min.x + 14., card.width() - 28.);
-        let (cols, cw) = grid(w, 160., GAP);
+        let (cols, cw) = grid(w, 160., self.gap());
         let rh = cw + 48.;
         let rows = items.len().div_ceil(cols);
         let area = Rect::from_min_max(pos2(card.min.x, top), card.max);
@@ -249,7 +252,7 @@ impl App {
                 let (_, row) = ui.allocate_space(vec2(area.width(), rh));
                 for c in 0..cols {
                     let Some(&it) = items.get(r * cols + c) else { break };
-                    let cell = Rect::from_min_size(pos2(l + c as f32 * (cw + GAP), row.min.y), vec2(cw, cw + 40.));
+                    let cell = Rect::from_min_size(pos2(l + c as f32 * (cw + self.gap()), row.min.y), vec2(cw, cw + 40.));
                     self.item_card(ui, cell, it, items, (0, r * cols + c));
                 }
             }
@@ -261,9 +264,13 @@ impl App {
     /// A home shelf listed in full, honouring the home page's type chip.
     pub fn shelf_page(&mut self, ui: &mut egui::Ui, card: Rect, top: f32) {
         let Some((_, title)) = self.sel.clone() else { return };
+        if let Some((_, _, items)) = self.shelf.clone().filter(|s| s.0 == title) {
+            let items: Vec<&Item> = items.iter().collect();
+            return self.wall(ui, card, top, &items, "shelf");
+        }
         let d = self.data.clone();
         let g = d.home.lock();
-        let State::Ready(secs) = &*g else { return self.note(ui, card, top, "Loading…") };
+        let State::Ready(secs) = &*g else { return self.wall_skeleton(ui, card, top) };
         let kind = CHIPS[self.home_chip].1;
         let items: Vec<&Item> = secs.iter().filter(|s| s.title == title).flat_map(|s| &s.items).filter(|i| kind.is_empty() || i.r#type == kind).collect();
         self.wall(ui, card, top, &items, "shelf");
@@ -274,16 +281,23 @@ impl App {
         let (l, w) = (card.min.x + 14., card.width() - 28.);
         let area = Rect::from_min_max(pos2(card.min.x, card.min.y + HERO_MIN), card.max);
         let mut lui = App::region(ui, area);
-        let out = ScrollArea::vertical().id_salt(("sections", &self.sel)).auto_shrink(false).show(&mut lui, |ui| {
+        let sa = ScrollArea::vertical().id_salt(("sections", &self.sel)).auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+        let sa = match crate::gfx::page_bar_set(&lui) {
+            Some(o) => sa.vertical_scroll_offset(o),
+            None => sa,
+        };
+        let out = sa.show(&mut lui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
             ui.add_space(HERO_H - HERO_MIN);
             for (si, s) in secs.iter().enumerate() {
-                self.carousel(ui, (l, w, area.width()), &s.title, s.items.iter(), si, false);
+                self.carousel(ui, (l, w, area.width()), &s.title, s.items.iter(), si, true);
             }
             ui.add_space(70.);
         });
         scroll_fades(&lui, &out, self.t.s1);
-        out.state.clamped_offset().y
+        let off = out.state.clamped_offset().y;
+        crate::gfx::page_bar(&lui, out.id, &out, card.min.y + HERO_H - off.min(HERO_H - HERO_MIN), self.t.tf);
+        off
     }
 
     /// Compact quick-pick tile: cover flush left, title beside it.
@@ -361,15 +375,51 @@ impl App {
                 sel = i;
             }
             ui.painter().text(b.center(), Align2::CENTER_CENTER, label, if on { font_w(13., Weight::Medium) } else { font(13.) }, if on { t.s0 } else if r.hovered() { t.tx } else { t.tm });
-            x += w + GAP;
+            x += w + self.gap();
         }
         sel
     }
 
-    pub fn home_page(&mut self, ui: &mut egui::Ui, card: Rect, top: f32) {
+    /// Spacing between cards and tiles: roomier in Comfortable, tight in Compact.
+    pub(crate) fn gap(&self) -> f32 {
+        if self.opts.compact { 8. } else { 14. }
+    }
+
+    /// "Good morning" etc. from the local hour.
+    fn greeting() -> &'static str {
+        use chrono::Timelike;
+        match chrono::Local::now().hour() {
+            5..=11 => "Good morning",
+            12..=16 => "Good afternoon",
+            17..=21 => "Good evening",
+            _ => "Good night",
+        }
+    }
+
+    /// Greeting, subtitle and chips starting at `y`; returns the y below them. Scrolls with the feed.
+    fn home_head(&mut self, ui: &mut egui::Ui, card: Rect, y: f32, user: Option<&backend::User>) -> f32 {
+        let t = self.t;
+        let x = card.min.x + 22.;
+        let (w, f) = (card.width() - 44., font_w(26., Weight::Bold));
+        match user {
+            Some(u) => {
+                let hi = format!("{},", Self::greeting());
+                let hw = text_w(ui.painter(), &hi, f.clone());
+                trunc(ui.painter(), pos2(x, y + 38.), w, &hi, f.clone(), t.tx);
+                let av = Rect::from_center_size(pos2(x + hw + 12. + 16., y + 38.), vec2(32., 32.));
+                self.thumb(ui, u.avatar_url.as_deref(), av, 16.);
+                trunc(ui.painter(), pos2(av.max.x + 10., y + 38.), (w - hw - 12. - 32. - 10.).max(0.), &u.name, f, t.tx);
+            }
+            None => { trunc(ui.painter(), pos2(x, y + 38.), w, Self::greeting(), f, t.tx); }
+        }
+        trunc(ui.painter(), pos2(x, y + 66.), w, "From YouTube Music", font(13.), t.tm);
         let labels: Vec<&str> = CHIPS.iter().map(|c| c.0).collect();
-        self.home_chip = self.chips(ui, card.min.x + 22., top, &labels, self.home_chip);
-        let top = top + 44.;
+        self.home_chip = self.chips(ui, x, y + 90., &labels, self.home_chip);
+        y + 90. + 32. + if self.opts.compact { 12. } else { 20. }
+    }
+
+    pub fn home_page(&mut self, ui: &mut egui::Ui, card: Rect, top: f32) {
+        let top = top;
         let d = self.data.clone();
         d.status.ensure(ui.ctx(), || backend::get("/auth/status"));
         let user = match &*d.status.lock() {
@@ -378,13 +428,20 @@ impl App {
         };
         d.home.ensure(ui.ctx(), || backend::get::<Vec<Section>>("/youtube/home").map(|mut v| {
             crate::data::clean_sections(&mut v);
+            crate::data::clean_home(&mut v);
             v
         }));
         let g = d.home.lock();
         match &*g {
             State::Ready(s) => self.home_feed(ui, card, top, s, user.as_ref()),
-            State::Failed(e) => self.note(ui, card, top, e),
-            _ => self.note(ui, card, top, "Loading…"),
+            State::Failed(e) => {
+                let y = self.home_head(ui, card, top, user.as_ref());
+                self.note(ui, card, y, e)
+            }
+            _ => {
+                let y = self.home_head(ui, card, top, user.as_ref());
+                self.home_skeleton(ui, card, y)
+            }
         }
     }
 
@@ -399,19 +456,15 @@ impl App {
         let mut lui = App::region(ui, area);
         let out = ScrollArea::vertical().id_salt(("home", self.home_chip)).auto_shrink(false).show(&mut lui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
-            if let Some(u) = user {
-                let (_, r) = ui.allocate_space(vec2(area.width(), 52.));
-                let av = Rect::from_min_size(pos2(card.min.x + 22., r.min.y + 4.), vec2(40., 40.));
-                self.thumb(ui, u.avatar_url.as_deref(), av, 20.);
-                trunc(ui.painter(), pos2(av.max.x + 12., av.center().y), card.width() - 100., &u.name, font_w(15., Weight::Semi), self.t.tx);
-            }
+            let (_, hr) = ui.allocate_space(vec2(area.width(), 90. + 32. + if self.opts.compact { 12. } else { 20. }));
+            self.home_head(ui, card, hr.min.y, user);
             if let Some(s) = quick {
-                let cols = (((w + GAP) / 240.) as usize).clamp(2, 4);
-                let cw = (w - 16. - GAP * (cols - 1) as f32) / cols as f32;
-                let (_, r) = ui.allocate_space(vec2(area.width(), 56. * 2. + GAP + 16.));
+                let cols = (((w + self.gap()) / 240.) as usize).clamp(2, 4);
+                let cw = (w - 16. - self.gap() * (cols - 1) as f32) / cols as f32;
+                let (_, r) = ui.allocate_space(vec2(area.width(), 56. * 2. + self.gap() + 16.));
                 let all: Vec<&Item> = s.items.iter().collect();
                 for (n, it) in s.items.iter().take(cols * 2).enumerate() {
-                    let cell = Rect::from_min_size(pos2(l + 8. + (n % cols) as f32 * (cw + GAP), r.min.y + (n / cols) as f32 * (56. + GAP)), vec2(cw, 56.));
+                    let cell = Rect::from_min_size(pos2(l + 8. + (n % cols) as f32 * (cw + self.gap()), r.min.y + (n / cols) as f32 * (56. + self.gap())), vec2(cw, 56.));
                     self.quick_tile(ui, cell, it, &all, n);
                 }
             }
@@ -420,14 +473,14 @@ impl App {
                 self.carousel(ui, (l, w, area.width()), &s.title, s.items.iter().filter(ok), si, true);
             }
             let feats = &rest[rest.len().min(3)..];
-            let fcols = (((w + GAP) / 300.) as usize).clamp(1, 4);
-            let cw = (w - 16. - GAP * (fcols - 1) as f32) / fcols as f32;
+            let fcols = (((w + self.gap()) / 300.) as usize).clamp(1, 4);
+            let cw = (w - 16. - self.gap() * (fcols - 1) as f32) / fcols as f32;
             let ch = (cw * 1.2).clamp(260., 420.);
             for (row, chunk) in feats.chunks(fcols).enumerate() {
                 let (_, r) = ui.allocate_space(vec2(area.width(), 28. + ch + 14.));
                 for (c, s) in chunk.iter().enumerate() {
                     let shelf: Vec<&Item> = s.items.iter().filter(ok).collect();
-                    let cell = Rect::from_min_size(pos2(l + 8. + c as f32 * (cw + GAP), r.min.y + 28.), vec2(cw, ch));
+                    let cell = Rect::from_min_size(pos2(l + 8. + c as f32 * (cw + self.gap()), r.min.y + 28.), vec2(cw, ch));
                     self.feature_card(ui, cell, &s.title, &shelf, row * 4 + c);
                 }
             }
@@ -481,7 +534,10 @@ impl App {
                 self.hero(ui, card, round, head, &p.item.title, by, &sub, p.item.thumbnail.as_deref(), &playable, save, off);
             }
             Err(Some(e)) => self.note(ui, card, card.min.y + 40., &e),
-            Err(None) => self.note(ui, card, card.min.y + 40., "Loading…"),
+            Err(None) => {
+                let it = self.peek.clone().filter(|i| i.id == id);
+                self.detail_skeleton(ui, card, kind, it.as_ref().map(|i| i.title.as_str()).unwrap_or(""), it.as_ref().and_then(|i| i.thumbnail.as_deref()), it.as_ref().and_then(|i| i.subtitle.as_deref()).unwrap_or(""));
+            }
         }
     }
 
@@ -610,12 +666,12 @@ impl App {
     /// Every item in a wrapped grid inside the current scroll area.
     fn item_grid(&mut self, ui: &mut egui::Ui, card: Rect, items: &[&Item], si: usize) {
         let (l, w) = (card.min.x + 14., card.width() - 28.);
-        let (cols, cw) = grid(w, 160., GAP);
+        let (cols, cw) = grid(w, 160., self.gap());
         for r in 0..items.len().div_ceil(cols) {
             let (_, row) = ui.allocate_space(vec2(card.width(), cw + 48.));
             for c in 0..cols {
                 let Some(&it) = items.get(r * cols + c) else { break };
-                let cell = Rect::from_min_size(pos2(l + c as f32 * (cw + GAP), row.min.y), vec2(cw, cw + 40.));
+                let cell = Rect::from_min_size(pos2(l + c as f32 * (cw + self.gap()), row.min.y), vec2(cw, cw + 40.));
                 self.item_card(ui, cell, it, items, (si, r * cols + c));
             }
         }
@@ -695,7 +751,7 @@ impl App {
             Ok(v) if v.is_empty() => self.note(ui, card, top, "No Spotify playlists."),
             Ok(v) => self.wall(ui, card, top, &v.iter().collect::<Vec<_>>(), "import"),
             Err(Some(e)) => self.note(ui, card, top, &format!("{e} — sign in to Spotify under Settings.")),
-            Err(None) => self.note(ui, card, top, "Loading…"),
+            Err(None) => self.wall_skeleton(ui, card, top),
         }
     }
 
@@ -841,7 +897,7 @@ impl App {
                     return;
                 }
                 State::Ready(_) | State::Failed(_) => {}
-                _ => return self.note(ui, card, card.min.y + 40., "Loading…"),
+                _ => return self.detail_skeleton(ui, card, "albums", &track.title, track.thumbnail.as_deref(), &track.artists.join(", ")),
             }
         }
         let one = std::slice::from_ref(&track);

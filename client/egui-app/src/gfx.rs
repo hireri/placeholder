@@ -75,6 +75,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("bytes://icons/serafin.svg", include_bytes!("../assets/logo/serafin.svg")),
     ("bytes://icons/search.svg", include_bytes!("../assets/icons/search.svg")),
     ("bytes://icons/shuf.svg", include_bytes!("../assets/icons/shuf.svg")),
+    ("bytes://icons/viz.svg", include_bytes!("../assets/icons/viz.svg")),
     ("bytes://icons/song.svg", include_bytes!("../assets/icons/song.svg")),
     ("bytes://icons/star.svg", include_bytes!("../assets/icons/star.svg")),
     ("bytes://icons/starf.svg", include_bytes!("../assets/icons/starf.svg")),
@@ -172,10 +173,17 @@ pub fn ease_out(t: f32) -> f32 {
     1. - (1. - t).powi(3)
 }
 
-/// True when `METROLIST_REDUCE_MOTION` is set: skips the non-essential motion that honours it. There is no OS hook yet.
+static REDUCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The "Reduce motion" preference; `METROLIST_REDUCE_MOTION` forces it on.
+pub fn set_reduced_motion(on: bool) {
+    REDUCED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True when motion should be skipped: the preference, or `METROLIST_REDUCE_MOTION` set.
 pub fn reduced_motion() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("METROLIST_REDUCE_MOTION").is_some_and(|v| !v.is_empty() && v != "0"))
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    REDUCED.load(std::sync::atomic::Ordering::Relaxed) || *ENV.get_or_init(|| std::env::var_os("METROLIST_REDUCE_MOTION").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// Gentle ease-out (`cubic-bezier(0.22, 1, 0.36, 1)`) for slides that should settle softly.
@@ -248,25 +256,46 @@ pub fn rad(r: f32) -> CornerRadius {
 
 /// Paints the bottom corners' outside-the-curve wedges in `bg`, so rectangular-clipped content looks rounded.
 pub fn round_bottom_corners(painter: &Painter, rect: Rect, r: f32, bg: Color32) {
-    corner_wedges(painter, rect, r, bg, true);
+    corner_wedges(painter, rect, r, bg, true, None);
+}
+
+/// Bottom corners again, for a card that casts `shadow(.., dy, blur, alpha)`: the wedges carry the shadow's falloff
+/// so they don't show up as flat squares of `bg` inside the shadow.
+pub fn round_bottom_corners_shadowed(painter: &Painter, rect: Rect, r: f32, bg: Color32, dy: i8, blur: u8, alpha: u8) {
+    corner_wedges(painter, rect, r, bg, true, Some((rect, r, dy as f32, blur as f32 / 2., shadow_alpha(painter, alpha) as f32 / 255.)));
 }
 
 /// Same for the top corners.
 pub fn round_top_corners(painter: &Painter, rect: Rect, r: f32, bg: Color32) {
-    corner_wedges(painter, rect, r, bg, false);
+    corner_wedges(painter, rect, r, bg, false, None);
 }
 
-fn corner_wedges(painter: &Painter, rect: Rect, r: f32, bg: Color32, bottom: bool) {
+/// Signed distance from `p` to a rounded rect (negative inside).
+fn rrect_sd(p: egui::Pos2, rect: Rect, r: f32) -> f32 {
+    let q = (p - rect.center()).abs() - rect.size() / 2. + egui::vec2(r, r);
+    q.max(egui::Vec2::ZERO).length() + q.x.max(q.y).min(0.) - r
+}
+
+fn corner_wedges(painter: &Painter, rect: Rect, r: f32, bg: Color32, bottom: bool, lit: Option<(Rect, f32, f32, f32, f32)>) {
     const N: usize = 12;
+    // Colour of `bg` under the shadow at `p`; the logistic stands in for the Gaussian falloff.
+    let shade = |p: egui::Pos2| match lit {
+        Some((card, cr, dy, sigma, a)) => {
+            let d = rrect_sd(p - egui::vec2(0., dy), card, cr);
+            bg.lerp_to_gamma(Color32::BLACK, a / (1. + (1.7 * d / sigma).exp()))
+        }
+        None => bg,
+    };
     let (ey, sy) = if bottom { (rect.max.y, 1.) } else { (rect.min.y, -1.) };
     let mut mesh = egui::Mesh::default();
     for (cx, sx) in [(rect.min.x + r, -1.), (rect.max.x - r, 1.)] {
         let centre = egui::pos2(cx, ey - sy * r);
         let base = mesh.vertices.len() as u32;
-        mesh.colored_vertex(egui::pos2(cx + sx * r, ey), bg);
+        mesh.colored_vertex(egui::pos2(cx + sx * r, ey), shade(egui::pos2(cx + sx * r, ey)));
         for i in 0..=N {
             let a = std::f32::consts::FRAC_PI_2 * i as f32 / N as f32;
-            mesh.colored_vertex(centre + egui::vec2(sx * r * a.sin(), sy * r * a.cos()), bg);
+            let at = centre + egui::vec2(sx * r * a.sin(), sy * r * a.cos());
+            mesh.colored_vertex(at, shade(at));
         }
         for i in 0..N as u32 {
             mesh.add_triangle(base, base + 1 + i, base + 2 + i);
@@ -286,7 +315,13 @@ fn corner_wedges(painter: &Painter, rect: Rect, r: f32, bg: Color32, bottom: boo
     painter.add(mesh);
 }
 
+/// Dark-theme alphas read as dirty smudges on light surfaces, so they are softened there.
+fn shadow_alpha(painter: &Painter, alpha: u8) -> u8 {
+    if painter.ctx().global_style().visuals.dark_mode { alpha } else { (alpha as f32 * 0.4) as u8 }
+}
+
 pub fn shadow(painter: &Painter, rect: Rect, r: f32, dy: i8, blur: u8, alpha: u8) {
+    let alpha = shadow_alpha(painter, alpha);
     painter.add(egui::Shadow { offset: [0, dy], blur, spread: 0, color: Color32::from_black_alpha(alpha) }.as_shape(rect, rad(r)));
 }
 
@@ -396,7 +431,26 @@ pub fn crop_uv(src: f32, dst: f32) -> Rect {
 }
 
 /// egui's image loaders keep bytes, decoded pixels and a GPU texture per URI forever; track last use so `trim_covers` can bound that.
-const COVER_KEEP: usize = 96;
+static COVER_KEEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(96);
+
+pub fn set_cover_limit(n: u16) {
+    COVER_KEEP.store(n as usize, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Covers held in memory and what the image loaders use in total (icons included, a few KB).
+pub fn cover_usage(ctx: &Context) -> (usize, usize) {
+    let l = ctx.loaders();
+    let bytes = l.bytes.lock().iter().map(|x| x.byte_size()).sum::<usize>() + l.image.lock().iter().map(|x| x.byte_size()).sum::<usize>() + l.texture.lock().iter().map(|x| x.byte_size()).sum::<usize>();
+    (ctx.data_mut(|d| d.get_temp_mut_or_default::<HashMap<String, u64>>(egui::Id::NULL).len()), bytes)
+}
+
+/// Forgets every cover (not the bundled icons); they reload when drawn again.
+pub fn clear_covers(ctx: &Context) {
+    let all: Vec<String> = ctx.data_mut(|d| d.get_temp_mut_or_default::<HashMap<String, u64>>(egui::Id::NULL).drain().map(|(k, _)| k).collect());
+    for uri in all {
+        ctx.forget_image(&uri);
+    }
+}
 
 fn touch_cover(ctx: &Context, uri: &str) {
     let frame = ctx.cumulative_pass_nr();
@@ -405,14 +459,15 @@ fn touch_cover(ctx: &Context, uri: &str) {
 
 /// Forgets the least recently drawn covers beyond `COVER_KEEP`; call once per frame.
 pub fn trim_covers(ctx: &Context) {
+    let keep = COVER_KEEP.load(std::sync::atomic::Ordering::Relaxed);
     let stale: Vec<String> = ctx.data_mut(|d| {
         let m = d.get_temp_mut_or_default::<HashMap<String, u64>>(egui::Id::NULL);
-        if m.len() <= COVER_KEEP {
+        if m.len() <= keep {
             return vec![];
         }
         let mut by_age: Vec<_> = m.iter().map(|(k, v)| (*v, k.clone())).collect();
         by_age.sort_unstable();
-        let drop: Vec<String> = by_age.into_iter().take(m.len() - COVER_KEEP).map(|(_, k)| k).collect();
+        let drop: Vec<String> = by_age.into_iter().take(m.len() - keep).map(|(_, k)| k).collect();
         for k in &drop { m.remove(k); }
         drop
     });
@@ -430,7 +485,7 @@ fn cover_texture(ctx: &Context, url: &str, size: egui::Vec2) -> Option<SizedText
     let load = |px: u32| {
         let uri = sized_url(url, px);
         touch_cover(ctx, &uri);
-        match Image::new(uri).load_for_size(ctx, size) {
+        match Image::new(uri).texture_options(egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR }).load_for_size(ctx, size) {
             Ok(TexturePoll::Ready { texture }) => Some(texture),
             _ => None,
         }
@@ -527,8 +582,8 @@ pub fn fade_up(painter: &Painter, rect: Rect, to: Color32) {
 pub fn scroll_fades<R>(ui: &egui::Ui, out: &egui::scroll_area::ScrollAreaOutput<R>, bg: Color32) {
     let (r, y) = (out.inner_rect, out.state.clamped_offset().y);
     let ctx = ui.ctx();
-    let top = ctx.animate_bool_with_time(out.id.with("fade-top"), y > 0.5, 0.15);
-    let bottom = ctx.animate_bool_with_time(out.id.with("fade-bottom"), y + r.height() < out.content_size.y - 0.5, 0.15);
+    let top = ctx.calm_bool(out.id.with("fade-top"), y > 0.5, 0.15);
+    let bottom = ctx.calm_bool(out.id.with("fade-bottom"), y + r.height() < out.content_size.y - 0.5, 0.15);
     let p = ui.painter();
     if top > 0. {
         fade_up(p, Rect::from_min_size(r.min, egui::vec2(r.width(), 32.)), bg.gamma_multiply(top));
@@ -536,6 +591,35 @@ pub fn scroll_fades<R>(ui: &egui::Ui, out: &egui::scroll_area::ScrollAreaOutput<
     if bottom > 0. {
         fade_down(p, Rect::from_min_max(egui::pos2(r.min.x, r.max.y - 40.), r.max), bg.gamma_multiply(bottom));
     }
+}
+
+/// Scrollbar for a page whose tall header overlaps the top of the scroll area: the track starts at `top` (the header's
+/// bottom) instead of behind it. The area itself must hide its own bar. Hover/drag only; hidden when nothing scrolls.
+pub fn page_bar<R>(ui: &egui::Ui, id: egui::Id, out: &egui::scroll_area::ScrollAreaOutput<R>, top: f32, color: Color32) {
+    let (r, content) = (out.inner_rect, out.content_size.y);
+    let view = r.height();
+    if content <= view + 0.5 {
+        return;
+    }
+    let track = Rect::from_min_max(egui::pos2(r.max.x - 10., top.max(r.min.y) + 4.), egui::pos2(r.max.x - 2., r.max.y - 4.));
+    let th = (track.height() * view / content).max(28.).min(track.height());
+    let off = out.state.clamped_offset().y;
+    let free = (track.height() - th).max(1.);
+    let y = track.min.y + free * off / (content - view);
+    let thumb = Rect::from_min_size(egui::pos2(track.min.x, y), egui::vec2(track.width(), th));
+    let resp = ui.interact(thumb.expand2(egui::vec2(4., 0.)), id.with("page-bar"), Sense::drag());
+    if resp.dragged() {
+        let to = (off + resp.drag_delta().y * (content - view) / free).clamp(0., content - view);
+        ui.ctx().data_mut(|d| d.insert_temp(ui.scope_id().with("page-bar-set"), to));
+        ui.ctx().request_repaint();
+    }
+    let a = if resp.hovered() || resp.dragged() { 1. } else { 0.6 };
+    ui.painter().rect_filled(thumb, 4., color.gamma_multiply(a));
+}
+
+/// Offset a [`page_bar`] drag asked for last frame; apply it with `ScrollArea::vertical_scroll_offset` before `show`.
+pub fn page_bar_set(ui: &egui::Ui) -> Option<f32> {
+    ui.ctx().data_mut(|d| d.remove_temp(ui.scope_id().with("page-bar-set")))
 }
 
 /// Horizontal fade into `to`: transparent at one edge, solid at the right edge (`solid_right`) or the left one.
@@ -797,5 +881,24 @@ mod tests {
         assert!(cover.min.y.abs() < 1e-6 && (cover.max.y - 0.5).abs() < 1e-6);
         let below = backdrop_uv(anchor, anchor.translate(egui::vec2(0., 100.)));
         assert!((below.min.y - 0.5).abs() < 1e-6 && (below.max.y - 1.).abs() < 1e-6);
+    }
+}
+
+/// egui's `animate_*` with the duration forced to zero under "Reduce motion", so every transition snaps.
+pub trait Calm {
+    fn calm_bool(&self, id: egui::Id, on: bool, secs: f32) -> f32;
+    fn calm_bool_ease(&self, id: egui::Id, on: bool, secs: f32, ease: fn(f32) -> f32) -> f32;
+    fn calm_value(&self, id: egui::Id, to: f32, secs: f32) -> f32;
+}
+
+impl Calm for egui::Context {
+    fn calm_bool(&self, id: egui::Id, on: bool, secs: f32) -> f32 {
+        self.animate_bool_with_time(id, on, if reduced_motion() { 0. } else { secs })
+    }
+    fn calm_bool_ease(&self, id: egui::Id, on: bool, secs: f32, ease: fn(f32) -> f32) -> f32 {
+        self.animate_bool_with_time_and_easing(id, on, if reduced_motion() { 0. } else { secs }, ease)
+    }
+    fn calm_value(&self, id: egui::Id, to: f32, secs: f32) -> f32 {
+        self.animate_value_with_time(id, to, if reduced_motion() { 0. } else { secs })
     }
 }

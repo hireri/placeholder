@@ -1,5 +1,6 @@
 //! Settings page: a tab bar (with a search button at its right end) above titled sections of rows and blocks (cards), one tab at a time.
 
+use crate::gfx::Calm;
 use crate::tip::Tip;
 use crate::app::{App, VIDEO_HEIGHTS};
 use crate::data::State;
@@ -41,6 +42,8 @@ pub struct Opts {
     pub discord_paused: bool,
     /// In a party: show the listener count and elapsed time instead of a progress bar.
     pub discord_party: bool,
+    pub discord_listen: bool,
+    pub discord_get: bool,
     /// Host: let people in without asking.
     pub party_auto_accept: bool,
     /// Party notifications: join requests and answers to yours; people joining and leaving; being removed or the party ending.
@@ -68,8 +71,20 @@ pub struct Opts {
     pub romaji: bool,
     /// Lyrics text size in percent, one of `LYR_SIZES`.
     pub lyrics_size: u8,
+    /// Lyrics are centered instead of left-aligned.
+    pub lyrics_center: bool,
+    /// Synced lyrics follow the playing line; off leaves scrolling to the wheel.
+    pub lyrics_follow: bool,
+    /// Clicking a synced line seeks to it.
+    pub lyrics_tap_seek: bool,
+    /// Skips blur and fades on the cover and lyrics, for weak GPUs or less movement.
+    pub reduce_motion: bool,
     /// Closing the window hides it to the tray (when there is one) instead of quitting.
     pub close_tray: bool,
+    /// Start hidden in the tray (only when there is one).
+    pub start_minimized: bool,
+    /// Launch on login (Linux XDG autostart).
+    pub autostart: bool,
     /// Seconds an arrow key seeks, and percent Ctrl+arrow changes the volume.
     pub seek_step: u8,
     pub vol_step: u8,
@@ -89,11 +104,39 @@ pub struct Opts {
     pub sleep_fade: bool,
     /// Held arrow-key seeks grow by 5 s each press.
     pub progressive_seek: bool,
+    /// Covers kept in memory (one of `IMAGE_CACHE`).
+    pub image_cache: u16,
+    /// Home shelves hidden, and music videos / podcasts dropped from it.
+    pub hide_recents: bool,
+    pub hide_moods: bool,
+    pub hide_top_picks: bool,
+    pub hide_shorts: bool,
+    pub music_only: bool,
+    /// Sidebar shortcuts to Liked songs, Downloads and History & stats.
+    pub auto_playlists: bool,
+    /// Look for a newer release once at startup.
+    pub auto_update: bool,
+    /// Bring the last queue back (paused) on the next start.
+    pub restore_queue: bool,
+    /// Skip a song that fails to play.
+    pub skip_on_error: bool,
+    /// Output device name; empty is the system default.
+    pub output: String,
+    /// Style of the player's visualizer view: index into `crate::viz::STYLES` (0 = off).
+    pub viz_style: u8,
+    /// The app logo pulses with the bass.
+    pub viz_logo: bool,
+    /// Blurred album art glows behind the album-page cover, breathing with the bass.
+    pub viz_ambient: bool,
+    /// The progress bar is a waveform of the track.
+    pub viz_wave: bool,
+    /// Frame rate cap of the visualizers.
+    pub viz_fps: u8,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { compact: false, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, party_auto_accept: false, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, close_tray: true, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false }
+        Opts { compact: false, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, discord_listen: true, discord_get: false, party_auto_accept: false, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, lyrics_center: false, lyrics_follow: true, lyrics_tap_seek: true, reduce_motion: false, close_tray: true, start_minimized: false, autostart: false, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false, image_cache: 96, hide_recents: false, hide_moods: false, hide_top_picks: false, hide_shorts: false, music_only: false, auto_playlists: true, auto_update: true, restore_queue: false, skip_on_error: false, output: String::new(), viz_style: 1, viz_logo: false, viz_ambient: false, viz_wave: false, viz_fps: 60 }
     }
 }
 
@@ -269,7 +312,7 @@ impl App {
             open = false;
             ui.memory_mut(|m| m.surrender_focus(sid));
         }
-        let k = ui.ctx().animate_bool_with_time_and_easing(oid, open, 0.18, ease_out);
+        let k = ui.ctx().calm_bool_ease(oid, open, 0.18, ease_out);
         let sw = 36. + 204. * k;
         let search = Rect::from_min_size(pos2(bar.max.x - sw, bar.center().y - 18.), vec2(sw, 36.));
         let p = ui.painter().clone();
@@ -282,8 +325,8 @@ impl App {
             let tw = text_w(&p, name, font_w(13., Weight::Semi));
             let r = Rect::from_min_size(pos2(x, bar.min.y), vec2(tw + 22., BAR_H));
             let hit = press(ui, ("settings-tab", i), r.intersect(tabs.clip_rect()));
-            let a = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with(("settings-tab-on", i)), on, 0.18, ease_out);
-            let h = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with(("settings-tab-hot", i)), hit.hovered(), 0.12, ease_out);
+            let a = ui.ctx().calm_bool_ease(ui.scope_id().with(("settings-tab-on", i)), on, 0.18, ease_out);
+            let h = ui.ctx().calm_bool_ease(ui.scope_id().with(("settings-tab-hot", i)), hit.hovered(), 0.12, ease_out);
             let c = t.tm.lerp_to_gamma(t.tx, a.max(h * 0.6));
             let cx = r.min.x + tw / 2.;
             tabs.text(pos2(r.min.x, bar.center().y), Align2::LEFT_CENTER, name, font_w(13., if on { Weight::Semi } else { Weight::Medium }), c);
@@ -444,7 +487,7 @@ impl App {
     /// Dims the row centred on `cy` while `why` is set and, over it, blocks the controls and says why on hover.
     fn gate(&self, ui: &egui::Ui, pg: &Page, cy: f32, key: &str, why: Option<&str>) {
         let id = ui.scope_id().with(("settings-gate", key));
-        let k = ui.ctx().animate_bool_with_time_and_easing(id, why.is_some(), 0.2, ease_out);
+        let k = ui.ctx().calm_bool_ease(id, why.is_some(), 0.2, ease_out);
         let r = Rect::from_center_size(pos2((pg.x0 + pg.x1) / 2., cy), vec2(pg.x1 - pg.x0, ROW_H));
         self.gate_rect(ui, r, id, k, why);
     }
@@ -474,7 +517,7 @@ impl App {
             for (i, (name, ..)) in PRESETS.iter().enumerate() {
                 let c = pos2(body.min.x + 18. + (i % cols) as f32 * 40., body.min.y + 18. + (i / cols) as f32 * 40.);
                 let hit = press(ui, ("accent", i), Rect::from_center_size(c, vec2(36., 36.)));
-                let k = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with(("accent-on", i)), self.opts.accent as usize == i, 0.18, ease_out);
+                let k = ui.ctx().calm_bool_ease(ui.scope_id().with(("accent-on", i)), self.opts.accent as usize == i, 0.18, ease_out);
                 let p = ui.painter();
                 p.circle_filled(c, 13., crate::theme::Theme::preset(i as u8, true).ax);
                 p.circle_stroke(c, 17., egui::Stroke::new(2., self.t.tx.gamma_multiply(k)));
@@ -486,7 +529,7 @@ impl App {
             let playing = self.pl.song().is_some();
             let why = (self.opts.auto_theme && playing).then_some("Turn off “Theme from artwork” to pick an accent while a song is playing");
             let id = ui.scope_id().with(("settings-gate", "accent"));
-            let k = ui.ctx().animate_bool_with_time_and_easing(id, why.is_some(), 0.2, ease_out);
+            let k = ui.ctx().calm_bool_ease(id, why.is_some(), 0.2, ease_out);
             self.gate_rect(ui, card.shrink2(vec2(0., 1.)), id, k, why);
         }
         if let Some(cy) = self.row(ui, pg, "Custom theme", "theme.toml in config folder; reloads on open") {
@@ -515,6 +558,31 @@ impl App {
                 set_scroll_speed(ui.ctx(), self.opts.scroll_speed);
             }
         }
+        if let Some(cy) = self.row(ui, pg, "Reduce motion", "No blur on lyrics, and fewer animations") {
+            if toggle(ui, &self.t, "reduce-motion", right, cy, &mut self.opts.reduce_motion) {
+                crate::gfx::set_reduced_motion(self.opts.reduce_motion);
+            }
+        }
+        self.sec(ui, pg, "Visualizer");
+        if let Some(cy) = self.row(ui, pg, "Style", "Shown by the button in the player header; Off hides it") {
+            // MilkDrop only appears when libprojectM is installed.
+            let n = if crate::viz_pm::available() { crate::viz::STYLES.len() } else { crate::viz::STYLES.len() - 1 };
+            self.opts.viz_style = segmented(ui, &self.t, "viz-style", right, cy, &crate::viz::STYLES[..n], (self.opts.viz_style as usize).min(n - 1)) as u8;
+        }
+        if let Some(cy) = self.row(ui, pg, "Pulse the logo", "The app logo beats with the bass") {
+            toggle(ui, &self.t, "viz-logo", right, cy, &mut self.opts.viz_logo);
+        }
+        if let Some(cy) = self.row(ui, pg, "Ambient glow", "Soft album-art glow behind album covers") {
+            toggle(ui, &self.t, "viz-ambient", right, cy, &mut self.opts.viz_ambient);
+        }
+        if let Some(cy) = self.row(ui, pg, "Visualizer frame rate", "Capped to this while focused (Uncapped follows your display); much lower when it isn't") {
+            let sel = segmented(ui, &self.t, "viz-fps", right, cy, &["30", "60", "Uncapped"], match self.opts.viz_fps { 0 => 2, 60.. => 1, _ => 0 });
+            self.opts.viz_fps = [30, 60, 0][sel];
+            crate::viz::set_fps(self.opts.viz_fps);
+        }
+        if let Some(cy) = self.row(ui, pg, "Waveform progress bar", "Draws the track as a waveform you can seek on") {
+            toggle(ui, &self.t, "viz-wave", right, cy, &mut self.opts.viz_wave);
+        }
         self.sec(ui, pg, "Layout");
         if let Some(cy) = self.row(ui, pg, "Row density", "Height of track rows") {
             let sel = segmented(ui, &self.t, "density", right, cy, &["Comfortable", "Compact"], self.opts.compact as usize);
@@ -541,6 +609,16 @@ impl App {
         if let Some(cy) = self.row(ui, pg, "Keep playing in the tray", "Close hides to tray; off quits and stops music") {
             toggle(ui, &self.t, "close-tray", right, cy, &mut self.opts.close_tray);
         }
+        if let Some(cy) = self.row(ui, pg, "Start minimized", "Launch hidden in the tray; needs a tray") {
+            toggle(ui, &self.t, "start-min", right, cy, &mut self.opts.start_minimized);
+        }
+        if cfg!(target_os = "linux") {
+            if let Some(cy) = self.row(ui, pg, "Launch on login", "Start Serafin when you sign in") {
+                if toggle(ui, &self.t, "autostart", right, cy, &mut self.opts.autostart) {
+                    crate::tray::set_autostart(self.opts.autostart);
+                }
+            }
+        }
     }
 
     /// System / light / dark as three small window previews in the current accent.
@@ -549,7 +627,7 @@ impl App {
         for (i, name) in ["System", "Light", "Dark"].into_iter().enumerate() {
             let r = Rect::from_min_size(pos2(body.min.x + i as f32 * 132., body.min.y), vec2(120., 72.));
             let hit = press(ui, ("mode", i), r);
-            let k = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with(("mode-on", i)), self.opts.mode as usize == i, 0.18, ease_out);
+            let k = ui.ctx().calm_bool_ease(ui.scope_id().with(("mode-on", i)), self.opts.mode as usize == i, 0.18, ease_out);
             let p = ui.painter();
             let draw = |p: &egui::Painter, dark: bool| {
                 let th = crate::theme::Theme::preset(self.opts.accent, dark);
@@ -620,6 +698,16 @@ impl App {
                 self.pl.engine.set_gapless(self.opts.gapless);
             }
         }
+        if let Some(cy) = self.row(ui, pg, "Output device", "Click to switch; falls back to default if it disconnects") {
+            let label = if self.opts.output.is_empty() { "Default" } else { &self.opts.output };
+            if picker_pill(ui, &self.t, "output-device", right, cy, label) {
+                let mut names = crate::audio::output_names();
+                names.insert(0, String::new());
+                let i = names.iter().position(|n| *n == self.opts.output).map_or(0, |i| i + 1);
+                self.opts.output = names[i % names.len()].clone();
+                self.set_output(ui.ctx());
+            }
+        }
         self.sec(ui, pg, "Queue");
         if let Some(cy) = self.row(ui, pg, "Start with Endless on", "Adds similar songs when the queue runs out") {
             toggle(ui, &self.t, "endless", right, cy, &mut self.opts.endless);
@@ -631,6 +719,14 @@ impl App {
         }
         if let Some(cy) = self.row(ui, pg, "Remember shuffle and repeat", "Restored in the next session") {
             toggle(ui, &self.t, "remember-modes", right, cy, &mut self.opts.remember_modes);
+        }
+        if let Some(cy) = self.row(ui, pg, "Restore last queue", "Bring back the queue and position, paused, on start") {
+            toggle(ui, &self.t, "restore-queue", right, cy, &mut self.opts.restore_queue);
+        }
+        if let Some(cy) = self.row(ui, pg, "Skip songs that fail", "Move on to the next song when one can't play") {
+            if toggle(ui, &self.t, "skip-on-error", right, cy, &mut self.opts.skip_on_error) {
+                self.pl.skip_on_error = self.opts.skip_on_error;
+            }
         }
         self.sec(ui, pg, "Video");
         if let Some(cy) = self.row(ui, pg, "Play music videos by default", "Video instead of cover when available") {
@@ -689,6 +785,29 @@ impl App {
             crate::data::HIDE_EXPLICIT.store(self.opts.hide_explicit, std::sync::atomic::Ordering::Relaxed);
             crate::data::HIDE_VIDEO.store(self.opts.hide_video, std::sync::atomic::Ordering::Relaxed);
             self.data.refilter();
+        }
+        self.sec(ui, pg, "Home");
+        let before = self.opts.clone();
+        for (key, title, desc) in [
+            ("hide-recents", "Hide recently played", "Drops the Listen again shelves"),
+            ("hide-moods", "Hide moods and genres", ""),
+            ("hide-top-picks", "Hide quick picks", ""),
+            ("hide-shorts", "Hide Shorts", ""),
+            ("music-only", "Music only", "Leaves out music videos and podcasts"),
+        ] {
+            if let Some(cy) = self.row(ui, pg, title, desc) {
+                let o = &mut self.opts;
+                let v = match key { "hide-recents" => &mut o.hide_recents, "hide-moods" => &mut o.hide_moods, "hide-top-picks" => &mut o.hide_top_picks, "hide-shorts" => &mut o.hide_shorts, _ => &mut o.music_only };
+                toggle(ui, &self.t, key, right, cy, v);
+            }
+        }
+        if self.opts != before {
+            self.opts.apply_globals();
+            self.data.home.reset();
+        }
+        self.sec(ui, pg, "Sidebar");
+        if let Some(cy) = self.row(ui, pg, "Show auto playlists", "Liked songs in the library, and the Downloads and History & stats shortcuts") {
+            toggle(ui, &self.t, "auto-playlists", right, cy, &mut self.opts.auto_playlists);
         }
         self.sec(ui, pg, "Artist page");
         for (key, title, desc) in [
@@ -771,6 +890,15 @@ impl App {
             let sel = segmented(ui, &self.t, "lyrics-size", right, cy, &["Small", "Medium", "Large"], cur);
             self.opts.lyrics_size = LYR_SIZES[sel];
             self.pl.lyr_size = self.opts.lyrics_size as f32 / 100.;
+        }
+        if let Some(cy) = self.row(ui, pg, "Center lyrics", "Align lines to the middle instead of the left") {
+            toggle(ui, &self.t, "lyrics-center", right, cy, &mut self.opts.lyrics_center);
+        }
+        if let Some(cy) = self.row(ui, pg, "Auto-scroll lyrics", "Follow the playing line; off leaves scrolling to you") {
+            toggle(ui, &self.t, "lyrics-follow", right, cy, &mut self.opts.lyrics_follow);
+        }
+        if let Some(cy) = self.row(ui, pg, "Tap to seek", "Click a synced line to jump to it") {
+            toggle(ui, &self.t, "lyrics-tap-seek", right, cy, &mut self.opts.lyrics_tap_seek);
         }
         let Ok(d) = self.daemon(ui) else { return };
         self.sec(ui, pg, "Lyric providers");
@@ -857,6 +985,21 @@ impl App {
             if button(ui, &self.t, "cache-clear", right, cy, "Clear") {
                 crate::cache::clear();
                 crate::toast::info("Audio cache cleared");
+            }
+        }
+        let (n, bytes) = crate::gfx::cover_usage(ui.ctx());
+        if let Some(cy) = self.row(ui, pg, "Image cache", &format!("{n} covers, {:.0} MB in memory · most recent kept", bytes as f64 / (1 << 20) as f64)) {
+            let labels = ["48", "96", "192", "384"];
+            let sel = segmented(ui, &self.t, "image-cache", right, cy, &labels, IMAGE_CACHE.iter().position(|m| *m == self.opts.image_cache).unwrap_or(usize::MAX));
+            if let Some(v) = IMAGE_CACHE.get(sel).filter(|v| **v != self.opts.image_cache) {
+                self.opts.image_cache = *v;
+                crate::gfx::set_cover_limit(*v);
+            }
+        }
+        if let Some(cy) = self.row(ui, pg, "Clear image cache", "Forgets loaded covers; they load again when shown") {
+            if button(ui, &self.t, "image-clear", right, cy, "Clear") {
+                crate::gfx::clear_covers(ui.ctx());
+                crate::toast::info("Image cache cleared");
             }
         }
         self.sec(ui, pg, "Files");
@@ -963,6 +1106,12 @@ impl App {
         }
         if let Some(cy) = self.row(ui, pg, "Show listening party", "Party size instead of progress bar") {
             toggle(ui, &self.t, "discord-party", pg.right(), cy, &mut self.opts.discord_party);
+        }
+        if let Some(cy) = self.row(ui, pg, "Listen button", "\"Listen on YouTube Music\" link on your activity") {
+            toggle(ui, &self.t, "discord-listen", pg.right(), cy, &mut self.opts.discord_listen);
+        }
+        if let Some(cy) = self.row(ui, pg, "Get Serafin button", "Link to the Serafin repository on your activity") {
+            toggle(ui, &self.t, "discord-get", pg.right(), cy, &mut self.opts.discord_get);
         }
         self.sec(ui, pg, "Listening party");
         if let Some(cy) = self.row(ui, pg, "Let people in automatically", "Accept join requests without asking") {
@@ -1099,6 +1248,37 @@ impl App {
 
     fn about(&mut self, ui: &mut egui::Ui, pg: &mut Page) {
         let right = pg.right();
+        self.sec(ui, pg, "Updates");
+        let ctx = ui.ctx().clone();
+        let state = crate::update::latest().lock();
+        let desc = match &*state {
+            crate::data::State::Ready(r) if crate::update::newer(&r.tag_name) => format!("{} is available, you have {}", r.tag_name, crate::update::VERSION),
+            crate::data::State::Ready(_) => format!("Serafin {} is up to date", crate::update::VERSION),
+            crate::data::State::Failed(e) => format!("Could not check: {e}"),
+            crate::data::State::Loading => "Checking…".into(),
+            crate::data::State::Idle => format!("Serafin {}", crate::update::VERSION),
+        };
+        let release = match &*state { crate::data::State::Ready(r) => Some(r.clone()), _ => None };
+        drop(state);
+        if let Some(cy) = self.row(ui, pg, "Check for updates", &desc) {
+            match release.as_ref().filter(|r| crate::update::newer(&r.tag_name)) {
+                Some(r) if button(ui, &self.t, "update-open", right - 124., cy, "Download") => ctx.open_url(egui::OpenUrl::new_tab(&r.html_url)),
+                _ => {}
+            }
+            if button(ui, &self.t, "update-check", right, cy, "Check now") {
+                crate::update::check(&ctx, true);
+            }
+        }
+        if let Some(cy) = self.row(ui, pg, "Check automatically", "Looks for a new release on GitHub when the app starts") {
+            toggle(ui, &self.t, "auto-update", right, cy, &mut self.opts.auto_update);
+        }
+        if let Some(r) = release.filter(|r| !r.body.trim().is_empty()) {
+            let title = format!("What's new in {}", r.tag_name);
+            if let Some((_, body)) = self.block(ui, pg, &title, "", 96.) {
+                let g = wrapped(ui.painter(), r.body.trim(), font(12.), self.t.tm, body.width(), 6);
+                ui.painter().galley(body.min, g, self.t.tm);
+            }
+        }
         self.sec(ui, pg, "Reset");
         if let Some(cy) = self.row(ui, pg, "Reset preferences", "Sign-ins and proxy are kept") {
             let id = ui.scope_id().with("reset-armed");
@@ -1111,6 +1291,17 @@ impl App {
                 ui.data_mut(|d| d.insert_temp(id, !armed));
             }
         }
+    }
+
+    /// Reopens the audio output on `opts.output` and carries the engine settings over.
+    pub fn set_output(&mut self, ctx: &egui::Context) {
+        let e = crate::audio::Engine::on(crate::tray::wake, &self.opts.output);
+        e.set_volume(self.volume);
+        e.set_crossfade(self.opts.crossfade as f32);
+        e.set_gapless(self.opts.gapless);
+        e.set_normalize(self.opts.normalize);
+        e.set_target(self.opts.target_lufs);
+        self.pl.swap_engine(ctx, e);
     }
 
     /// Defaults for every preference, pushed to the engine and filters the same way startup does.
@@ -1126,20 +1317,28 @@ impl App {
         }
         self.pl.endless = o.endless;
         self.pl.no_dupes = o.no_dupes;
+        self.pl.skip_on_error = o.skip_on_error;
         self.pl.set_romaji(o.romaji);
         self.pl.lyr_size = o.lyrics_size as f32 / 100.;
+        crate::gfx::set_reduced_motion(o.reduce_motion);
         self.pl.engine.set_crossfade(o.crossfade as f32);
         self.pl.engine.set_gapless(o.gapless);
         self.pl.engine.set_normalize(o.normalize);
         self.pl.engine.set_target(o.target_lufs);
         crate::cache::set_limit_mb(o.cache_mb);
+        o.apply_globals();
         crate::data::HIDE_EXPLICIT.store(o.hide_explicit, std::sync::atomic::Ordering::Relaxed);
         crate::data::HIDE_VIDEO.store(o.hide_video, std::sync::atomic::Ordering::Relaxed);
         set_fonts(ctx, &o.font);
         set_scale(ctx, o.ui_scale);
         set_scroll_speed(ctx, o.scroll_speed);
         (self.video_on, self.video_h) = (o.video, if VIDEO_HEIGHTS.contains(&o.video_h) { o.video_h } else { VIDEO_HEIGHTS[0] });
+        crate::tray::set_autostart(o.autostart);
+        let swap = o.output != self.opts.output;
         self.opts = o;
+        if swap {
+            self.set_output(ctx);
+        }
         self.data.refilter();
         self.reload_custom();
     }
@@ -1163,6 +1362,14 @@ fn nearest<T: Copy + Into<i32>>(v: T, of: &[T]) -> T {
 
 impl Opts {
     /// Snaps values that came from an old or hand-edited file onto what the page can show.
+    /// Pushes the prefs that live in process-wide state (image cache size, hidden home shelves).
+    pub fn apply_globals(&self) {
+        crate::gfx::set_cover_limit(self.image_cache);
+        crate::viz::set_fps(self.viz_fps);
+        let m = [self.hide_recents, self.hide_moods, self.hide_top_picks, self.hide_shorts, self.music_only].iter().enumerate().fold(0, |m, (i, on)| m | (*on as u8) << i);
+        crate::data::HOME_HIDE.store(m, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn sanitize(&mut self) {
         self.ui_scale = nearest(self.ui_scale, &SCALES);
         self.scroll_speed = nearest(self.scroll_speed, &SCROLL);
@@ -1170,7 +1377,9 @@ impl Opts {
         self.target_lufs = nearest(self.target_lufs, &LOUD);
         self.seek_step = nearest(self.seek_step, &SEEK);
         self.vol_step = nearest(self.vol_step, &VOL);
+        self.image_cache = nearest(self.image_cache, &IMAGE_CACHE);
         self.crossfade = self.crossfade.min(12);
+        self.viz_style = self.viz_style.min(crate::viz::STYLES.len() as u8 - 1);
         self.mode = self.mode.min(2);
         self.accent = self.accent.min(PRESETS.len() as u8 - 1);
     }
@@ -1178,13 +1387,14 @@ impl Opts {
 
 const LOUD: [i8; 3] = [-19, -14, -11];
 const SEEK: [u8; 3] = [5, 10, 15];
+const IMAGE_CACHE: [u16; 4] = [48, 96, 192, 384];
 const VOL: [u8; 3] = [2, 5, 10];
 
 /// Pill switch; true when clicked this frame.
 pub(crate) fn toggle(ui: &egui::Ui, t: &crate::theme::Theme, key: &str, right: f32, cy: f32, on: &mut bool) -> bool {
     let r = Rect::from_min_size(pos2(right - 40., cy - 12.), vec2(40., 24.));
     let hit = press(ui, ("settings", key), r);
-    let k = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with(("settings-sw", key)), *on, 0.15, ease_out);
+    let k = ui.ctx().calm_bool_ease(ui.scope_id().with(("settings-sw", key)), *on, 0.15, ease_out);
     let p = ui.painter();
     p.rect_filled(r, rad(12.), t.s3.lerp_to_gamma(t.ax, k));
     p.circle_filled(pos2(r.min.x + 12. + 16. * k, cy), 8., t.tm.lerp_to_gamma(t.on_ax, k));
@@ -1216,8 +1426,8 @@ fn segmented(ui: &egui::Ui, t: &crate::theme::Theme, key: &str, right: f32, cy: 
     for (i, o) in opts.iter().enumerate() {
         let r = Rect::from_min_size(pos2(x, track.min.y + 2.), vec2(ws[i], 28.));
         let hit = press(ui, ("settings", key, i), r);
-        let k = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with(("settings-seg", key, i)), i == sel, 0.18, ease_out);
-        let h = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with(("settings-seg-hot", key, i)), hit.hovered(), 0.12, ease_out);
+        let k = ui.ctx().calm_bool_ease(ui.scope_id().with(("settings-seg", key, i)), i == sel, 0.18, ease_out);
+        let h = ui.ctx().calm_bool_ease(ui.scope_id().with(("settings-seg-hot", key, i)), hit.hovered(), 0.12, ease_out);
         p.rect_filled(r, rad(6.), t.s2.gamma_multiply(h * (1. - k)));
         p.rect_filled(r, rad(6.), t.axc.gamma_multiply(k));
         p.text(r.center(), Align2::CENTER_CENTER, o, font_w(13., Weight::Medium), t.tm.lerp_to_gamma(t.tx, k));
@@ -1234,7 +1444,7 @@ fn crossfade_graph(ui: &egui::Ui, t: &crate::theme::Theme, panel: Rect, secs: u8
     let p = ui.painter();
     p.rect_filled(panel, rad(12.), t.s1);
     let inner = panel.shrink2(vec2(12., 8.));
-    let half = ui.ctx().animate_value_with_time(ui.scope_id().with("xf-half"), secs as f32 / 12. * 70., 0.15);
+    let half = ui.ctx().calm_value(ui.scope_id().with("xf-half"), secs as f32 / 12. * 70., 0.15);
     let (sx, sy) = (inner.width() / 300., inner.height() / 54.);
     let pt = |x: f32, y: f32| pos2(inner.min.x + x * sx, inner.min.y + y * sy);
     let (a0, a1) = (150. - half, 150. + half);

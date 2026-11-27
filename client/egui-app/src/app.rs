@@ -4,11 +4,12 @@
 //! `animate_bool` (0..1) and every region is drawn into its own clipped child `Ui`. Contents of a
 //! collapsing sidebar keep their size and are simply clipped, as in the design mock.
 
+use crate::gfx::Calm;
 use crate::tip::Tip;
 use crate::audio;
 use crate::gfx::*;
 use crate::library::{LibItem, LibSort, LibView};
-use crate::data::{Data, State, Track};
+use crate::data::{Data, Item, State, Track};
 use std::sync::Arc;
 use crate::media::{Cmd, Media};
 use crate::player::Player;
@@ -76,6 +77,7 @@ pub enum PlayerView {
     Art,
     Lyrics,
     Queue,
+    Viz,
 }
 
 pub struct App {
@@ -116,6 +118,8 @@ pub struct App {
     pub song: Option<Track>,
     /// An album/playlist/artist whose hover-play was clicked before its page had loaded: (endpoint segment, browse id).
     pub want_play: Option<(&'static str, String)>,
+    /// The card last opened, so its page can show the cover and title while it loads.
+    pub peek: Option<Item>,
     /// Right-click menu: where it opened and what it is for. Drawn by `menu::context_menu`.
     pub ctx_menu: Option<(egui::Pos2, crate::menu::Target)>,
     /// Button that opened `ctx_menu`: presses on it toggle the menu instead of counting as "outside".
@@ -128,6 +132,8 @@ pub struct App {
     pub(crate) me_menu: Option<f64>,
     /// The profile button, whose presses toggle the dropdown instead of counting as "outside".
     me_btn: Rect,
+    /// Items of the carousel whose "Show all" opened the shelf page, with its subtitle.
+    pub shelf: Option<(String, String, Vec<crate::data::Item>)>,
     /// Titlebar status island.
     isl: Isl,
     pub home_chip: usize,
@@ -202,11 +208,15 @@ struct Prefs {
     guest: String,
     /// The last signed-in name and picture, so a party can be joined before the account has loaded.
     me: (String, String),
+    /// The queue, current index and playhead, kept only while `opts.restore_queue` is on.
+    queue: Vec<crate::data::Track>,
+    queue_cur: usize,
+    queue_pos: f32,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, opts: Opts::default(), recents: Vec::new(), shuffle: false, repeat: 0, guest: String::new(), me: Default::default() }
+        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, opts: Opts::default(), recents: Vec::new(), shuffle: false, repeat: 0, guest: String::new(), me: Default::default(), queue: Vec::new(), queue_cur: 0, queue_pos: 0. }
     }
 }
 
@@ -240,7 +250,7 @@ fn visuals(ctx: &Context, t: &Theme) {
 
 /// 0..1 progress that eases toward `on`, reversing smoothly if toggled mid-flight.
 pub fn anim(ctx: &Context, id: &str, on: bool) -> f32 {
-    ctx.animate_bool_with_time_and_easing(Id::unique(id), on, 0.3, |t| 1. - (1. - t).powi(4))
+    ctx.calm_bool_ease(Id::unique(id), on, 0.3, |t| 1. - (1. - t).powi(4))
 }
 
 impl App {
@@ -249,24 +259,34 @@ impl App {
         let mut prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, PREFS)).unwrap_or_default();
         prefs.opts.sanitize();
         let volume = prefs.volume.clamp(0., 1.);
-        let mut pl = Player::new(audio::Engine::new(crate::tray::wake));
+        let mut pl = Player::new(audio::Engine::on(crate::tray::wake, &prefs.opts.output));
         let media = Media::new(crate::tray::wake, os_window(cc));
         pl.engine.set_volume(volume);
         pl.endless = prefs.opts.endless;
         pl.no_dupes = prefs.opts.no_dupes;
+        pl.skip_on_error = prefs.opts.skip_on_error;
+        if prefs.opts.restore_queue {
+            pl.restore(&prefs.queue, prefs.queue_cur, prefs.queue_pos);
+        }
         if prefs.opts.remember_modes {
             (pl.shuffle, pl.repeat) = (prefs.shuffle, prefs.repeat);
         }
         pl.set_romaji(prefs.opts.romaji);
+        pl.lyr_size = prefs.opts.lyrics_size as f32 / 100.;
         if !prefs.opts.font.is_empty() {
             set_fonts(&cc.egui_ctx, &prefs.opts.font);
         }
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         crate::settings::set_scale(&cc.egui_ctx, prefs.opts.ui_scale);
         crate::settings::set_scroll_speed(&cc.egui_ctx, prefs.opts.scroll_speed);
+        crate::gfx::set_reduced_motion(prefs.opts.reduce_motion);
+        if prefs.opts.start_minimized && crate::tray::hide_on_close() {
+            crate::tray::hide(&cc.egui_ctx);
+        }
         pl.engine.set_crossfade(prefs.opts.crossfade as f32);
         pl.engine.set_gapless(prefs.opts.gapless);
         crate::cache::set_limit_mb(prefs.opts.cache_mb);
+        prefs.opts.apply_globals();
         pl.engine.set_normalize(prefs.opts.normalize);
         pl.engine.set_target(prefs.opts.target_lufs);
         crate::data::HIDE_EXPLICIT.store(prefs.opts.hide_explicit, std::sync::atomic::Ordering::Relaxed);
@@ -303,12 +323,14 @@ impl App {
             sel: None,
             song: None,
             want_play: None,
+            peek: None,
             ctx_menu: None,
             ctx_keep: egui::Rect::NOTHING,
             palette: None,
             recents: prefs.recents,
             me_menu: None,
             me_btn: Rect::NOTHING,
+            shelf: None,
             isl: Isl::default(),
             home_chip: 0,
             pl,
@@ -377,7 +399,14 @@ impl App {
         let cy = tb.center().y;
 
         // Left: the logo (over the library, tinted to the accent) with back and forward just right of it.
-        icon(ui, icon!("serafin"), pos2(tb.min.x + 30., cy), 30., t.ax);
+        let (scale, flash) = if self.opts.viz_logo {
+            let lv = crate::viz::levels(&ctx, &self.pl.engine);
+            crate::viz::repaint(&ctx, &lv);
+            crate::viz::pulse(&p, pos2(tb.min.x + 30., cy), t.ax, &lv)
+        } else {
+            (1., 0.)
+        };
+        icon(ui, icon!("serafin"), pos2(tb.min.x + 30., cy), 30. * scale, t.ax.lerp_to_gamma(Color32::WHITE, flash));
         if icon_button(ui, &t, "back", pos2(tb.min.x + 71., cy), 32., icon!("back"), 16., if self.back.is_empty() { t.tf } else { t.tm }).clicked() {
             self.back();
         }
@@ -394,11 +423,14 @@ impl App {
                 self.me = me;
             }
         }
-        let name = user.as_ref().map_or_else(|| "Sign in".into(), |u| u.1.clone());
-        let me_w = 3. + 26. + 8. + text_w(&p, &name, font(13.)).min(100.) + 10.;
-        let me = Rect::from_min_size(pos2(tb.max.x - 12. - me_w, cy - 16.), vec2(me_w, 32.));
+        let me = Rect::from_center_size(pos2(tb.max.x - 12. - 16., cy), vec2(32., 32.));
         self.me_btn = me;
-        if tonal(ui, &t, "me", me, 16., None).clicked() {
+        let r = tonal(ui, &t, "me", me, 16., None);
+        if r.double_clicked() {
+            self.me_menu = None;
+            (self.settings_tab, self.settings_q) = (crate::settings::APPEARANCE, String::new());
+            self.go(Route::Settings);
+        } else if r.clicked() {
             if self.me_menu.is_some() {
                 self.me_menu = None;
             } else {
@@ -408,10 +440,9 @@ impl App {
         } else if self.me_menu.is_some() {
             p.rect_filled(me, rad(16.), t.s2);
         }
-        self.avatar(ui, user.as_ref().and_then(|u| u.0.as_deref()), pos2(me.min.x + 16., cy), 13., user.as_ref().map(|u| u.1.as_str()));
-        trunc(&p, pos2(me.min.x + 37., cy), 100., &name, font(13.), t.tx);
+        icon(ui, icon!("gear"), me.center(), 18., t.tm);
         if self.private.is_some() {
-            let c = pos2(me.min.x + 25., cy + 9.);
+            let c = me.center() + vec2(9., 9.);
             p.circle_filled(c, 8., t.s2);
             p.circle_filled(c, 6.5, t.ax);
             icon(ui, icon!("lock"), c, 9., t.on_ax);
@@ -426,7 +457,7 @@ impl App {
         if r.hovered() {
             ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        let hot = ctx.animate_bool_with_time(r.id.with("hot"), r.hovered(), 0.09);
+        let hot = ctx.calm_bool(r.id.with("hot"), r.hovered(), 0.09);
         p.rect_filled(pill, rad(16.), t.s2.lerp_to_gamma(t.s3, hot));
         icon(ui, icon!("search"), pos2(pill.min.x + 20., cy), 16., t.tm);
         let (kbd, kf) = ("Ctrl K", egui::FontId::monospace(10.5));
@@ -726,7 +757,7 @@ impl App {
         if hot.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        let h = ui.ctx().animate_bool_with_time_and_easing(ui.scope_id().with("peek-h"), hot.hovered(), 0.15, ease_out);
+        let h = ui.ctx().calm_bool_ease(ui.scope_id().with("peek-h"), hot.hovered(), 0.15, ease_out);
         let (a_l, a_r) = (1., lerp(0.62..=0.78, h));
         // Outline with 18px rounded left corners, as (point, outward normal). A 1px transparent ring
         // offset along each normal gives the mesh an anti-aliased edge, which strips alone cannot.
@@ -768,7 +799,7 @@ impl App {
         let nudge = -2. * h;
         let mut g = ui.new_child(UiBuilder::new().max_rect(sliver));
         g.set_opacity(shown);
-        icon(&g, icon!("back"), pos2(sliver.center().x + nudge, sliver.center().y), 22., Color32::from_gray(250));
+        icon(&g, icon!("back"), pos2(sliver.center().x + nudge, sliver.center().y), 22., if t.dark { Color32::from_gray(250) } else { Color32::from_gray(20) });
         if hot.clicked() {
             self.set_player(Some(self.view));
         }
@@ -946,6 +977,11 @@ impl App {
 
     pub fn headless(&mut self, ctx: &Context) {
         self.pl.tick(ctx);
+        if self.pl.engine.lost() {
+            self.opts.output.clear();
+            self.set_output(ctx);
+            crate::toast::info("Audio device disconnected, using the default output");
+        }
         if let Some((t, on)) = self.pl.like_event.take() {
             if self.private.is_none() {
                 self.scrobbler.love(ctx, &t, on);
@@ -985,7 +1021,14 @@ impl App {
         let song = self.pl.song().map(|s| (s.title.as_str(), s.artist.as_str(), cover.as_deref()));
         if self.opts.discord && !private {
             let party = self.party.room.as_ref().filter(|_| self.opts.discord_party).map(|r| (r.code.as_str(), r.members.iter().filter(|m| m.connected).count() as i32));
-            self.discord.update(song, self.pl.playing, self.pl.pos, self.pl.dur(), self.opts.discord_paused, party);
+            let mut links = Vec::new();
+            if let Some(s) = self.pl.song().filter(|s| self.opts.discord_listen && !s.vid().is_empty()) {
+                links.push(("Listen on YouTube Music", format!("https://music.youtube.com/watch?v={}", s.vid())));
+            }
+            if self.opts.discord_get {
+                links.push(("Get Serafin", "https://github.com/hireri/serafin".to_string()));
+            }
+            self.discord.update(song, self.pl.playing, self.pl.pos, self.pl.dur(), self.opts.discord_paused, party, links);
         } else {
             self.discord.clear();
         }
@@ -1129,7 +1172,7 @@ impl App {
         if hit(ctrl, Key::L) {
             self.pl.set_like(ctx);
         }
-        for (k, v) in [(Key::Num1, PlayerView::Art), (Key::Num2, PlayerView::Lyrics), (Key::Num3, PlayerView::Queue)] {
+        for (k, v) in [(Key::Num1, PlayerView::Art), (Key::Num2, PlayerView::Lyrics), (Key::Num3, PlayerView::Queue), (Key::Num4, PlayerView::Viz)] {
             if hit(ctrl, k) {
                 self.set_player(Some(v));
             }
@@ -1157,7 +1200,8 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, opts: self.opts.clone(), recents: self.recents.clone(), shuffle: self.opts.remember_modes && self.pl.shuffle, repeat: if self.opts.remember_modes { self.pl.repeat } else { 0 }, guest: self.guest.clone(), me: self.me.clone() };
+        let (queue, queue_cur) = if self.opts.restore_queue { self.pl.snapshot() } else { Default::default() };
+        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, opts: self.opts.clone(), recents: self.recents.clone(), shuffle: self.opts.remember_modes && self.pl.shuffle, repeat: if self.opts.remember_modes { self.pl.repeat } else { 0 }, guest: self.guest.clone(), me: self.me.clone(), queue, queue_cur, queue_pos: self.pl.pos };
         eframe::set_value(storage, PREFS, &p);
     }
 
@@ -1178,6 +1222,9 @@ impl eframe::App for App {
             crate::tray::hide(&ctx);
         }
         crate::gfx::trim_covers(&ctx);
+        if self.opts.auto_update {
+            crate::update::check(&ctx, false);
+        }
         self.follow_track(&ctx);
         self.palette_toggle(&ctx);
         self.keys(&ctx);
@@ -1223,7 +1270,7 @@ impl eframe::App for App {
         self.page(ui, page_r);
         if self.lib_open && lib_t > 0.99 {
             // Grab zone straddling the library's right edge; double-click resets.
-            let grab = Rect::from_min_max(pos2(lib_r.max.x - 8., lib_r.min.y + 6.), pos2(lib_r.max.x + 6., lib_r.max.y - 10.));
+            let grab = Rect::from_min_max(pos2(lib_r.max.x - 1., lib_r.min.y + 6.), pos2(lib_r.max.x + 6., lib_r.max.y - 10.));
             let r = ui.interact(grab, ui.scope_id().with("lib-resize"), egui::Sense::click_and_drag());
             if r.hovered() || r.dragged() {
                 ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);

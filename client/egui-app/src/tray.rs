@@ -78,11 +78,31 @@ pub fn hide_on_close() -> bool {
     HAS_TRAY.load(Ordering::Relaxed) && !quitting()
 }
 
+/// Adds or removes the XDG autostart entry (the packaged .desktop with `Exec` pointing at this binary); a no-op elsewhere.
+pub fn set_autostart(on: bool) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")));
+    let Some(file) = base.map(|b| b.join("autostart/serafin.desktop")) else { return };
+    if !on {
+        let _ = std::fs::remove_file(file);
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let exec = format!("Exec=\"{}\"", exe.display().to_string().replace('\\', "\\\\").replace('"', "\\\""));
+    let entry: String = include_str!("../packaging/serafin.desktop").lines().map(|l| if l.starts_with("Exec=") { exec.clone() } else { l.to_string() } + "\n").collect();
+    if std::fs::create_dir_all(file.parent().unwrap()).and_then(|_| std::fs::write(&file, entry)).is_err() {
+        eprintln!("couldn't write the autostart entry");
+    }
+}
+
 /// Hides the window. Wayland can't hide one (winit ignores `Visible(false)`), so there the close goes through and the
 /// window is destroyed; `main` notices `hidden()` and recreates it on `show`.
 pub fn hide(ctx: &Context) {
     if cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
         HIDDEN.store(true, Ordering::Relaxed);
+        ctx.send_viewport_cmd(ViewportCommand::Close); // already closing when called from the close button; needed at startup
         return;
     }
     ctx.send_viewport_cmd(ViewportCommand::CancelClose);

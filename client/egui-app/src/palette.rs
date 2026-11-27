@@ -55,6 +55,7 @@ const ENTRIES: &[Entry] = &[
     e(CMD, "Like current song", "Ctrl L", icon!("star"), Act::Like),
     e(CMD, "Show lyrics", "Ctrl 2", icon!("lyrf"), Act::View(PlayerView::Lyrics)),
     e(CMD, "Show queue", "Ctrl 3", icon!("quef"), Act::View(PlayerView::Queue)),
+    e(CMD, "Show visualizer", "Ctrl 4", icon!("viz"), Act::View(PlayerView::Viz)),
 ];
 
 /// Open palette: the text typed, the highlighted row and what is animating.
@@ -550,7 +551,7 @@ mod tests {
 
     #[test]
     fn filter_matches_words_in_any_order_and_ranks_prefix_first() {
-        assert_eq!(labels("").len(), 15);
+        assert_eq!(labels("").len(), 16);
         assert_eq!(labels("NEXT"), ["Next song"]);
         assert_eq!(labels("song next"), ["Next song"]);
         assert!(labels("zzz").is_empty());
@@ -574,7 +575,7 @@ mod tests {
         let recents: Vec<String> = ["a", "b", "c", "d"].map(String::from).into();
         let empty = rows(&build("", &recents, None));
         assert!(matches!(&empty[..4], [Kind::Recent(_), Kind::Recent(_), Kind::Recent(_), Kind::Entry(_)]));
-        assert_eq!(empty.len(), 3 + 15);
+        assert_eq!(empty.len(), 3 + 16);
         // Typing: "Search for" comes first, completions skip the typed text itself, entities cap at three.
         let sugg = Suggest {
             queries: ["night", "night bus", "night shift", "night drive", "night owl"].map(String::from).into(),

@@ -485,8 +485,17 @@ impl Ring {
     }
 }
 
+/// Latest mono output samples, for the visualizer.
+pub const TAP: usize = 2048;
+
+struct Tap {
+    buf: [f32; TAP],
+    pos: usize,
+}
+
 struct Shared {
     ring: Mutex<Ring>,
+    tap: Mutex<Tap>,
     events: Mutex<Vec<Event>>,
     playing: AtomicBool,
     volume: AtomicU32,
@@ -500,6 +509,8 @@ struct Shared {
     next: Mutex<Option<StreamInfo>>,
     out_rate: u32,
     out_ch: usize,
+    /// The output device went away (set from cpal's error callback).
+    lost: AtomicBool,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -675,10 +686,17 @@ fn build<T: SizedSample + FromSample<f32>>(
     cfg: cpal::StreamConfig,
     shared: Arc<Shared>,
 ) -> Result<cpal::Stream, String> {
+    let s = shared.clone();
     dev.build_output_stream(
         cfg,
         move |data: &mut [T], _| fill(&shared, data),
-        |e| eprintln!("audio output: {e}"),
+        move |e| {
+            eprintln!("audio output: {e}");
+            if e.kind() == cpal::ErrorKind::DeviceNotAvailable {
+                s.lost.store(true, Relaxed);
+                (s.wake)();
+            }
+        },
         None,
     )
     .map_err(|e| e.to_string())
@@ -689,17 +707,30 @@ fn fill<T: FromSample<f32>>(shared: &Shared, data: &mut [T]) {
     let playing = shared.playing.load(Relaxed);
     let mut r = shared.ring.lock().unwrap();
     let mut got = 0usize;
-    for s in data.iter_mut() {
+    // try_lock: the callback must never wait on the UI thread reading the tap; a missed block is invisible.
+    let mut tap = shared.tap.try_lock().ok();
+    let mut acc = 0.;
+    for (i, s) in data.iter_mut().enumerate() {
         let next = if playing { r.samples.pop_front() } else { None };
         let v = match next {
             Some(v) => {
                 got += 1;
+                acc += v;
                 v * vol
             }
             None => 0.0,
         };
         *s = T::from_sample_(v);
+        if (i + 1) % shared.out_ch == 0 {
+            if let Some(t) = tap.as_mut() {
+                let p = t.pos;
+                t.buf[p] = acc / shared.out_ch as f32;
+                t.pos = (p + 1) % TAP;
+            }
+            acc = 0.;
+        }
     }
+    drop(tap);
     r.played += (got / shared.out_ch) as u64;
     let crossed = r.pending.as_ref().is_some_and(|b| r.played >= b.at);
     if crossed {
@@ -716,8 +747,17 @@ fn fill<T: FromSample<f32>>(shared: &Shared, data: &mut [T]) {
     }
 }
 
-fn output_device() -> Option<(cpal::Device, SupportedStreamConfig)> {
-    let dev = cpal::default_host().default_output_device()?;
+/// Names of the output devices, for the settings picker.
+pub fn output_names() -> Vec<String> {
+    let devs = cpal::default_host().output_devices().into_iter().flatten();
+    devs.filter_map(|d| d.description().ok().map(|d| d.name().to_string())).collect()
+}
+
+/// The device called `name`, or the default one when `name` is empty or no longer exists.
+fn output_device(name: &str) -> Option<(cpal::Device, SupportedStreamConfig)> {
+    let host = cpal::default_host();
+    let named = || host.output_devices().ok()?.find(|d| d.description().is_ok_and(|d| d.name() == name));
+    let dev = Some(name).filter(|n| !n.is_empty()).and_then(|_| named()).or_else(|| host.default_output_device())?;
     let cfg = dev
         .supported_output_configs()
         .ok()?
@@ -757,7 +797,12 @@ pub struct Engine {
 impl Engine {
     /// `wake` is called (from any thread) whenever state changes or an event is queued, so the UI can repaint.
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Engine {
-        let device = output_device();
+        Engine::on(wake, "")
+    }
+
+    /// Like `new`, on the output device called `device` (the default one when empty or gone).
+    pub fn on(wake: impl Fn() + Send + Sync + 'static, device: &str) -> Engine {
+        let device = output_device(device);
         let (out_rate, out_ch) = match &device {
             Some((_, c)) => (c.sample_rate(), c.channels() as usize),
             None => (OPUS_RATE, 2),
@@ -775,6 +820,7 @@ impl Engine {
                 pending: None,
                 advances: 0,
             }),
+            tap: Mutex::new(Tap { buf: [0.; TAP], pos: 0 }),
             events: Mutex::new(Vec::new()),
             playing: AtomicBool::new(false),
             volume: AtomicU32::new(1f32.to_bits()),
@@ -785,6 +831,7 @@ impl Engine {
             next: Mutex::new(None),
             out_rate,
             out_ch,
+            lost: AtomicBool::new(false),
             wake: Arc::new(wake),
         });
         let stream = device.and_then(|(dev, cfg)| match build_stream(&dev, &cfg, shared.clone()) {
@@ -795,6 +842,11 @@ impl Engine {
             }
         });
         Engine { shared, stream, stream_on: AtomicBool::new(true), tx: Mutex::new(None) }
+    }
+
+    /// True once the output device has disappeared; the engine is then silent and should be replaced.
+    pub fn lost(&self) -> bool {
+        self.shared.lost.load(Relaxed)
     }
 
     /// Stop whatever plays, open `s`, seek to `start_secs`, start playing.
@@ -921,6 +973,22 @@ impl Engine {
         (self.shared.wake)();
     }
 
+    pub fn out_rate(&self) -> u32 {
+        self.shared.out_rate
+    }
+
+    /// Copies the most recent `TAP` mono output samples, oldest first; false when nothing is playing.
+    pub fn tap(&self, out: &mut [f32; TAP]) -> bool {
+        if !self.is_playing() {
+            return false;
+        }
+        let t = self.shared.tap.lock().unwrap();
+        let (a, b) = t.buf.split_at(t.pos);
+        out[..b.len()].copy_from_slice(b);
+        out[b.len()..].copy_from_slice(a);
+        true
+    }
+
     /// Seconds actually played out (output-callback frames since the last load/seek, plus the base).
     pub fn position(&self) -> f32 {
         let r = self.shared.ring.lock().unwrap();
@@ -976,7 +1044,7 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use super::{chunk_range, merge_ranges, CacheState, Mix, Ring, Shared};
+    use super::{chunk_range, merge_ranges, CacheState, Mix, Ring, Shared, Tap, TAP};
     use std::sync::Arc;
 
     #[test]
@@ -1003,6 +1071,8 @@ mod tests {
             next: Mutex::new(None),
             out_rate: 4,
             out_ch: 1,
+            lost: AtomicBool::new(false),
+            tap: Mutex::new(Tap { buf: [0.; TAP], pos: 0 }),
             wake: Arc::new(|| {}),
         };
         let mut mix = Mix { left: 4, total: 4, ch: 1 };

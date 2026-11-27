@@ -1,5 +1,6 @@
 //! Left sidebar: page nav, library header/search/filters and a virtualized item list.
 
+use crate::gfx::Calm;
 use crate::app::{App, Route};
 use crate::gfx::*;
 use crate::live::grid;
@@ -95,7 +96,8 @@ impl App {
         let mut y = rect.min.y + 12.;
 
         // Page nav: 4 rows, icon slot fixed 26px from the row's left edge.
-        for (i, (label, ic, icf, route)) in NAV.iter().enumerate() {
+        let auto = self.opts.auto_playlists;
+        for (i, (label, ic, icf, route)) in NAV.iter().enumerate().filter(|(_, n)| auto || !matches!(n.3, Route::Downloads | Route::History)) {
             let row = Rect::from_min_size(pos2(x0, y), vec2(x1 - x0, 38.));
             let on = self.route == *route;
             let col = if on { t.tx } else { t.tm };
@@ -195,7 +197,7 @@ impl App {
         let mut order: Vec<usize> = (0..self.lib_items.len())
             .filter(|&i| {
                 let it = &self.lib_items[i];
-                (self.lib_filter == 0 || it.kind == self.lib_filter) && (q.is_empty() || it.title.to_lowercase().contains(&q))
+                (self.opts.auto_playlists || it.id != "LM") && (self.lib_filter == 0 || it.kind == self.lib_filter) && (q.is_empty() || it.title.to_lowercase().contains(&q))
             })
             .collect();
         let items = &self.lib_items;
@@ -209,7 +211,7 @@ impl App {
         // View switches fade the list out, swap, then fade it in; reversing mid-fade just reverses the fade.
         let target = if self.lib_open { self.lib_view } else { LibView::List };
         let settled = self.lib_shown == target;
-        let va = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("lib-view-fade"), settled, 0.15, crate::gfx::ease_out);
+        let va = ui.ctx().calm_bool_ease(egui::Id::unique("lib-view-fade"), settled, 0.15, crate::gfx::ease_out);
         if !settled && va <= 0. {
             self.lib_shown = target;
         }

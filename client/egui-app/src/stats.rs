@@ -7,7 +7,7 @@ use crate::gfx::*;
 use crate::menu::Target;
 use eframe::egui::{self, pos2, vec2, Align2, Rect, ScrollArea};
 
-const GAP: f32 = 8.;
+pub const GAP: f32 = 8.;
 const PANEL_H: f32 = 52. + 5. * 48. + 12.;
 const RECENT_PER_DAY: usize = 6;
 const RECENT_MAX: usize = 30;
@@ -30,7 +30,7 @@ impl App {
         let st = match &*g {
             State::Ready(s) => s,
             State::Failed(e) => return self.note(ui, card, top, &format!("{e} — sign in under Settings.")),
-            _ => return self.note(ui, card, top, "Loading…"),
+            _ => return self.stats_skeleton(ui, card, top),
         };
         let spotify = match &*d.spotify.lock() {
             State::Ready(n) => format!("{} Spotify playlists · no play history", n.len()),

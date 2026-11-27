@@ -21,21 +21,23 @@ history, remember searches, audio cache, Discord toggle, Last.fm, reset preferen
 - Also done, not on the original list: scroll speed (Slow/Normal/Fast, Appearance > Display), crossfade overlap graph, explicit "E" badge on song rows, queue, now-playing and home cards (not yet in the command palette rows)
 - Skipped: 11 add-to-playlist position (the client has no add-to-playlist call yet; add it with that feature), 19 repeat-all auto-load (Endless already does not load while repeat is on)
 
-## Planned (priority order)
+## Done in the port pass
+- 2 Restore last queue on start
+- 4 Output device picker (falls back to default if the device disappears)
+- 6 Lyrics: text size, alignment, auto-scroll, tap to seek
+- 7 Reduce motion (lyric blur and animations; cover backdrop blur not gated, the text ink colour depends on it)
+- 8 Auto-skip on error (stops after one pass through the queue)
+- 9 Discord: toggles for "Listen on YouTube Music" and "Get Serafin" buttons (activity otherwise unchanged)
+- 10 Listen Together settings (sync volume dropped on purpose)
+- 15 Image cache size and clear
+- 16 Start minimized, autostart (Linux only); media keys already handled by `media.rs`
+- 17 Hide home sections, music only
+- 18 Show auto playlists
+- 22 Update checker + changelog (GitHub releases of hireri/serafin)
+
+## Planned
 | id | Setting | Source | Ease | Notes |
 |----|---------|--------|------|-------|
-| 2 | Restore last queue on start | Metro | Medium | serialise queue into Prefs |
-| 4 | Output device picker | BC | Medium | `cpal` lists devices |
-| 6 | Lyrics: text size, alignment, auto-scroll, tap to seek | Metro, BC | Easy-Med | constants in lyrics drawing, `player.rs` |
-| 7 | Reduce motion / reduce blur | BC | Medium | one flag gating cover + lyric blur first; helps weak GPUs |
-| 8 | Auto-skip on error | Metro | Easy-Med | hook in `Player::fail` |
-| 9 | Discord: activity type, status text, buttons | Metro | Easy | `discord.rs` already builds the activity; flesh out within reason (type, status display, 2 buttons, presence preview) |
-| 10 | Listen Together: server URL, auto-approve joins/suggestions, sync volume | Metro | Easy-Med | partly in the party popover (`party.rs`) |
-| 15 | Image cache size and clear | Metro, BC | Easy-Med | |
-| 16 | Start minimized, autostart, media keys | desktop | Medium | platform specific |
-| 17 | Hide home sections (recents, moods, top picks, Shorts), prefer music only | Metro, BC | Medium | filter the daemon's home feed |
-| 18 | Show auto playlists (Liked, Downloaded, Top) | Metro | Easy | |
-| 22 | Update checker + changelog | Metro | Medium | |
 | 24 | Equalizer, Automix / smart fade, bit-perfect | BC | Hard | real DSP work |
 
 ## Design notes

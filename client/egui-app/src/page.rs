@@ -1,5 +1,6 @@
 //! Centre panel: album page (header wash, actions, virtualized track list).
 
+use crate::gfx::Calm;
 use crate::app::{App, Route};
 use crate::data::{Item, Section, State, Track};
 use crate::gfx::*;
@@ -121,7 +122,7 @@ impl App {
             Route::History => self.stats_page(ui, card),
             r => self.plain(ui, card, r),
         }
-        round_bottom_corners(&p, card, 18., t.s0);
+        round_bottom_corners_shadowed(&p, card, 18., t.s0, 10, 32, 61);
     }
 
     /// Plain header (title + subtitle) over a track table, a card grid, or a placeholder.
@@ -134,7 +135,7 @@ impl App {
         let shelf = self.sel.as_ref().map(|s| s.1.clone()).unwrap_or_default();
         let (title, sub) = match r {
             Route::Home => ("Home", "From YouTube Music"),
-            Route::Shelf => (shelf.as_str(), "From YouTube Music"),
+            Route::Shelf => (shelf.as_str(), self.shelf.as_ref().filter(|s| s.0 == shelf).map_or("From YouTube Music", |s| s.1.as_str())),
             Route::Downloads => ("Downloads", "Songs saved on this device"),
             Route::Local => ("Local Music", ""),
             Route::Album => ("Album", ""),
@@ -142,9 +143,13 @@ impl App {
             Route::Settings => ("Settings", ""),
             _ => ("Spotify import", "Your Spotify playlists"),
         };
-        trunc(&p, pos2(card.min.x + 22., card.min.y + 38.), card.width() - 44., title, font_w(26., Weight::Bold), t.tx);
-        trunc(&p, pos2(card.min.x + 22., card.min.y + 66.), card.width() - 44., sub, font(13.), t.tm);
-        let top = card.min.y + 90.;
+        // Home draws its own header inside its scroll area so it scrolls with the feed.
+        let home = r == Route::Home;
+        if !home {
+            trunc(&p, pos2(card.min.x + 22., card.min.y + 38.), card.width() - 44., title, font_w(26., Weight::Bold), t.tx);
+            trunc(&p, pos2(card.min.x + 22., card.min.y + 66.), card.width() - 44., sub, font(13.), t.tm);
+        }
+        let top = if home { card.min.y } else { card.min.y + 90. };
         match r {
             Route::Import => self.import_page(ui, card, top),
             Route::Downloads => self.note(ui, card, top, "No downloads yet."),
@@ -156,6 +161,90 @@ impl App {
             Route::Settings => self.settings_page(ui, card, top),
             _ => {}
         }
+    }
+
+    fn bone(&self, ui: &egui::Ui, x: f32, y: f32, w: f32, h: f32) {
+        ui.painter().rect_filled(Rect::from_min_size(pos2(x, y), vec2(w, h)), rad(h / 2.), self.t.s2);
+    }
+
+    /// Track-row placeholders from `y` to the bottom of the card, laid out on the real table columns.
+    fn row_bones(&self, ui: &egui::Ui, card: Rect, y: f32) {
+        let rh = if self.opts.compact { 34. } else { ROW_H };
+        let cols = columns(card.min.x + 6., card.width() - 12., 36., false);
+        let (mut y, mut i) = (y, 0);
+        while y + rh <= card.max.y {
+            let k = [0.8, 0.55, 0.9, 0.65, 0.45][i % 5];
+            let cy = y + rh / 2.;
+            self.bone(ui, cols[0].0 + NUM_X - 5., cy - 3., 10., 6.);
+            self.bone(ui, cols[1].0, cy - 5., cols[1].1 * k, 10.);
+            self.bone(ui, cols[2].0, cy - 5., cols[2].1 * k * 0.7, 10.);
+            self.bone(ui, cols[4].0 + cols[4].1 - 28., cy - 5., 28., 10.);
+            y += rh;
+            i += 1;
+        }
+    }
+
+    /// An album, playlist or artist page while it loads: the real hero from what the opened card already told us, then placeholder rows.
+    pub fn detail_skeleton(&mut self, ui: &mut egui::Ui, card: Rect, kind: &str, title: &str, cover: Option<&str>, sub: &str) {
+        let (head, round) = match kind { "artists" => ("Artist", true), "playlists" | "spotify" => ("Playlist", false), _ => ("Album", false) };
+        self.hero(ui, card, round, head, title, None, sub, cover, &[], None, 0.);
+        if kind == "artists" {
+            return self.cards_skeleton(ui, card, card.min.y + HERO_H, 1);
+        }
+        let look = Look { cover_w: 0., open: false, album: false };
+        self.table_head(ui, card.min.y + HERO_H + 14., card.min.x + 6., card.max.x - 6., look, None);
+        self.row_bones(ui, card, card.min.y + HERO_H + HEAD);
+    }
+
+    /// `rows` rows of cover-and-two-lines cards on the full-shelf grid; 0 for as many as fit.
+    fn cards_skeleton(&self, ui: &egui::Ui, card: Rect, top: f32, rows: usize) {
+        let (l, w) = (card.min.x + 14., card.width() - 28.);
+        let (cols, cw) = crate::live::grid(w, 160., self.gap());
+        let (mut y, mut n) = (top + 8., 0);
+        while y + cw < card.max.y && (rows == 0 || n < rows) {
+            for c in 0..cols {
+                let x = l + c as f32 * (cw + self.gap());
+                ui.painter().rect_filled(Rect::from_min_size(pos2(x, y), vec2(cw, cw)), rad(10.), self.t.s2);
+                self.bone(ui, x, y + cw + 10., cw * 0.7, 12.);
+                self.bone(ui, x, y + cw + 28., cw * 0.45, 10.);
+            }
+            y += cw + 48.;
+            n += 1;
+        }
+    }
+
+    pub fn wall_skeleton(&self, ui: &egui::Ui, card: Rect, top: f32) {
+        self.cards_skeleton(ui, card, top, 0);
+    }
+
+    /// Quick-pick tiles (on the "All" chip) and a shelf of cards under the home header, which ends at `y`.
+    pub fn home_skeleton(&self, ui: &egui::Ui, card: Rect, y: f32) {
+        let (l, w) = (card.min.x + 14., card.width() - 28.);
+        let mut y = y;
+        if crate::live::CHIPS[self.home_chip].1.is_empty() {
+            let cols = (((w + self.gap()) / 240.) as usize).clamp(2, 4);
+            let cw = (w - 16. - self.gap() * (cols - 1) as f32) / cols as f32;
+            for n in 0..cols * 2 {
+                let cell = Rect::from_min_size(pos2(l + 8. + (n % cols) as f32 * (cw + self.gap()), y + (n / cols) as f32 * (56. + self.gap())), vec2(cw, 56.));
+                ui.painter().rect_filled(cell, rad(8.), self.t.s2);
+            }
+            y += 56. * 2. + self.gap() + 16.;
+        }
+        self.bone(ui, l + 8., y + 16., 160., 16.);
+        self.cards_skeleton(ui, card, y + 28., 0);
+    }
+
+    /// The totals tiles, then placeholder rows.
+    pub fn stats_skeleton(&self, ui: &egui::Ui, card: Rect, top: f32) {
+        let (l, w) = (card.min.x + 22., card.width() - 44.);
+        let g = crate::stats::GAP;
+        let cols = if w >= 560. { 4 } else { 2 };
+        let tw = (w - g * (cols - 1) as f32) / cols as f32;
+        for i in 0..4 {
+            let cell = Rect::from_min_size(pos2(l + (i % cols) as f32 * (tw + g), top + 8. + (i / cols) as f32 * (84. + g)), vec2(tw, 84.));
+            ui.painter().rect_filled(cell, rad(14.), self.t.s2);
+        }
+        self.row_bones(ui, card, top + 8. + (4 / cols) as f32 * (84. + g) + 16.);
     }
 
     /// Wash header with cover (round for artists), title block and action buttons.
@@ -183,12 +272,24 @@ impl App {
         let wash_tex = self.g.wash(ui.ctx(), &t, cover_url);
         if self.opts.tint {
             egui::Image::new(sized(wash_tex, 1.)).fit_to_exact_size(wash.size()).corner_radius(rad(18.)).paint_at(ui, wash);
+            if self.opts.viz_ambient {
+                // The header glow, drawn again on top as added light that swells with the music.
+                let lv = crate::viz::levels(ui.ctx(), &self.pl.engine);
+                crate::viz::repaint(ui.ctx(), &lv);
+                let g = (lv.gate() * (0.1 + 0.4 * lv.bass + 0.9 * lv.punch + 0.5 * lv.kick) * 255.).min(255.) as u8;
+                // The wash is faint, so the added light is layered a few times to read as a glow.
+                for _ in 0..3 {
+                    if g > 0 {
+                        egui::Image::new(sized(wash_tex, 1.)).fit_to_exact_size(wash.size()).corner_radius(rad(18.)).tint(Color32::from_rgba_premultiplied(g, g, g, 0)).paint_at(ui, wash);
+                    }
+                }
+            }
         } else {
             ui.painter().rect_filled(wash, rad(18.), t.s2);
         }
         // The layout swaps once the page has scrolled past a point, as a quick crossfade (never both at once,
         // so the layers' widgets never share an id or overlap); the wash itself still shrinks with the scroll.
-        let a = ui.ctx().animate_bool_with_time(ui.scope_id().with("hero-swap"), off > 40., 0.16);
+        let a = ui.ctx().calm_bool(ui.scope_id().with("hero-swap"), off > 40., 0.16);
         for (collapsed, alpha) in [(false, 1. - 2. * a), (true, 2. * a - 1.)] {
             if alpha <= 0. {
                 continue;
@@ -328,7 +429,12 @@ impl App {
         let shown_sort = sort;
         let n = tracks.len();
         let base = HERO_H - HERO_MIN + HEAD;
-        let out = ScrollArea::vertical().id_salt(("tracks", self.route, &self.sel)).auto_shrink(false).show_viewport(&mut lui, |ui, vp| {
+        let sa = ScrollArea::vertical().id_salt(("tracks", self.route, &self.sel)).auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+        let sa = match crate::gfx::page_bar_set(&lui) {
+            Some(o) => sa.vertical_scroll_offset(o),
+            None => sa,
+        };
+        let out = sa.show_viewport(&mut lui, |ui, vp| {
             ui.add_space(HERO_H - HERO_MIN);
             let (_, head) = ui.allocate_space(vec2(list.width(), HEAD));
             self.table_head(ui, head.min.y + 14., tl, tr, look, Some(&mut sort));
@@ -349,6 +455,7 @@ impl App {
             acts
         });
         scroll_fades(&lui, &out, self.t.s1);
+        crate::gfx::page_bar(&lui, out.id, &out, card.min.y + HERO_H - out.state.clamped_offset().y.min(HERO_H - HERO_MIN), self.t.tf);
         self.apply_acts(ui, tracks, out.inner, look);
         if sort != shown_sort {
             ui.ctx().data_mut(|d| d.insert_temp(sort_id, sort));
@@ -556,7 +663,7 @@ impl App {
             trunc(ui.painter(), pos2(l + 8., r.center().y), w - 16., note, font(12.), t.tf);
         }
         for s in own {
-            self.carousel(ui, dims, &s.title, s.items.iter(), si, false);
+            self.carousel(ui, dims, &s.title, s.items.iter(), si, true);
             si += 1;
         }
         if artist_id.is_empty() {
@@ -570,7 +677,7 @@ impl App {
             let more: Vec<&Item> = a.sections.iter().flat_map(|s| &s.items).filter(|i| i.r#type == "album" && !skip.contains(&i.id.as_str())).collect();
             let by = tracks.first().and_then(|t| t.artists.first()).map_or(a.item.title.as_str(), String::as_str);
             if !more.is_empty() {
-                self.carousel(ui, dims, &format!("More by {by}"), more.into_iter(), si, false);
+                self.carousel(ui, dims, &format!("More by {by}"), more.into_iter(), si, true);
                 si += 1;
             }
 
@@ -618,7 +725,7 @@ impl App {
 
             let similar: Vec<&Item> = a.sections.iter().flat_map(|s| &s.items).filter(|i| i.r#type == "artist").collect();
             if !similar.is_empty() {
-                self.carousel(ui, dims, "Fans also like", similar.into_iter(), si, false);
+                self.carousel(ui, dims, "Fans also like", similar.into_iter(), si, true);
             }
         }
         ui.add_space(70.);

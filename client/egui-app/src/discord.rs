@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use discord_rich_presence::{
-    activity::{Activity, ActivityType, Assets, Party, StatusDisplayType, Timestamps},
+    activity::{Activity, ActivityType, Assets, Button, Party, StatusDisplayType, Timestamps},
     DiscordIpc, DiscordIpcClient,
 };
 
@@ -22,6 +22,7 @@ struct Shown {
     dur: u32,
     /// Party code and how many listeners are connected, while sharing a party.
     party: Option<(String, i32)>,
+    links: Vec<(&'static str, String)>,
 }
 
 pub struct Discord {
@@ -74,7 +75,7 @@ impl Discord {
 
     /// `song` is (title, artist, cover url); `party` the code and listener count to show instead of the progress bar.
     /// Pushes only when something Discord displays changed. Paused drops the presence unless `keep_paused`.
-    pub fn update(&mut self, song: Option<(&str, &str, Option<&str>)>, playing: bool, pos: f32, dur: f32, keep_paused: bool, party: Option<(&str, i32)>) {
+    pub fn update(&mut self, song: Option<(&str, &str, Option<&str>)>, playing: bool, pos: f32, dur: f32, keep_paused: bool, party: Option<(&str, i32)>, links: Vec<(&'static str, String)>) {
         let Some((title, artist, cover)) = song else {
             return self.clear();
         };
@@ -84,7 +85,7 @@ impl Discord {
         let now = Instant::now();
         let expected = self.last.0 + (now - self.last.1).as_secs_f32();
         let cover = cover.map(str::to_owned);
-        let want = Shown { cover, title: title.into(), artist: artist.into(), playing, dur: dur as u32, party: party.map(|(c, n)| (c.into(), n)) };
+        let want = Shown { cover, title: title.into(), artist: artist.into(), playing, dur: dur as u32, party: party.map(|(c, n)| (c.into(), n)), links };
         let jumped = playing && (pos - expected).abs() > JUMP_SECS;
         if self.shown.as_ref() == Some(&want) && !jumped {
             return;
@@ -111,6 +112,9 @@ impl Discord {
         }
         if let Some((code, n)) = &want.party {
             act = act.party(Party::new().id(code).size([(*n).clamp(1, crate::party::MAX), crate::party::MAX]));
+        }
+        if !want.links.is_empty() {
+            act = act.buttons(want.links.iter().map(|(label, url)| Button::new(*label, url.as_str())).collect());
         }
         let mut assets = Assets::new();
         if let Some(c) = want.cover.as_deref() {
