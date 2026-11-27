@@ -213,6 +213,15 @@ message SyncStatePayload {
   string queue_title = 8;
 }
 
+// Sent to someone who asked to join, while the host has yet to answer.
+message JoinPendingPayload {
+  string host_name = 1;
+  // Place in line among the people waiting, starting at 1.
+  uint32 position = 2;
+  // The host is disconnected; the request waits for them to come back.
+  bool host_away = 3;
+}
+
 // A member's playback fell out of, or came back into, step with the room.
 message MemberSyncPayload {
   string user_id = 1;

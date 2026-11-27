@@ -37,6 +37,18 @@ pub struct Opts {
     pub video_h: u32,
     /// Show the current song as Discord Rich Presence.
     pub discord: bool,
+    /// Keep the presence up (marked paused, no timer) while playback is paused.
+    pub discord_paused: bool,
+    /// In a party: show the listener count and elapsed time instead of a progress bar.
+    pub discord_party: bool,
+    /// Host: let people in without asking.
+    pub party_auto_accept: bool,
+    /// Party notifications: join requests and answers to yours; people joining and leaving; being removed or the party ending.
+    pub notify_requests: bool,
+    pub notify_people: bool,
+    pub notify_ended: bool,
+    /// Only notify while the window is not in the foreground.
+    pub notify_background: bool,
     /// Audio cache limit in MB; 0 turns the cache off.
     pub cache_mb: u16,
     /// Hide explicit songs / music-video versions from lists and search (daemon flags, filtered on arrival).
@@ -81,7 +93,7 @@ pub struct Opts {
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { compact: false, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, close_tray: true, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false }
+        Opts { compact: false, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, party_auto_accept: false, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, close_tray: true, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false }
     }
 }
 
@@ -945,6 +957,28 @@ impl App {
         self.sec(ui, pg, "Discord");
         if let Some(cy) = self.row(ui, pg, "Discord activity", "Show the song you are listening to on your Discord profile") {
             toggle(ui, &self.t, "discord", pg.right(), cy, &mut self.opts.discord);
+        }
+        if let Some(cy) = self.row(ui, pg, "Keep activity when paused", "Leave the song on your profile, marked as paused, instead of clearing it") {
+            toggle(ui, &self.t, "discord-paused", pg.right(), cy, &mut self.opts.discord_paused);
+        }
+        if let Some(cy) = self.row(ui, pg, "Show listening party", "In a party, show how many are listening and the elapsed time instead of a progress bar") {
+            toggle(ui, &self.t, "discord-party", pg.right(), cy, &mut self.opts.discord_party);
+        }
+        self.sec(ui, pg, "Listening party");
+        if let Some(cy) = self.row(ui, pg, "Let people in automatically", "As host, accept join requests without asking. Anyone with the party code can join") {
+            toggle(ui, &self.t, "party-auto", pg.right(), cy, &mut self.opts.party_auto_accept);
+        }
+        if let Some(cy) = self.row(ui, pg, "Notify about join requests", "When someone asks to join your party, and when the host answers yours") {
+            toggle(ui, &self.t, "notify-requests", pg.right(), cy, &mut self.opts.notify_requests);
+        }
+        if let Some(cy) = self.row(ui, pg, "Notify when people join or leave", "A system notification each time someone comes or goes") {
+            toggle(ui, &self.t, "notify-people", pg.right(), cy, &mut self.opts.notify_people);
+        }
+        if let Some(cy) = self.row(ui, pg, "Notify when the party ends", "If you are removed, or the party closes") {
+            toggle(ui, &self.t, "notify-ended", pg.right(), cy, &mut self.opts.notify_ended);
+        }
+        if let Some(cy) = self.row(ui, pg, "Only when Serafin is in the background", "Skip notifications while the window is in front of you") {
+            toggle(ui, &self.t, "notify-background", pg.right(), cy, &mut self.opts.notify_background);
         }
     }
 

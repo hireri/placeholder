@@ -123,7 +123,7 @@ const (
 	// Connection limits
 	MaxClients              = 10000
 	MaxRooms                = 10000
-	MaxClientsPerRoom       = 100
+	MaxClientsPerRoom       = 8
 	MaxConnectionsPerSource = 32
 	MaxRoomCreatesPerSource = 10
 	RoomCreateWindow        = time.Minute

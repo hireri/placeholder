@@ -275,6 +275,8 @@ func TestJoinApproveAndRejectFlows(t *testing.T) {
 			t.Fatal("join request was not left pending")
 		}
 
+		receiveJoinPending(t, existing)
+
 		server.handleApproveJoin(host, encodeTestPayload(t, MsgTypeApproveJoin, &ApproveJoinPayload{UserID: "guest"}))
 		if room.Clients["guest"] != existing || existing.currentRoom() != room || existing.session() == "" || len(room.State.Users) != 2 {
 			t.Fatalf("approved user not installed correctly: users=%#v", room.State.Users)
@@ -307,6 +309,7 @@ func TestJoinApproveAndRejectFlows(t *testing.T) {
 		room.State.Queue = []TrackInfo{{ID: "next", Title: "Next", Duration: 9000}}
 
 		server.handleJoinRoom(guest, encodeTestPayload(t, MsgTypeJoinRoom, &JoinRoomPayload{RoomCode: room.Code, Username: "Guest"}))
+		receiveJoinPending(t, guest)
 		receiveTestMessage(t, host, nil)
 		server.handleApproveJoin(host, encodeTestPayload(t, MsgTypeApproveJoin, &ApproveJoinPayload{UserID: guest.clientID()}))
 		receiveTestMessage(t, guest, &pb.JoinApprovedPayload{})
@@ -353,6 +356,7 @@ func TestJoinApprovalCannotMoveClientBetweenRooms(t *testing.T) {
 
 	candidate := newClient("candidate", nil)
 	server.handleJoinRoom(candidate, encodeTestPayload(t, MsgTypeJoinRoom, &JoinRoomPayload{RoomCode: roomA.Code, Username: "Candidate"}))
+	receiveJoinPending(t, candidate)
 	var request pb.JoinRequestPayload
 	if got := receiveTestMessage(t, hostA, &request); got != MsgTypeJoinRequest {
 		t.Fatalf("message type = %q, want %q", got, MsgTypeJoinRequest)
@@ -615,6 +619,7 @@ func TestPendingJoinCanBeCancelledAndIsRejectedWhenRoomCloses(t *testing.T) {
 		guest.setRoom(nil)
 
 		server.handleJoinRoom(guest, encodeTestPayload(t, MsgTypeJoinRoom, &JoinRoomPayload{RoomCode: room.Code, Username: "Guest"}))
+		receiveJoinPending(t, guest)
 		receiveTestMessage(t, host, nil)
 		server.leaveRoom(guest)
 
@@ -633,6 +638,7 @@ func TestPendingJoinCanBeCancelledAndIsRejectedWhenRoomCloses(t *testing.T) {
 		guest.setRoom(nil)
 
 		server.handleJoinRoom(guest, encodeTestPayload(t, MsgTypeJoinRoom, &JoinRoomPayload{RoomCode: room.Code, Username: "Guest"}))
+		receiveJoinPending(t, guest)
 		receiveTestMessage(t, host, nil)
 		server.leaveRoom(host)
 
@@ -667,5 +673,14 @@ func TestDisconnectedGuestBecomesHostAfterHostLeaves(t *testing.T) {
 	}
 	if !response.IsHost || room.Host != reconnecting || room.State.HostID != reconnecting.clientID() {
 		t.Fatalf("reconnected guest was not promoted: response=%#v state=%#v", &response, room.State)
+	}
+}
+
+// receiveJoinPending consumes the join_pending notice a joiner gets before any answer from the host.
+func receiveJoinPending(t *testing.T, client *Client) {
+	t.Helper()
+	var pending pb.JoinPendingPayload
+	if got := receiveTestMessage(t, client, &pending); got != MsgTypeJoinPending || pending.Position != 1 {
+		t.Fatalf("message type = %q position %d, want join_pending at 1", got, pending.Position)
 	}
 }

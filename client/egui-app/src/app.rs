@@ -163,6 +163,7 @@ pub struct App {
     pub(crate) party_code: String,
     /// "Guest 1234": who a signed-out listener is in a party; kept between runs.
     pub(crate) guest: String,
+    pub(crate) me: (String, String),
     /// Private session: Discord, YouTube history and Last.fm are paused. Never saved; the time is the last playback.
     pub private: Option<std::time::Instant>,
     pub sleep: crate::sleep::Sleep,
@@ -199,11 +200,13 @@ struct Prefs {
     repeat: u8,
     /// Name used in listening parties while signed out, so a rejoin is recognised as the same person.
     guest: String,
+    /// The last signed-in name and picture, so a party can be joined before the account has loaded.
+    me: (String, String),
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, opts: Opts::default(), recents: Vec::new(), shuffle: false, repeat: 0, guest: String::new() }
+        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, opts: Opts::default(), recents: Vec::new(), shuffle: false, repeat: 0, guest: String::new(), me: Default::default() }
     }
 }
 
@@ -330,6 +333,7 @@ impl App {
             party_open: None,
             party_btn: Rect::NOTHING,
             party_code: String::new(),
+            me: prefs.me.clone(),
             guest: Some(prefs.guest).filter(|g| !g.is_empty()).unwrap_or_else(|| format!("Guest {:04}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos()) % 10_000)),
             private: None,
             sleep: Default::default(),
@@ -384,6 +388,12 @@ impl App {
         // Right cluster, laid out from the right edge: status island, then the profile.
         self.data.status.ensure(&ctx, || crate::backend::get("/auth/status"));
         let user = self.youtube_user();
+        if matches!(&*self.data.status.lock(), State::Ready(_)) {
+            let me = (self.user_name().unwrap_or_default(), user.as_ref().and_then(|u| u.0.clone()).unwrap_or_default());
+            if self.me != me {
+                self.me = me;
+            }
+        }
         let name = user.as_ref().map_or_else(|| "Sign in".into(), |u| u.1.clone());
         let me_w = 3. + 26. + 8. + text_w(&p, &name, font(13.)).min(100.) + 10.;
         let me = Rect::from_min_size(pos2(tb.max.x - 12. - me_w, cy - 16.), vec2(me_w, 32.));
@@ -972,7 +982,8 @@ impl App {
         let cover = self.pl.song().and_then(|s| s.thumbnail.as_deref().map(|u| sized_url(u, 544)));
         let song = self.pl.song().map(|s| (s.title.as_str(), s.artist.as_str(), cover.as_deref()));
         if self.opts.discord && !private {
-            self.discord.update(song, self.pl.playing, self.pl.pos, self.pl.dur());
+            let party = self.party.room.as_ref().filter(|_| self.opts.discord_party).map(|r| (r.code.as_str(), r.members.iter().filter(|m| m.connected).count() as i32));
+            self.discord.update(song, self.pl.playing, self.pl.pos, self.pl.dur(), self.opts.discord_paused, party);
         } else {
             self.discord.clear();
         }
@@ -1144,7 +1155,7 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, opts: self.opts.clone(), recents: self.recents.clone(), shuffle: self.opts.remember_modes && self.pl.shuffle, repeat: if self.opts.remember_modes { self.pl.repeat } else { 0 }, guest: self.guest.clone() };
+        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, opts: self.opts.clone(), recents: self.recents.clone(), shuffle: self.opts.remember_modes && self.pl.shuffle, repeat: if self.opts.remember_modes { self.pl.repeat } else { 0 }, guest: self.guest.clone(), me: self.me.clone() };
         eframe::set_value(storage, PREFS, &p);
     }
 

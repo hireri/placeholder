@@ -1,0 +1,413 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Serafin Party Prototype</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+/* Prototype of the listening party panel as one journey: outside → entering → inside → leaving.
+   Click through the panel itself, jump to any state on the left, or fire events from the right. Tokens match desktop-design.html. */
+:root { --sans: "Inter", system-ui, sans-serif; color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0d0e11; color: #d8dae0; font: 400 13px/1.5 var(--sans); min-height: 100vh; padding: 20px; }
+h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; color: #e8eaee; }
+.lede { color: #9aa0ab; margin: 0 0 16px; max-width: 80ch; }
+.layout { display: grid; grid-template-columns: 220px minmax(0, 1fr) 250px; gap: 16px; max-width: 1280px; margin: 0 auto; align-items: start; }
+@media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
+.side { background: #14161a; border: 1px solid #23262d; border-radius: 12px; padding: 12px; position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
+.side h2 { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: #8a909b; margin: 14px 0 6px; font-weight: 600; }
+.side h2:first-child { margin-top: 2px; }
+.side button.row { display: flex; width: 100%; text-align: left; font: inherit; color: #c4c8d0; background: none; border: 0; padding: 6px 8px; border-radius: 8px; cursor: pointer; gap: 8px; align-items: center; }
+.side button.row:hover { background: #1d2025; }
+.side button.row[aria-current=true] { background: #23283a; color: #b9c5ff; }
+.side button.row:disabled { opacity: .35; cursor: default; background: none; }
+.side .num { color: #8a909b; font-size: 11px; width: 16px; flex: none; }
+.side label { display: flex; gap: 8px; align-items: center; padding: 4px 8px; color: #c4c8d0; cursor: pointer; }
+.side small { display: block; color: #8a909b; padding: 2px 8px 0; line-height: 1.4; }
+.side input[type=checkbox] { accent-color: #93a6ff; }
+
+.mock {
+  --h: 265; --ac: 0.13; --nc: 0.012;
+  --s0: oklch(0.17 var(--nc) var(--h)); --s1: oklch(0.205 var(--nc) var(--h)); --s2: oklch(0.25 var(--nc) var(--h)); --s3: oklch(0.30 var(--nc) var(--h));
+  --tx: oklch(0.96 0.008 var(--h)); --tm: oklch(0.72 0.02 var(--h)); --tf: oklch(0.66 0.02 var(--h));
+  --ax: oklch(0.78 var(--ac) var(--h)); --on-ax: oklch(0.2 0.03 var(--h)); --axc: oklch(0.32 calc(var(--ac) * 0.55) var(--h));
+  --warn: oklch(0.8 0.13 75); --bad: oklch(0.72 0.15 25); --ok: oklch(0.78 0.13 155);
+  position: relative; height: 760px; background: var(--s0); color: var(--tx); border-radius: 12px; overflow: hidden; box-shadow: 0 20px 60px #0008;
+}
+.mock :where(button, input) { font: inherit; color: inherit; }
+.mock :where(button) { background: none; border: 0; padding: 0; cursor: pointer; }
+.mock svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.mock :focus-visible { outline: 2px solid var(--ax); outline-offset: 2px; }
+
+/* app chrome, for context */
+.tb { height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 12px; }
+.tb .logo { width: 26px; height: 26px; border-radius: 8px; background: var(--ax); }
+.tb .pill { margin: 0 auto; width: 280px; height: 32px; border-radius: 16px; background: var(--s2); color: var(--tf); display: flex; align-items: center; padding: 0 14px; gap: 8px; }
+.tb .me { height: 32px; border-radius: 16px; padding: 0 12px 0 3px; display: flex; align-items: center; gap: 8px; color: var(--tx); }
+.tb .me i { width: 26px; height: 26px; border-radius: 50%; background: var(--axc); display: grid; place-items: center; font-style: normal; font-size: 11px; font-weight: 600; }
+.body { position: absolute; inset: 56px 12px 12px; display: grid; grid-template-columns: 180px 1fr 250px; gap: 10px; opacity: .55; pointer-events: none; }
+.body > div { background: var(--s1); border-radius: 18px; }
+
+/* titlebar party button: stacked listeners, the party icon behind a lone one */
+.pbtn { height: 32px; min-width: 32px; border-radius: 16px; display: flex; align-items: center; justify-content: center; color: var(--tm); padding: 0 7px; transition: background 120ms; }
+.pbtn:hover, .pbtn[aria-expanded=true] { background: var(--s2); color: var(--tx); }
+.stack { display: flex; align-items: center; }
+.stack .f { width: 22px; height: 22px; border-radius: 50%; box-shadow: 0 0 0 2px var(--s0); margin-left: -7px; display: grid; place-items: center; font-size: 9px; font-weight: 600; color: #fff;
+  transition: transform 280ms cubic-bezier(.3,1.4,.5,1), opacity 220ms, margin 280ms, width 280ms; }
+.stack .f:first-child { margin-left: 0; }
+.stack .f.in { transform: scale(.4); opacity: 0; }
+.stack .f.out { transform: scale(.4); opacity: 0; margin-left: -22px; }
+.stack .f.icon { background: none; color: var(--tx); box-shadow: none; width: 22px; }
+.stack .f.icon svg { width: 22px; height: 22px; }
+.stack .f.more { background: var(--s3); color: var(--tx); }
+
+/* the panel */
+.pop { position: absolute; top: 48px; right: 24px; width: 320px; background: var(--s2); border-radius: 16px; padding: 14px; box-shadow: 0 16px 40px #000a; z-index: 5; animation: pop 140ms cubic-bezier(.2,.8,.2,1); }
+@keyframes pop { from { opacity: 0; transform: translateY(6px); } }
+.pop[hidden] { display: none; }
+.hd { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; min-height: 22px; }
+.hd b { font-size: 15px; font-weight: 700; flex: 1; }
+.hd .cnt { display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--tx); }
+.hd .cnt svg { color: var(--tm); width: 15px; height: 15px; }
+.muted { color: var(--tm); }
+.lbl { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--tf); font-weight: 600; margin: 14px 0 6px; display: flex; justify-content: space-between; }
+.lbl:first-child { margin-top: 0; }
+.btn { display: flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 10px; background: var(--s3); font-weight: 600; width: 100%; transition: background 100ms, transform 100ms; }
+.btn:hover { background: oklch(0.34 var(--nc) var(--h)); }
+.btn:active { transform: scale(.98); }
+.btn.strong { background: var(--tx); color: var(--s0); }
+.btn.strong:hover { background: oklch(0.9 0.008 var(--h)); }
+.btn.sm { height: 28px; width: auto; border-radius: 14px; padding: 0 12px; font-size: 12.5px; }
+.btn.danger { color: var(--bad); }
+.btn:disabled { opacity: .4; cursor: default; }
+.field { display: flex; gap: 6px; margin-top: 12px; }
+.field input { flex: 1; min-width: 0; height: 36px; border-radius: 10px; background: var(--s1); border: 0; padding: 0 12px; text-transform: uppercase; letter-spacing: .05em; }
+.field input::placeholder { text-transform: none; letter-spacing: 0; color: var(--tm); }
+.field input:focus { outline: 2px solid var(--ax); }
+.field .btn { width: auto; }
+.or { display: flex; align-items: center; gap: 10px; color: var(--tf); font-size: 11px; margin: 12px 0 0; }
+.or::before, .or::after { content: ""; height: 1px; background: var(--s3); flex: 1; }
+.err { color: var(--bad); font-size: 12.5px; margin-top: 8px; display: flex; gap: 6px; align-items: flex-start; }
+.av { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 600; color: #fff; flex: none; position: relative; }
+.av.big { width: 52px; height: 52px; font-size: 16px; }
+.av.ghost { background: none; border: 1.5px dashed var(--s3); color: var(--tf); }
+.card { background: var(--s1); border-radius: 12px; padding: 12px; }
+
+/* entering */
+.who { display: flex; gap: 12px; align-items: center; }
+.who b { display: block; font-size: 14px; }
+.end { text-align: center; padding: 4px 0 2px; }
+.end .ic { width: 44px; height: 44px; border-radius: 50%; background: var(--s1); display: grid; place-items: center; margin: 0 auto 10px; color: var(--tm); }
+.end .ic svg { width: 22px; height: 22px; }
+.end h3 { margin: 0 0 4px; font-size: 15px; }
+.end p { margin: 0 0 14px; color: var(--tm); }
+.end .btn + .btn { margin-top: 6px; }
+
+/* inside */
+.banner { border-radius: 12px; padding: 10px 12px; display: flex; gap: 10px; align-items: center; margin-bottom: 8px; background: var(--s1); }
+.banner > div { flex: 1; min-width: 0; }
+.banner b { display: block; font-size: 12.5px; }
+.banner small { color: var(--tm); font-size: 12px; }
+.req { background: var(--s1); border-radius: 12px; padding: 10px; display: flex; align-items: center; gap: 10px; margin-bottom: 6px; animation: pop 160ms; }
+.req > div { flex: 1; min-width: 0; } .req b { display: block; font-size: 13px; } .req small { color: var(--tm); }
+.x { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; color: var(--tm); background: var(--s3); }
+.x:hover { color: var(--tx); }
+.people { transition: opacity 200ms; } .people.dim { opacity: .5; }
+.p { display: flex; align-items: center; gap: 10px; height: 44px; animation: pop 160ms; }
+.p .nm { flex: 1; min-width: 0; line-height: 1.25; } .p .nm b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .p .nm small { color: var(--tm); font-size: 11.5px; }
+.st { font-size: 12px; color: var(--tm); white-space: nowrap; }
+.p .av { transition: filter 200ms, opacity 200ms; } .p.off .av { filter: grayscale(1); opacity: .4; } .p.off .nm { opacity: .6; }
+.hd .chip { font-size: 12px; font-weight: 600; color: var(--tm); display: flex; align-items: center; gap: 6px; }
+.p .btn.sm { height: 26px; padding: 0 12px; }
+.more { color: var(--tm); font-size: 12px; padding: 2px 0 4px 42px; }
+.slot { width: 28px; height: 28px; display: grid; place-items: center; color: var(--ax); flex: none; }
+.slot .x { opacity: 0; transition: opacity 100ms; } .p:hover .slot .x, .slot .x:focus-visible { opacity: 1; }
+.code { display: flex; align-items: center; gap: 10px; background: var(--s1); border-radius: 12px; padding: 8px 8px 8px 14px; margin-bottom: 10px; }
+.code > div { flex: 1; } .code small { color: var(--tf); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; font-weight: 600; display: block; }
+.code span { font: 600 16px ui-monospace, monospace; letter-spacing: .08em; }
+.opt { display: flex; align-items: center; gap: 12px; padding: 6px 0; } .opt > div { flex: 1; } .opt small { display: block; color: var(--tm); font-size: 12px; }
+.tg { width: 38px; height: 22px; border-radius: 11px; background: var(--s3); position: relative; transition: background 140ms; flex: none; }
+.tg::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--tm); transition: transform 140ms, background 140ms; }
+.tg[aria-checked=true] { background: var(--ax); } .tg[aria-checked=true]::after { transform: translateX(16px); background: var(--on-ax); }
+.foot { margin-top: 12px; }
+
+/* os notifications */
+.toasts { position: absolute; left: 16px; bottom: 16px; display: grid; gap: 8px; z-index: 9; width: 300px; pointer-events: none; }
+.toast { background: #fffe; color: #1c1d22; border-radius: 12px; padding: 10px 12px; font-size: 12.5px; box-shadow: 0 8px 24px #0007; animation: pop 200ms; backdrop-filter: blur(8px); }
+.toast small { display: block; opacity: .55; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; }
+.toast b { display: block; }
+</style>
+
+<h1>Listening party: one journey</h1>
+<p class="lede">The panel is a single path: <b>outside → entering → inside → leaving</b>. The invite stays at the top. Nothing stacks: a lost connection is in the header, being out of step is a Sync button on your own row, and only people asking to join get rows of their own. Use the panel itself, jump to a state on the left, or fire events on the right.</p>
+
+<div class="layout">
+  <nav class="side" id="states" aria-label="States"></nav>
+
+  <div class="mock" id="mock">
+    <div class="tb">
+      <div class="logo"></div>
+      <div class="pill"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Search or run a command</div>
+      <button class="pbtn" id="pbtn" aria-expanded="true" aria-label="Listening party"></button>
+      <div class="me"><i>A</i>Aveline</div>
+    </div>
+    <div class="body"><div></div><div></div><div></div></div>
+    <div class="pop" id="pop" aria-live="polite"></div>
+    <div class="toasts" id="toasts"></div>
+  </div>
+
+  <aside class="side" id="events" aria-label="Events"></aside>
+</div>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const MAX = 8;
+const IC = {
+  party: '<svg class="i" viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>',
+  group: '<svg class="i" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/><circle cx="17.5" cy="9" r="2.5"/><path d="M17 14c2.6 0 4.5 1.8 4.5 5"/></svg>',
+  crown: '<svg class="i" viewBox="0 0 24 24"><path d="m3 8 4.5 4L12 5l4.5 7L21 8l-2 11H5z"/></svg>',
+  x: '<svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  check: '<svg class="i" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
+  warn: '<svg class="i" viewBox="0 0 24 24"><path d="M12 3 2 20h20z"/><path d="M12 10v5M12 18v.5"/></svg>',
+  wifi: '<svg class="i" viewBox="0 0 24 24"><path d="M2 9a15 15 0 0 1 20 0M5.5 12.5a10 10 0 0 1 13 0M9 16a5 5 0 0 1 6 0"/><path d="M12 20v.1"/></svg>',
+  door: '<svg class="i" viewBox="0 0 24 24"><path d="M14 4h5v16h-5M10 8l-4 4 4 4M6 12h10"/></svg>',
+  copy: '<svg class="i" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
+};
+const HUES = { me: 265, mia: 330, theo: 150, june: 40, kai: 200, ren: 10, ola: 100, sam: 290, pip: 60 };
+const PEOPLE = { mia: 'Mia', theo: 'Theo', june: 'June', kai: 'Kai', ren: 'Ren', ola: 'Ola', sam: 'Sam', pip: 'Pip' };
+const grad = id => `linear-gradient(140deg, oklch(0.62 0.16 ${HUES[id] ?? 265}), oklch(0.38 0.1 ${(HUES[id] ?? 265) - 60}))`;
+const ini = n => n.slice(0, 1).toUpperCase();
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const av = (id, name, cls = '') => `<span class="av ${cls}" style="background:${grad(id)}">${ini(name)}</span>`;
+
+const S = {
+  screen: 'idle',          // idle | waiting | closed | inside
+  busy: '',                // '' | 'start' | 'join': the button says what it is doing for a moment
+  role: 'guest',
+  host: 'mia', position: 1,
+  members: [], requests: [], reconnecting: false, autoAccept: false, confirmEnd: false,
+  error: '', code: 'ZXXAK2JV', closed: null, copied: false,
+  notif: { requests: true, people: false, ended: true }, background: true, hostAutoAccepts: false,
+};
+const member = (id, over = {}) => ({ id, name: id === 'me' ? 'Aveline' : PEOPLE[id], host: false, state: 'synced', drift: 0, ...over });
+const me = () => S.members.find(m => m.id === 'me');
+const live = () => S.members.filter(m => m.state !== 'offline');
+let timers = [];
+const later = (ms, f) => timers.push(setTimeout(() => { f(); render(); }, ms));
+const clearTimers = () => { timers.forEach(clearTimeout); timers = []; };
+
+/* ---------- state transitions ---------- */
+function reset(over = {}) { clearTimers(); Object.assign(S, { screen: 'idle', role: 'guest', host: 'mia', code: 'ZXXAK2JV', members: [], requests: [], reconnecting: false, confirmEnd: false, error: '', closed: null, busy: '', position: 1, copied: false }, over); }
+function startParty() { reset({ busy: 'start' }); later(800, () => enterAsHost()); }
+function enterAsHost(others = []) { clearTimers(); Object.assign(S, { screen: 'inside', role: 'host', host: 'me', members: [member('me', { host: true }), ...others.map(o => member(o))], requests: [] }); }
+function joinParty(code) { reset({ busy: 'join', code: code.toUpperCase() });
+  later(700, () => { S.screen = 'waiting'; S.busy = ''; if (S.hostAutoAccepts) later(1100, () => acceptedByHost()); }); }
+function acceptedByHost(others = ['theo']) { clearTimers(); Object.assign(S, { screen: 'inside', role: 'guest', host: 'mia', members: [member('mia', { host: true }), member('me'), ...others.map(o => member(o))] }); notify('requests', "You're in the party", 'Mia let you in'); }
+function closeWith(kind) { clearTimers(); S.screen = 'closed'; S.closed = kind; S.members = []; S.requests = [];
+  if (kind === 'removed') notify('ended', 'Listening party', 'You were removed from the party');
+  if (kind === 'ended') notify('ended', 'Listening party', 'The party has ended');
+  if (kind === 'refused') notify('requests', 'Listening party', 'Mia turned down your request'); }
+function leave() { reset(); }
+function addPerson(id) {
+  if (S.members.some(m => m.id === id)) return; if (live().length >= MAX) return;
+  S.members.push(member(id)); notify('people', 'Listening party', `${PEOPLE[id]} joined`); }
+function removePerson(id) { const m = S.members.find(x => x.id === id); S.members = S.members.filter(x => x.id !== id); if (m) notify('people', 'Listening party', `${m.name} left`); }
+function request(id) {
+  if (S.hostAutoAccepts || S.autoAccept) { addPerson(id); return; }
+  if (S.requests.some(r => r.id === id)) return; S.requests.push({ id, name: PEOPLE[id] });
+  notify('requests', 'Join request', `${PEOPLE[id]} wants to join your party`); }
+
+/* ---------- OS notification mock ---------- */
+function notify(kind, title, body) {
+  if (!S.notif[kind]) return;
+  const t = document.createElement('div'); t.className = 'toast';
+  t.innerHTML = `<small>System notification · Serafin</small><b>${esc(title)}</b>${esc(body)}`;
+  $('#toasts').append(t); setTimeout(() => t.remove(), 4200);
+}
+const notifGate = () => S.background;
+let quiet = false; // jumping to a state from the left is not an event, so it stays silent
+const _notify = notify; notify = (k, t, b) => { if (quiet || !notifGate()) return; _notify(k, t, b); };
+
+/* ---------- views ---------- */
+function titlebarButton() {
+  const faces = S.screen === 'inside' ? live() : [];
+  const shown = faces.slice(0, 3), extra = faces.length - shown.length;
+  const el = $('#pbtn');
+  if (S.screen !== 'inside') { el.innerHTML = IC.party.replace('class="i"', 'class="i" style="width:18px;height:18px"'); el.dataset.sig = ''; return; }
+  const sig = (faces.length <= 1 ? 'alone:' : '') + shown.map(f => f.id).join(',') + extra;
+  if (el.dataset.sig === sig) return;
+  const prev = new Set((el.dataset.ids || '').split(',').filter(Boolean));
+  el.dataset.sig = sig; el.dataset.ids = shown.map(f => f.id).join(',');
+  el.innerHTML = `<span class="stack">${faces.length <= 1 ? `<span class="f icon">${IC.party}</span>` : ''}${shown.map(f =>
+    `<span class="f ${prev.has(f.id) || el.dataset.had === undefined ? '' : 'in'}" data-id="${f.id}" style="background:${grad(f.id)}">${ini(f.name)}</span>`).join('')}${extra > 0 ? `<span class="f more">+${extra}</span>` : ''}</span>`;
+  el.dataset.had = '1';
+  requestAnimationFrame(() => el.querySelectorAll('.f.in').forEach(f => f.classList.remove('in')));
+}
+
+function header(count) {
+  return `<div class="hd">${IC.party.replace('class="i"', 'class="i" style="width:18px;height:18px"')}<b>Listening party</b>${count ? (S.reconnecting ? `<span class="chip">${IC.wifi}Reconnecting…</span>` : `<span class="cnt" title="Listeners, out of ${MAX}">${IC.group}${live().length} of ${MAX}</span>`) : ''}</div>`;
+}
+
+function vIdle() {
+  return `${header()}
+  <p class="muted" style="margin:0 0 12px">Listen in sync with friends. Everyone hears the same song at the same moment, and everyone is in control.</p>
+  <button class="btn strong" data-act="start" ${S.busy ? 'disabled' : ''}>${S.busy === 'start' ? 'Starting…' : 'Start a party'}</button>
+  <form class="field" data-form="join"><input id="code" placeholder="Enter a party code" maxlength="12" value="${esc(S.code === 'ZXXAK2JV' ? '' : S.code)}" autocomplete="off"><button class="btn" type="submit" ${S.busy ? 'disabled' : ''}>${S.busy === 'join' ? 'Joining…' : 'Join'}</button></form>
+  ${S.error ? `<div class="err">${IC.warn}<span>${esc(S.error)}</span></div>` : ''}`;
+}
+
+function vWaiting() {
+  const host = PEOPLE[S.host];
+  const line = S.position > 1 ? `Host · you are number ${S.position} in line` : 'Host · deciding whether to let you in';
+  return `${header()}<div class="card who">${av(S.host, host, 'big')}<div><b>${host}</b><span class="muted">${line}</span></div></div>
+  <div class="foot"><button class="btn" data-act="cancel">Cancel request</button></div>`;
+}
+const CLOSED = {
+  refused: { ic: IC.x, t: 'Request declined', p: 'Mia turned down your request.', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
+  full: { ic: IC.group, t: `This party is full (${MAX} of ${MAX})`, p: 'Ask the host to make room, then try again.', a: ['Try again', 'idle'], b: ['Start your own', 'start'] },
+  unreachable: { ic: IC.wifi, t: "Can't reach the party server", p: 'Check your connection and try again.', a: ['Try again', 'idle'], b: null },
+  removed: { ic: IC.door, t: 'You were removed', p: 'Mia removed you from the party.', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
+  ended: { ic: IC.door, t: 'The party has ended', p: 'Mia ended it for everyone.', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
+  left: { ic: IC.check, t: 'You left the party', p: 'Playback is yours again.', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
+};
+function vClosed() {
+  const c = CLOSED[S.closed];
+  return `${header()}<div class="end"><div class="ic">${c.ic}</div><h3>${c.t}</h3><p>${c.p}</p>
+  <button class="btn strong" data-act="${c.a[1] === 'start' ? 'start' : 'reset'}">${c.a[0]}</button>${c.b ? `<button class="btn" data-act="start">${c.b[0]}</button>` : ''}</div>`;
+}
+
+function statusOf(m) {
+  const t = m.state === 'offline' ? 'Offline' : m.state === 'syncing' ? 'Syncing…' : m.state === 'drift' ? `Out of sync (${m.drift > 0 ? '+' : ''}${m.drift.toFixed(1)}s)` : 'Synced';
+  return `<span class="st">${t}</span>`;
+}
+function vInside() {
+  const host = S.role === 'host', mine = me(), n = live().length;
+  let out = header(true);
+  // invite stays at the top: it is what you open the panel for
+  out += `<div class="code"><div><small>Party code · ${n >= MAX ? 'full' : MAX - n + ' left'}</small><span>${S.code}</span></div><button class="btn sm" data-act="copy">${S.copied ? IC.check + 'Copied' : IC.copy + 'Copy code'}</button></div>`;
+  // Nothing stacks: a lost connection is in the header, being out of step is a button on your own row,
+  // and the only thing that gets its own rows is people asking to come in (three at a time).
+  const shownReq = S.requests.slice(0, 3);
+  if (host && S.requests.length) {
+    out += `<div class="lbl"><span>Wants to join</span><span>${S.requests.length}</span></div>` + shownReq.map(r =>
+      `<div class="p">${av(r.id, r.name)}<div class="nm"><b>${r.name}</b></div><button class="x" data-act="decline" data-id="${r.id}" aria-label="Decline ${r.name}">${IC.x}</button><button class="btn sm strong" data-act="accept" data-id="${r.id}">Accept</button></div>`).join('')
+      + (S.requests.length > 3 ? `<div class="more">+${S.requests.length - 3} more waiting</div>` : '');
+  }
+  out += `<div class="lbl"><span>Listeners</span></div><div class="people ${S.reconnecting ? 'dim' : ''}">` + S.members.map(m => {
+    const you = m.id === 'me';
+    const slot = m.host ? `<span class="slot">${IC.crown}</span>` : host && !you ? `<span class="slot"><button class="x" data-act="kick" data-id="${m.id}" aria-label="Remove ${m.name}">${IC.x}</button></span>` : `<span class="slot"></span>`;
+    const status = you && m.state === 'drift' ? `<span class="st">${Math.abs(m.drift).toFixed(1)}s ${m.drift > 0 ? 'ahead' : 'behind'}</span><button class="btn sm strong" data-act="resync">Sync</button>` : statusOf(m);
+    return `<div class="p ${m.state === 'offline' ? 'off' : ''}">${av(m.id, m.name)}<div class="nm"><b>${m.name}${you ? ' (you)' : ''}</b><small>${m.host ? 'Host' : 'Guest'}</small></div>${status}${slot}</div>`;
+  }).join('') + (n <= 1 ? `<div class="p"><span class="av ghost">+</span><div class="nm muted">Waiting for friends…</div></div>` : '') + `</div>`;
+  // 4. host options
+  if (host) out += `<div class="lbl"><span>Host options</span></div><div class="opt"><div><b style="font-weight:600">Let people in automatically</b><small>Skip the request. Anyone with the code can join.</small></div><button class="tg" role="switch" aria-checked="${S.autoAccept}" data-act="auto" aria-label="Let people in automatically"></button></div>`;
+  // 5. leave, last
+  out += `<div class="foot">` + (host
+    ? (S.confirmEnd ? `<div class="muted" style="margin-bottom:6px">This ends the party for ${n - 1} other${n - 1 === 1 ? '' : 's'}.</div><div style="display:flex;gap:6px"><button class="btn" data-act="noend">Keep going</button><button class="btn danger" data-act="end">End party</button></div>` : `<button class="btn" data-act="${n > 1 ? 'confirm' : 'end'}">End party</button>`)
+    : `<button class="btn" data-act="leave">Leave party</button>`) + `</div>`;
+  return out;
+}
+
+function render() {
+  const v = { idle: vIdle, waiting: vWaiting, closed: vClosed, inside: vInside }[S.screen]();
+  const pop = $('#pop'), had = document.activeElement?.id;
+  pop.innerHTML = v; titlebarButton();
+  if (had === 'code') $('#code')?.focus();
+  renderSide();
+}
+
+/* ---------- side panels ---------- */
+const PRESETS = [
+  ['Entering', [
+    ['Idle', () => reset()],
+    ['Waiting for the host', () => reset({ screen: 'waiting', position: 1 })],
+    ['Waiting, 3rd in line', () => reset({ screen: 'waiting', position: 3 })],
+    ['Request declined', () => closeWith('refused')],
+    ['Party full', () => closeWith('full')],
+    ['Server unreachable', () => closeWith('unreachable')],
+  ]],
+  ['Inside', [
+    ['Host, alone', () => { reset(); enterAsHost(); }],
+    ['Host, with friends', () => { reset(); enterAsHost(['theo', 'june']); }],
+    ['Host, request pending', () => { reset(); enterAsHost(['theo']); request('kai'); request('ren'); }],
+    ['Guest, with friends', () => { reset(); acceptedByHost(['theo', 'june']); }],
+    ['Out of sync', () => { reset(); acceptedByHost(['theo']); me().state = 'drift'; me().drift = -3.2; }],
+    ['A friend is out of sync', () => { reset(); acceptedByHost(['theo']); S.members.find(m => m.id === 'theo').state = 'drift'; S.members.find(m => m.id === 'theo').drift = 4.1; }],
+    ['A friend is offline', () => { reset(); acceptedByHost(['theo', 'june']); S.members.find(m => m.id === 'june').state = 'offline'; }],
+    ['Reconnecting', () => { reset(); acceptedByHost(['theo']); S.reconnecting = true; }],
+    ['Party full (8/8)', () => { reset(); enterAsHost(['mia', 'theo', 'june', 'kai', 'ren', 'ola', 'sam']); }],
+  ]],
+  ['Leaving', [
+    ['You left', () => closeWith('left')],
+    ['Removed by the host', () => closeWith('removed')],
+    ['Host ended the party', () => closeWith('ended')],
+  ]],
+];
+let current = '';
+function renderSide() {
+  const st = $('#states');
+  if (!st.dataset.built) {
+    let i = 0;
+    st.innerHTML = '<h2>States</h2>' + PRESETS.map(([g, items]) => `<h2>${g}</h2>` + items.map(([n]) => `<button class="row" data-preset="${++i}"><span class="num">${i}</span>${n}</button>`).join('')).join('');
+    st.dataset.built = '1';
+    st.onclick = e => { const b = e.target.closest('[data-preset]'); if (!b) return; const f = PRESETS.flatMap(g => g[1])[b.dataset.preset - 1]; current = b.dataset.preset; quiet = true; f[1](); quiet = false; render(); };
+  }
+  st.querySelectorAll('[data-preset]').forEach(b => b.removeAttribute('aria-current'));
+  const ev = $('#events');
+  const inside = S.screen === 'inside', host = S.role === 'host';
+  const btn = (act, text, on = true) => `<button class="row" data-ev="${act}" ${on ? '' : 'disabled'}>${text}</button>`;
+  ev.innerHTML = `<h2>Events</h2>` +
+    (S.screen === 'idle' ? `<small>Start or join in the panel to begin.</small>` : '') +
+    (S.screen === 'waiting' ? btn('accept-me', 'Host accepts you') + btn('decline-me', 'Host declines') + btn('full', 'Party turns out to be full') + btn('line', 'Others join the line') + btn('down', 'Connection fails') : '') +
+    (inside ? btn('req', 'Someone asks to join', host) + btn('join', 'A friend joins') + btn('leaveF', 'A friend leaves') + btn('offF', 'A friend loses connection') + btn('driftF', 'A friend drifts out of sync') + btn('driftMe', 'You drift out of sync') + btn('recon', S.reconnecting ? 'Connection comes back' : 'You lose connection') + btn('removed', 'Host removes you', !host) + btn('ended', 'Host ends the party', !host) : '') +
+    `<h2>Behaviour</h2>
+    <label><input type="checkbox" data-opt="hostAutoAccepts" ${S.hostAutoAccepts ? 'checked' : ''}>Host auto-accepts</label>
+    <small>Joiners skip the waiting step.</small>
+    <h2>Notifications</h2>
+    <label><input type="checkbox" data-opt="n.requests" ${S.notif.requests ? 'checked' : ''}>Join requests</label>
+    <label><input type="checkbox" data-opt="n.people" ${S.notif.people ? 'checked' : ''}>People joining and leaving</label>
+    <label><input type="checkbox" data-opt="n.ended" ${S.notif.ended ? 'checked' : ''}>Party ends</label>
+    <label><input type="checkbox" data-opt="background" ${S.background ? 'checked' : ''}>Serafin is in the background</label>
+    <small>Defaults: requests on, people off, ends on. Notifications only show while the window is not in front.</small>`;
+}
+$('#events').addEventListener('click', e => {
+  const b = e.target.closest('[data-ev]'); if (!b || b.disabled) return;
+  const pick = a => PEOPLE[a] ? a : null, spare = () => Object.keys(PEOPLE).find(k => !S.members.some(m => m.id === k) && !S.requests.some(r => r.id === k));
+  ({
+    'accept-me': () => acceptedByHost(), 'decline-me': () => closeWith('refused'), full: () => closeWith('full'), line: () => { S.position = Math.min(S.position + 1, 5); }, down: () => closeWith('unreachable'),
+    req: () => { const id = spare(); if (id) request(id); }, join: () => { const id = spare(); if (id) addPerson(id); },
+    leaveF: () => { const m = [...S.members].reverse().find(m => m.id !== 'me' && !m.host); if (m) removePerson(m.id); },
+    offF: () => { const m = S.members.find(m => m.id !== 'me' && !m.host && m.state !== 'offline'); if (m) m.state = 'offline'; },
+    driftF: () => { const m = S.members.find(m => m.id !== 'me' && m.state === 'synced'); if (m) { m.state = 'drift'; m.drift = 3.6; } },
+    driftMe: () => { me().state = 'drift'; me().drift = -3.2; },
+    recon: () => { S.reconnecting = !S.reconnecting; },
+    removed: () => closeWith('removed'), ended: () => closeWith('ended'),
+  })[b.dataset.ev]?.(); render();
+});
+$('#events').addEventListener('change', e => {
+  const k = e.target.dataset.opt; if (!k) return;
+  if (k.startsWith('n.')) S.notif[k.slice(2)] = e.target.checked; else S[k] = e.target.checked;
+  if (k === 'hostAutoAccepts' && S.screen === 'waiting' && e.target.checked) later(900, acceptedByHost);
+  render();
+});
+
+/* ---------- panel interactions ---------- */
+$('#pop').addEventListener('click', e => {
+  const b = e.target.closest('[data-act]'); if (!b) return; const id = b.dataset.id;
+  ({
+    start: startParty, reset: () => reset(), cancel: () => reset(), leave: () => closeWith('left'),
+    confirm: () => { S.confirmEnd = true; }, noend: () => { S.confirmEnd = false; }, end: () => { reset(); },
+    resync: () => { me().state = 'syncing'; later(900, () => { me().state = 'synced'; me().drift = 0; }); },
+    accept: () => { S.requests = S.requests.filter(r => r.id !== id); addPerson(id); }, decline: () => { S.requests = S.requests.filter(r => r.id !== id); },
+    kick: () => removePerson(id), auto: () => { S.autoAccept = !S.autoAccept; if (S.autoAccept) S.requests.splice(0).forEach(r => addPerson(r.id)); },
+    copy: () => { S.copied = true; later(1600, () => { S.copied = false; }); },
+  })[b.dataset.act]?.(); render();
+});
+$('#pop').addEventListener('submit', e => {
+  e.preventDefault(); const code = $('#code').value.trim();
+  if (!code) return;
+  if (code.toUpperCase() === 'FULL8888') { reset({ busy: 'join', code }); later(700, () => closeWith('full')); render(); return; }
+  joinParty(code); render();
+});
+$('#pbtn').addEventListener('click', () => { const p = $('#pop'); p.hidden = !p.hidden; $('#pbtn').setAttribute('aria-expanded', String(!p.hidden)); });
+render();
+</script>

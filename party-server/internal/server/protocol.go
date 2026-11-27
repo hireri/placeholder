@@ -29,6 +29,7 @@ const (
 	MsgTypeSyncPlayback        = "sync_playback"
 	MsgTypeBufferWait          = "buffer_wait"
 	MsgTypeMemberSync          = "member_sync"
+	MsgTypeJoinPending         = "join_pending"
 	MsgTypeBufferComplete      = "buffer_complete"
 	MsgTypeError               = "error"
 	MsgTypePong                = "pong"
@@ -244,6 +245,13 @@ type TrackInfo struct {
 type BufferReadyPayload struct {
 	TrackID       string `json:"track_id"`
 	TrackRevision uint64 `json:"track_revision,omitempty"`
+}
+
+// JoinPendingPayload tells a joiner their request is waiting on the host.
+type JoinPendingPayload struct {
+	HostName string `json:"host_name"`
+	Position uint32 `json:"position"`
+	HostAway bool   `json:"host_away,omitempty"`
 }
 
 // MemberSyncPayload tells the room when one member's playback drifts out of step or recovers.

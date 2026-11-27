@@ -236,6 +236,8 @@ func toProtoMessage(payload interface{}) (proto.Message, error) {
 		return &pb.UserJoinedPayload{UserId: p.UserID, Username: p.Username, AvatarUrl: p.AvatarURL}, nil
 	case *UserLeftPayload:
 		return &pb.UserLeftPayload{UserId: p.UserID, Username: p.Username}, nil
+	case *JoinPendingPayload:
+		return &pb.JoinPendingPayload{HostName: p.HostName, Position: p.Position, HostAway: p.HostAway}, nil
 	case *MemberSyncPayload:
 		return &pb.MemberSyncPayload{UserId: p.UserID, InSync: p.InSync, DriftMs: p.DriftMs}, nil
 	case *BufferWaitPayload:
@@ -308,6 +310,8 @@ func toProtoMessage(payload interface{}) (proto.Message, error) {
 		return &pb.UserJoinedPayload{UserId: p.UserID, Username: p.Username, AvatarUrl: p.AvatarURL}, nil
 	case UserLeftPayload:
 		return &pb.UserLeftPayload{UserId: p.UserID, Username: p.Username}, nil
+	case JoinPendingPayload:
+		return &pb.JoinPendingPayload{HostName: p.HostName, Position: p.Position, HostAway: p.HostAway}, nil
 	case MemberSyncPayload:
 		return &pb.MemberSyncPayload{UserId: p.UserID, InSync: p.InSync, DriftMs: p.DriftMs}, nil
 	case BufferWaitPayload:

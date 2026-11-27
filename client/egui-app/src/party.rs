@@ -22,8 +22,8 @@ const SERVER: &str = "wss://party.aveline.fish/ws";
 fn server() -> String {
     std::env::var("SERAFIN_PARTY_SERVER").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| SERVER.into())
 }
-/// Same share link format as Metrolist.
-pub const LINK: &str = "https://metrolist.cc/listen?code=";
+/// How many can be in a party; the server enforces the same limit.
+pub const MAX: i32 = 8;
 /// Pings carry our playhead, so the server can tell the room when we drift out of step.
 const PING_EVERY: Duration = Duration::from_secs(5);
 /// A playing listener only seeks when this far off; smaller drift is left alone.
@@ -174,6 +174,17 @@ mod pb {
         pub position: i64,
         #[prost(int64, tag = "6")]
         pub position_captured_at_server_time: i64,
+    }
+
+    /// Sent while the host has yet to answer a join request.
+    #[derive(Clone, PartialEq, Message)]
+    pub struct JoinPending {
+        #[prost(string, tag = "1")]
+        pub host_name: String,
+        #[prost(uint32, tag = "2")]
+        pub position: u32,
+        #[prost(bool, tag = "3")]
+        pub host_away: bool,
     }
 
     /// A listener fell out of step with the room, or got back in.
@@ -503,6 +514,19 @@ struct Sent {
     queue: Vec<String>,
 }
 
+/// Why there is no party: what the panel says after one ends, is refused or cannot start.
+#[derive(Clone, PartialEq)]
+pub enum Closed {
+    /// The host's name.
+    Refused(String),
+    Full,
+    Unreachable,
+    Removed,
+    Ended,
+    Left,
+    Other(String),
+}
+
 #[derive(Default)]
 pub struct Party {
     out: Option<Sender<Vec<u8>>>,
@@ -511,14 +535,24 @@ pub struct Party {
     token: Arc<Mutex<String>>,
     report: Arc<Mutex<Report>>,
     pub room: Option<Room>,
-    /// "Connecting…", "Waiting for the host to let you in", a lost connection or a refusal; shown in the popover.
-    pub status: Option<String>,
+    pub closed: Option<Closed>,
+    /// Asked to join and waiting on the host: (their name, our place in line).
+    pub pending: Option<(String, u32)>,
+    /// Setting up, until the room or the host's answer arrives: true when joining, false when starting.
+    busy: Option<bool>,
+    pub reconnecting: bool,
+    /// Host: asking whether to end the party for everyone.
+    pub confirm_end: bool,
     sent: Option<Sent>,
     /// The room's playback, applied once the song is loaded and re-checked while playing.
     target: Option<Target>,
     fresh: bool,
+    /// Seek to the room's position even when close: set by the Sync button.
+    exact: bool,
     checked: Option<Instant>,
     ready_sent: String,
+    /// When this connection was started, for the timing lines in the terminal.
+    t0: Option<Instant>,
     /// Listeners shown stacked on the titlebar button, including ones still shrinking away: (id, name, picture).
     faces: Vec<(String, String, String)>,
     /// The song whose full details (cover, album, artist links) were looked up.
@@ -526,11 +560,7 @@ pub struct Party {
 }
 
 impl Party {
-    pub fn active(&self) -> bool {
-        self.out.is_some()
-    }
-
-    fn start(&mut self, ctx: &Context, first: Vec<u8>) {
+    fn start(&mut self, ctx: &Context, first: Vec<u8>, joining: bool) {
         self.leave();
         let (out_tx, out_rx) = channel();
         let (in_tx, in_rx) = channel();
@@ -538,18 +568,25 @@ impl Party {
         (self.clock, self.token, self.report) = Default::default();
         let (ctx, clock, token, report) = (ctx.clone(), self.clock.clone(), self.token.clone(), self.report.clone());
         std::thread::spawn(move || worker(ctx, out_rx, in_tx, clock, token, report));
-        (self.out, self.inbox, self.status) = (Some(out_tx), Some(in_rx), Some("Connecting…".into()));
+        (self.out, self.inbox, self.busy) = (Some(out_tx), Some(in_rx), Some(joining));
+        self.t0 = Some(Instant::now());
+    }
+
+    fn lap(&self, what: &str) {
+        if let Some(t0) = self.t0 {
+            eprintln!("party: {what} after {} ms", t0.elapsed().as_millis());
+        }
     }
 
     pub fn create(&mut self, ctx: &Context, name: &str, avatar: &str) {
-        self.start(ctx, encode("create_room", Some(&pb::Name { username: name.into(), avatar_url: avatar.into() })));
+        self.start(ctx, encode("create_room", Some(&pb::Name { username: name.into(), avatar_url: avatar.into() })), false);
     }
 
     /// Takes a bare code or a pasted share link.
     pub fn join(&mut self, ctx: &Context, code: &str, name: &str, avatar: &str) {
         let code = code.trim().rsplit("code=").next().unwrap_or("").trim().to_uppercase();
         if !code.is_empty() {
-            self.start(ctx, encode("join_room", Some(&pb::Join { room_code: code, username: name.into(), avatar_url: avatar.into() })));
+            self.start(ctx, encode("join_room", Some(&pb::Join { room_code: code, username: name.into(), avatar_url: avatar.into() })), true);
         }
     }
 
@@ -559,6 +596,12 @@ impl Party {
         }
         // Dropping the sender ends the worker once it has flushed what is queued.
         *self = Party::default();
+    }
+
+    /// Leaves, and the panel says why there is no party.
+    pub fn close(&mut self, why: Closed) {
+        self.leave();
+        self.closed = Some(why);
     }
 
     fn send(&self, kind: &str, payload: Option<&dyn MessageBytes>) {
@@ -575,6 +618,16 @@ impl Party {
         self.id(if yes { "approve_join" } else { "reject_join" }, user);
         if let Some(r) = &mut self.room {
             r.requests.retain(|q| q.0 != user);
+        }
+    }
+
+    /// Asks the room for where it is now and goes there, for when we have drifted.
+    pub fn resync(&mut self) {
+        self.send("request_sync", None);
+        self.exact = true;
+        if let Some(r) = &mut self.room {
+            let me = r.me.clone();
+            r.drifting.retain(|d| d.0 != me);
         }
     }
 
@@ -608,17 +661,22 @@ impl App {
         for m in msgs {
             match m {
                 In::Msg(kind, payload) => self.party_msg(ctx, &kind, &payload),
-                In::Lost if self.party.room.is_some() => self.party.status = Some("Reconnecting…".into()),
+                In::Lost if self.party.room.is_some() => self.party.reconnecting = true,
                 In::Lost => {}
                 In::Failed(e) => {
                     crate::toast::error(e.clone());
-                    self.party.leave();
-                    self.party.status = Some(e);
+                    self.party.close(if e.contains("can't reach") { Closed::Unreachable } else { Closed::Other(e) });
                 }
             }
         }
         if self.party.room.is_none() {
             return;
+        }
+        if self.opts.party_auto_accept && self.party.room.as_ref().is_some_and(|r| r.is_host() && !r.requests.is_empty()) {
+            let waiting: Vec<String> = self.party.room.as_ref().map_or(vec![], |r| r.requests.iter().map(|q| q.0.clone()).collect());
+            for id in waiting {
+                self.party.answer_join(&id, true);
+            }
         }
         // ponytail: radio songs would differ per listener and each would announce its own; no endless mode in a party.
         self.pl.endless = false;
@@ -631,13 +689,20 @@ impl App {
         *self.party.report.lock().unwrap() = Report { track, pos_ms };
     }
 
-    /// Who we are in a party: the signed-in account's name, else the stored "Guest 1234".
+    /// Who we are in a party: the signed-in account's name (the last known one while it loads), else the stored "Guest 1234".
     fn party_name(&self) -> String {
-        self.user_name().unwrap_or_else(|| self.guest.clone())
+        self.user_name().or_else(|| Some(self.me.0.clone()).filter(|n| !n.is_empty())).unwrap_or_else(|| self.guest.clone())
+    }
+
+    /// A system notification, if that kind is on and (by default) the window is not in front.
+    fn party_alert(&self, ctx: &Context, on: bool, title: &str, body: &str) {
+        if on && !(self.opts.notify_background && ctx.input(|i| i.viewport().focused.unwrap_or(true))) {
+            crate::notify::send(title, body);
+        }
     }
 
     fn my_avatar(&self) -> String {
-        self.youtube_user().and_then(|u| u.0).unwrap_or_default()
+        self.youtube_user().and_then(|u| u.0).unwrap_or_else(|| self.me.1.clone())
     }
 
     /// The player as the room would see it.
@@ -666,13 +731,15 @@ impl App {
                 room.host_id = s.user_id.clone();
                 room.members.push(Member { id: s.user_id, name, avatar: self.my_avatar(), host: true, connected: true });
                 // An empty baseline, so whatever is playing is announced to the room.
-                (self.party.room, self.party.status, self.party.sent) = (Some(room), None, Some(Sent::default()));
+                (self.party.room, self.party.busy, self.party.sent) = (Some(room), None, Some(Sent::default()));
             }
             "join_approved" => {
                 let s = pb::Session::decode(b).unwrap_or_default();
                 *self.party.token.lock().unwrap() = s.session_token;
                 self.party.room = Some(Room::from_state(s.room_code, s.user_id, s.state.as_ref()));
-                self.party.status = None;
+                (self.party.busy, self.party.pending) = (None, None);
+                self.party.lap("approved");
+                self.party_alert(ctx, self.opts.notify_requests, "You're in the party", "The host let you in");
                 self.party_join_state(ctx, s.state);
             }
             "reconnected" => {
@@ -686,30 +753,38 @@ impl App {
                 if s.is_host {
                     room.host_id = room.me.clone();
                 }
-                (self.party.room, self.party.status) = (Some(room), None);
+                (self.party.room, self.party.reconnecting) = (Some(room), false);
                 self.party_join_state(ctx, s.state);
             }
             "join_request" => {
                 let u = user();
                 let Some(room) = &mut self.party.room else { return };
                 crate::toast::info(format!("{} wants to join the party", u.username));
+                let name = u.username.clone();
                 room.requests.push((u.user_id, u.username));
+                self.party_alert(ctx, self.opts.notify_requests && !self.opts.party_auto_accept, "Join request", &format!("{name} wants to join your party"));
             }
             "join_rejected" | "kicked" => {
                 let reason = pb::Id::decode(b).unwrap_or_default().id;
                 let what = if kind == "kicked" { "You were removed from the party" } else { "The host turned down your request" };
                 let msg = if reason.is_empty() { what.to_string() } else { format!("{what}: {reason}") };
                 crate::toast::info(msg.clone());
-                self.party.leave();
-                self.party.status = Some(msg);
+                let on = if kind == "kicked" { self.opts.notify_ended } else { self.opts.notify_requests };
+                self.party_alert(ctx, on, "Listening party", &msg);
+                let host = self.party.pending.take().map(|p| p.0).unwrap_or_default();
+                self.party.close(if kind == "kicked" { Closed::Removed } else { Closed::Refused(host) });
             }
             "user_joined" | "user_reconnected" => {
                 let u = user();
                 let Some(room) = &mut self.party.room else { return };
                 room.requests.retain(|q| q.0 != u.user_id);
+                let name = u.username.clone();
                 match room.members.iter_mut().find(|m| m.id == u.user_id) {
                     Some(m) => m.connected = true,
                     None => room.members.push(Member { id: u.user_id, name: u.username, avatar: u.avatar_url, host: false, connected: true }),
+                }
+                if kind == "user_joined" {
+                    self.party_alert(ctx, self.opts.notify_people, "Listening party", &format!("{name} joined"));
                 }
             }
             "user_left" | "user_disconnected" => {
@@ -719,6 +794,7 @@ impl App {
                     room.members.retain(|m| m.id != u.user_id);
                     room.waiting.retain(|w| *w != u.user_id);
                     room.drifting.retain(|d| d.0 != u.user_id);
+                    self.party_alert(ctx, self.opts.notify_people, "Listening party", &format!("{} left", u.username));
                 } else if let Some(m) = room.members.iter_mut().find(|m| m.id == u.user_id) {
                     m.connected = false;
                 }
@@ -733,6 +809,11 @@ impl App {
                 if room.is_host() {
                     crate::toast::info("You are now the party host");
                 }
+            }
+            "join_pending" => {
+                let p = pb::JoinPending::decode(b).unwrap_or_default();
+                let host = if p.host_name.is_empty() { "the host".to_string() } else { p.host_name };
+                (self.party.pending, self.party.busy) = (Some((host, p.position)), None);
             }
             "buffer_wait" => {
                 if let Some(room) = &mut self.party.room {
@@ -765,15 +846,14 @@ impl App {
                 let e = pb::Error::decode(b).unwrap_or_default();
                 if e.code == "session_not_found" || (e.code == "not_in_room" && self.party.room.is_some()) {
                     *self.party.token.lock().unwrap() = String::new();
-                    self.party.leave();
-                    self.party.status = Some(if e.code == "not_in_room" { "You're no longer in the party" } else { "The party has ended" }.into());
+                    self.party.close(Closed::Ended);
+                    self.party_alert(ctx, self.opts.notify_ended, "Listening party", "The party has ended");
                 } else if e.code == "stale_track" || e.code == "stale_action" {
                     // Someone changed the song a moment before us; their change reaches us next.
                 } else {
-                    let msg = if e.message.is_empty() { e.code } else { e.message };
+                    let msg = if e.message.is_empty() { e.code.clone() } else { e.message };
                     if self.party.room.is_none() {
-                        self.party.leave();
-                        self.party.status = Some(msg.clone());
+                        self.party.close(if e.code == "room_full" { Closed::Full } else { Closed::Other(msg.clone()) });
                     }
                     crate::toast::error(msg);
                 }
@@ -869,6 +949,7 @@ impl App {
             return;
         }
         if self.party.ready_sent != vid {
+            self.party.lap("song loaded");
             self.party.id("buffer_ready", &vid);
             self.party.ready_sent = vid.clone();
         }
@@ -878,11 +959,12 @@ impl App {
         if !(party.fresh || (steady && party.checked.is_none_or(|c| c.elapsed() >= DRIFT_CHECK))) {
             return;
         }
+        let exact = std::mem::take(&mut party.exact);
         (party.fresh, party.checked) = (false, Some(Instant::now()));
         let want = party.clock.lock().unwrap().position_at(t.pos, t.at, t.playing);
         let have = (self.pl.pos * 1000.) as i64;
         let playing = t.playing;
-        if !steady || (want - have).abs() > HARD_SYNC_MS {
+        if !steady || exact || (want - have).abs() > HARD_SYNC_MS {
             self.pl.seek(want as f32 / 1000.);
         }
         if playing != self.pl.playing {
@@ -1064,8 +1146,6 @@ impl App {
             return;
         }
         let name = self.party_name();
-        // Until the account has loaded, the name and picture would be the fallbacks, and the room would take us for someone else.
-        let account_loading = matches!(&*self.data.status.lock(), crate::data::State::Idle | crate::data::State::Loading);
         let my_pic = self.my_avatar();
         let mut act: Option<Box<dyn FnOnce(&mut App)>> = None;
         egui::Area::new(Id::unique("party-pop")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
@@ -1079,33 +1159,217 @@ impl App {
             icon(ui, icon!("partyf"), pos2(l + 9., y + 11.), 18., t.tx);
             trunc(&p, pos2(l + 26., y + 11.), w - 26. - 90., "Listening party", font_w(15., Weight::Bold), t.tx);
             // Head count at the right of the title.
-            if let Some(n) = live {
-                let n = n.to_string();
+            if self.party.reconnecting && live.is_some() {
+                p.text(pos2(l + w, y + 11.), Align2::RIGHT_CENTER, "Reconnecting…", font_w(12., Weight::Semi), t.tm);
+            } else if let Some(n) = live {
+                let n = format!("{n} of {MAX}");
                 let nx = l + w - text_w(&p, &n, font_w(12., Weight::Semi));
                 p.text(pos2(l + w, y + 11.), Align2::RIGHT_CENTER, &n, font_w(12., Weight::Semi), t.tx);
                 icon(ui, icon!("group"), pos2(nx - 11., y + 11.), 15., t.tm);
             }
             y += 22. + 12.;
-            if let Some(s) = &self.party.status {
-                let g = p.layout(s.clone(), font(12.5), t.tm, w);
-                let gh = g.size().y;
-                p.galley(pos2(l, y), g, t.tm);
-                y += gh + 12.;
-            }
-
             match &self.party.room {
+                Some(room) => {
+                    let host = room.is_host();
+                    let others = room.members.iter().filter(|m| m.connected && m.id != room.me).count();
+                    let left = (MAX as usize).saturating_sub(room.members.len());
+                    // The code to share, first: it is what you open this for.
+                    let code_r = Rect::from_min_size(pos2(l, y), vec2(w, 56.));
+                    p.rect_filled(code_r, rad(12.), t.s1);
+                    label(&p, &t, pos2(l + 14., y + 17.), w - 120., &if left == 0 { "Party code · full".to_string() } else { format!("Party code · {left} left") });
+                    trunc(&p, pos2(l + 14., y + 37.), w - 120., &room.code, egui::FontId::monospace(16.), t.tx);
+                    let cw = text_w(&p, "Copy code", font_w(13., Weight::Semi)) + 24.;
+                    if btn(ui, &t, "copy", Rect::from_min_size(pos2(code_r.max.x - 10. - cw, y + 12.), vec2(cw, 32.)), "Copy code", false) {
+                        ctx.copy_text(room.code.clone());
+                        crate::toast::info("Code copied");
+                    }
+                    y += 56. + 10.;
+
+                    // Nothing stacks: a lost connection is in the header, being out of step is a button on your own row,
+                    // and only people asking to come in get rows of their own (three at a time).
+                    if host && !room.requests.is_empty() {
+                        label(&p, &t, pos2(l, y + 6.), w - 30., "Wants to join");
+                        p.text(pos2(l + w, y + 6.), Align2::RIGHT_CENTER, room.requests.len().to_string(), font_w(10.5, Weight::Semi), t.tf);
+                        y += 14.;
+                        for (i, (id, title)) in room.requests.iter().take(3).enumerate() {
+                            let cy = y + 22.;
+                            self.avatar(ui, None, pos2(l + 16., cy), 16., Some(title));
+                            let yw = text_w(&p, "Accept", font_w(12.5, Weight::Semi)) + 24.;
+                            let yes = Rect::from_min_size(pos2(l + w - yw, cy - 13.), vec2(yw, 26.));
+                            let no_c = pos2(yes.min.x - 6. - 13., cy);
+                            trunc(&p, pos2(l + 42., cy), no_c.x - 13. - 8. - (l + 42.), title, font_w(13., Weight::Semi), t.tx);
+                            let no_hit = press(ui, ("party-no", i), Rect::from_center_size(no_c, vec2(26., 26.)));
+                            p.circle_filled(no_c, 13., if no_hit.hovered() { t.s2 } else { t.s3 });
+                            icon(ui, icon!("x"), no_c, 12., t.tm);
+                            let yes_hit = press(ui, ("party-yes", i), yes);
+                            p.rect_filled(yes, rad(13.), if yes_hit.hovered() { t.tx.gamma_multiply(0.88) } else { t.tx });
+                            p.text(yes.center(), Align2::CENTER_CENTER, "Accept", font_w(12.5, Weight::Semi), t.s0);
+                            if let Some(ok) = [(yes_hit.clicked(), true), (no_hit.clicked(), false)].into_iter().find(|c| c.0).map(|c| c.1) {
+                                let id = id.clone();
+                                act = Some(Box::new(move |a: &mut App| a.party.answer_join(&id, ok)));
+                            }
+                            y += 44.;
+                        }
+                        if room.requests.len() > 3 {
+                            p.text(pos2(l + 42., y + 4.), Align2::LEFT_CENTER, format!("+{} more waiting", room.requests.len() - 3), font(12.), t.tm);
+                            y += 16.;
+                        }
+                        y += 4.;
+                    }
+
+                    label(&p, &t, pos2(l, y + 6.), w, "Listeners");
+                    y += 14.;
+                    for m in &room.members {
+                        let cy = y + 22.;
+                        let you = m.id == room.me;
+                        let row = Rect::from_min_size(pos2(l, y), vec2(w, 44.));
+                        if !m.connected {
+                            // Offline: a flat grey disc instead of the picture.
+                            p.circle_filled(pos2(l + 16., cy), 16., t.s3);
+                            p.text(pos2(l + 16., cy), Align2::CENTER_CENTER, m.name.chars().next().unwrap_or('?').to_uppercase().to_string(), font_w(11., Weight::Semi), t.tf);
+                        } else {
+                            let pic = Some(if m.avatar.is_empty() && you { my_pic.as_str() } else { m.avatar.as_str() }).filter(|u| !u.is_empty());
+                            self.avatar(ui, pic, pos2(l + 16., cy), 16., Some(&m.name));
+                        }
+                        let state = if !m.connected {
+                            "Offline".to_string()
+                        } else if room.waiting.contains(&m.id) {
+                            "Syncing…".to_string()
+                        } else if let Some((_, ms)) = room.drifting.iter().find(|d| d.0 == m.id) {
+                            format!("Out of sync ({:+.1}s)", *ms as f32 / 1000.)
+                        } else {
+                            "Synced".to_string()
+                        };
+                        // Every row keeps the trailing slot (the host's crown, or a remove button on hover), so the states line up.
+                        let mut right = l + w - 34.;
+                        let mut state = state;
+                        // Out of step: the status becomes a button that brings you back.
+                        if let Some((_, ms)) = room.drifting.iter().find(|d| d.0 == m.id).filter(|_| you && m.connected) {
+                            let bw = text_w(&p, "Sync", font_w(12.5, Weight::Semi)) + 24.;
+                            if btn(ui, &t, "resync", Rect::from_min_size(pos2(right - bw, cy - 13.), vec2(bw, 26.)), "Sync", true) {
+                                act = Some(Box::new(|a: &mut App| a.party.resync()));
+                            }
+                            right -= bw + 8.;
+                            state = format!("{:.1}s {}", ms.abs() as f32 / 1000., if *ms > 0 { "ahead" } else { "behind" });
+                        }
+                        let sw = text_w(&p, &state, font(12.));
+                        let nw = right - sw - 10. - (l + 42.);
+                        let dim = if m.connected { t.tx } else { t.tm };
+                        trunc(&p, pos2(l + 42., cy - 8.), nw, &if you { format!("{} (you)", m.name) } else { m.name.clone() }, font_w(13., Weight::Semi), dim);
+                        trunc(&p, pos2(l + 42., cy + 9.), nw, if m.id == room.host_id { "Host" } else { "Guest" }, font(11.5), t.tm);
+                        p.text(pos2(right, cy), Align2::RIGHT_CENTER, &state, font(12.), t.tm);
+                        if m.id == room.host_id {
+                            icon(ui, icon!("crown"), pos2(l + w - 14., cy), 15., t.ax);
+                        } else if host && !you && ui.rect_contains_pointer(row) && icon_button(ui, &t, ("party-kick", &m.id), pos2(l + w - 14., cy), 28., icon!("x"), 14., t.tm).clicked() {
+                            let id = m.id.clone();
+                            act = Some(Box::new(move |a: &mut App| a.party.kick(&id)));
+                        }
+                        y += 44.;
+                    }
+                    if others == 0 {
+                        let c = pos2(l + 16., y + 22.);
+                        p.circle_stroke(c, 15., egui::Stroke::new(1.5, t.s3));
+                        p.text(c, Align2::CENTER_CENTER, "+", font_w(14., Weight::Semi), t.tf);
+                        trunc(&p, pos2(l + 42., y + 22.), w - 42., "Waiting for friends…", font(13.), t.tm);
+                        y += 44.;
+                    }
+
+                    if host {
+                        y += 6.;
+                        label(&p, &t, pos2(l, y + 6.), w, "Host options");
+                        y += 14.;
+                        let cy = y + 24.;
+                        trunc(&p, pos2(l, cy - 8.), w - 56., "Let people in automatically", font_w(13., Weight::Semi), t.tx);
+                        trunc(&p, pos2(l, cy + 9.), w - 56., "Skip the request. Anyone with the code can join", font(11.5), t.tm);
+                        let mut on = self.opts.party_auto_accept;
+                        if crate::settings::toggle(ui, &t, "party-auto", l + w, cy, &mut on) {
+                            act = Some(Box::new(move |a: &mut App| a.opts.party_auto_accept = on));
+                        }
+                        y += 48.;
+                    }
+                    y += 10.;
+                    if host && self.party.confirm_end {
+                        let g = p.layout(format!("This ends the party for {others} other{}.", if others == 1 { "" } else { "s" }), font(12.5), t.tm, w);
+                        let gh = g.size().y;
+                        p.galley(pos2(l, y), g, t.tm);
+                        y += gh + 6.;
+                        let half = (w - 6.) / 2.;
+                        if btn(ui, &t, "keep", Rect::from_min_size(pos2(l, y), vec2(half, 36.)), "Keep going", false) {
+                            act = Some(Box::new(|a: &mut App| a.party.confirm_end = false));
+                        }
+                        if btn(ui, &t, "end", Rect::from_min_size(pos2(l + half + 6., y), vec2(half, 36.)), "End party", false) {
+                            act = Some(Box::new(|a: &mut App| a.party.leave()));
+                        }
+                    } else if btn(ui, &t, "end", Rect::from_min_size(pos2(l, y), vec2(w, 36.)), if host { "End party" } else { "Leave party" }, false) {
+                        act = Some(if host && others > 0 { Box::new(|a: &mut App| a.party.confirm_end = true) } else if host { Box::new(|a: &mut App| a.party.leave()) } else { Box::new(|a: &mut App| a.party.close(Closed::Left)) });
+                    }
+                    y += 36.;
+                }
+                // Asked to join: the host's card, with where we stand.
+                None if self.party.pending.is_some() => {
+                    let (host, pos) = self.party.pending.clone().unwrap_or_default();
+                    let card = Rect::from_min_size(pos2(l, y), vec2(w, 72.));
+                    p.rect_filled(card, rad(12.), t.s1);
+                    self.avatar(ui, None, pos2(card.min.x + 14. + 26., card.center().y), 26., Some(&host));
+                    let tx = card.min.x + 14. + 52. + 12.;
+                    trunc(&p, pos2(tx, card.center().y - 9.), card.max.x - 12. - tx, &host, font_w(14., Weight::Bold), t.tx);
+                    let sub = if pos > 1 { format!("Host · you are number {pos} in line") } else { "Host · deciding whether to let you in".to_string() };
+                    trunc(&p, pos2(tx, card.center().y + 10.), card.max.x - 12. - tx, &sub, font(12.), t.tm);
+                    y += 72. + 12.;
+                    if btn(ui, &t, "cancel", Rect::from_min_size(pos2(l, y), vec2(w, 36.)), "Cancel request", false) {
+                        act = Some(Box::new(|a: &mut App| a.party.leave()));
+                    }
+                    y += 36.;
+                }
+                // A party that did not happen or has ended: what happened, and what to do next.
+                None if self.party.closed.is_some() => {
+                    let (glyph, title, body, retry) = match self.party.closed.clone().unwrap_or(Closed::Left) {
+                        Closed::Refused(h) => (icon!("x"), "Request declined".to_string(), format!("{} turned down your request.", if h.is_empty() { "The host".into() } else { h }), false),
+                        Closed::Full => (icon!("group"), format!("This party is full ({MAX} of {MAX})"), "Ask the host to make room, then try again.".into(), false),
+                        Closed::Unreachable => (icon!("x"), "Can't reach the party server".into(), "Check your connection and try again.".into(), true),
+                        Closed::Removed => (icon!("x"), "You were removed".into(), "The host removed you from the party.".into(), false),
+                        Closed::Ended => (icon!("party"), "The party has ended".into(), "The host ended it for everyone.".into(), false),
+                        Closed::Left => (icon!("check"), "You left the party".into(), "Playback is yours again.".into(), false),
+                        Closed::Other(m) => (icon!("x"), "Something went wrong".into(), m, true),
+                    };
+                    let c = pos2(l + w / 2., y + 24.);
+                    p.circle_filled(c, 22., t.s1);
+                    icon(ui, glyph, c, 22., t.tm);
+                    y += 56.;
+                    p.text(pos2(l + w / 2., y), Align2::CENTER_TOP, &title, font_w(15., Weight::Bold), t.tx);
+                    y += 24.;
+                    let g = p.layout(body, font(13.), t.tm, w);
+                    let gh = g.size().y;
+                    p.galley(pos2(l + (w - g.size().x) / 2., y), g, t.tm);
+                    y += gh + 14.;
+                    if btn(ui, &t, "again", Rect::from_min_size(pos2(l, y), vec2(w, 36.)), if retry { "Try again" } else { "Join another party" }, true) {
+                        act = Some(Box::new(|a: &mut App| a.party.closed = None));
+                    }
+                    y += 36.;
+                    if !retry {
+                        y += 6.;
+                        if btn(ui, &t, "again-start", Rect::from_min_size(pos2(l, y), vec2(w, 36.)), "Start your own", false) {
+                            let (n, c, av) = (name.clone(), ctx.clone(), my_pic.clone());
+                            act = Some(Box::new(move |a: &mut App| a.party.create(&c, &n, &av)));
+                        }
+                        y += 36.;
+                    }
+                }
+                // Not in a party: start one or join with a code. While one is being set up, the buttons say so.
                 None => {
+                    let busy = self.party.busy;
                     let g = p.layout("Listen in sync with friends. Everyone hears the same song at the same moment, and everyone is in control.".into(), font(13.), t.tm, w);
                     let gh = g.size().y;
                     p.galley(pos2(l, y), g, t.tm);
                     y += gh + 12.;
-                    let connecting = self.party.active();
                     let start = Rect::from_min_size(pos2(l, y), vec2(w, 36.));
-                    if btn(ui, &t, "start", start, if connecting { "Cancel" } else if account_loading { "Loading your account…" } else { "Start a party" }, !connecting && !account_loading) && !(account_loading && !connecting) {
-                        act = Some(if connecting { Box::new(|a: &mut App| a.party.leave()) } else { let (n, c, av) = (name.clone(), ctx.clone(), my_pic.clone()); Box::new(move |a: &mut App| a.party.create(&c, &n, &av)) });
+                    if btn(ui, &t, "start", start, if busy == Some(false) { "Starting…" } else { "Start a party" }, busy.is_none()) && busy.is_none() {
+                        let (n, c, av) = (name.clone(), ctx.clone(), my_pic.clone());
+                        act = Some(Box::new(move |a: &mut App| a.party.create(&c, &n, &av)));
                     }
                     y += 36. + 12.;
-                    let jw = text_w(&p, "Join", font_w(13., Weight::Semi)) + 28.;
+                    let join_label = if busy == Some(true) { "Joining…" } else { "Join" };
+                    let jw = text_w(&p, "Joining…", font_w(13., Weight::Semi)) + 28.;
                     let field = Rect::from_min_size(pos2(l, y), vec2(w - jw - 6., 36.));
                     let fid = ui.scope_id().with("party-code");
                     p.rect_filled(field, rad(10.), t.s1);
@@ -1116,94 +1380,9 @@ impl App {
                     let te = ui.put(edit, egui::TextEdit::singleline(&mut self.party_code).id(fid).frame(egui::Frame::NONE).font(font(13.)).align(Align2::LEFT_CENTER)
                         .hint_text(egui::RichText::new("Enter a party code").color(t.tm)).desired_width(edit.width()));
                     let enter = te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    if (btn(ui, &t, "join", Rect::from_min_size(pos2(field.max.x + 6., y), vec2(jw, 36.)), "Join", false) || enter) && !self.party_code.trim().is_empty() && !account_loading {
+                    if (btn(ui, &t, "join", Rect::from_min_size(pos2(field.max.x + 6., y), vec2(jw, 36.)), join_label, false) || enter) && !self.party_code.trim().is_empty() && busy.is_none() {
                         let (n, code, c, av) = (name.clone(), self.party_code.clone(), ctx.clone(), my_pic.clone());
                         act = Some(Box::new(move |a: &mut App| a.party.join(&c, &code, &n, &av)));
-                    }
-                    y += 36.;
-                }
-                Some(room) => {
-                    let host = room.is_host();
-                    // Code, and the link Metrolist opens.
-                    let code_r = Rect::from_min_size(pos2(l, y), vec2(w, 56.));
-                    p.rect_filled(code_r, rad(12.), t.s1);
-                    label(&p, &t, pos2(l + 14., y + 17.), w - 120., "Party code");
-                    trunc(&p, pos2(l + 14., y + 37.), w - 120., &room.code, egui::FontId::monospace(16.), t.tx);
-                    let cw = text_w(&p, "Copy link", font_w(13., Weight::Semi)) + 24.;
-                    if btn(ui, &t, "copy", Rect::from_min_size(pos2(code_r.max.x - 10. - cw, y + 12.), vec2(cw, 32.)), "Copy link", false) {
-                        ctx.copy_text(format!("{LINK}{}", room.code));
-                        crate::toast::info("Link copied");
-                    }
-                    y += 56. + 14.;
-
-                    label(&p, &t, pos2(l, y + 6.), w, "Listeners");
-                    y += 14.;
-                    for m in &room.members {
-                        let cy = y + 22.;
-                        let you = m.id == room.me;
-                        let pic = Some(if m.avatar.is_empty() && you { my_pic.as_str() } else { m.avatar.as_str() }).filter(|u| !u.is_empty());
-                        self.avatar(ui, pic, pos2(l + 16., cy), 16., Some(&m.name));
-                        let kick = host && !you;
-                        let state = if !m.connected {
-                            "Offline".to_string()
-                        } else if room.waiting.contains(&m.id) {
-                            "Syncing…".to_string()
-                        } else if let Some((_, ms)) = room.drifting.iter().find(|d| d.0 == m.id) {
-                            format!("Out of sync ({:+.1}s)", *ms as f32 / 1000.)
-                        } else {
-                            "Synced".to_string()
-                        };
-                        let sw = text_w(&p, &state, font(12.));
-                        // Every row keeps the trailing icon slot (host's crown, a guest's remove), so the states line up.
-                        let right = l + w - 34.;
-                        let nw = right - sw - 10. - (l + 42.);
-                        trunc(&p, pos2(l + 42., cy - 8.), nw, &if you { format!("{} (you)", m.name) } else { m.name.clone() }, font_w(13., Weight::Semi), t.tx);
-                        trunc(&p, pos2(l + 42., cy + 9.), nw, if m.id == room.host_id { "Host" } else { "Guest" }, font(11.5), t.tm);
-                        p.text(pos2(right, cy), Align2::RIGHT_CENTER, &state, font(12.), if room.drifting.iter().any(|d| d.0 == m.id) { t.ax } else { t.tm });
-                        if m.id == room.host_id {
-                            icon(ui, icon!("crown"), pos2(l + w - 14., cy), 15., t.ax);
-                        } else if kick && icon_button(ui, &t, ("party-kick", &m.id), pos2(l + w - 14., cy), 28., icon!("x"), 14., t.tm).clicked() {
-                            let id = m.id.clone();
-                            act = Some(Box::new(move |a: &mut App| a.party.kick(&id)));
-                        }
-                        y += 44.;
-                    }
-
-                    // Host only: join requests, each a card with accept / decline.
-                    let rows: Vec<(String, String)> = if host { room.requests.clone() } else { vec![] };
-                    if !rows.is_empty() {
-                        y += 8.;
-                        label(&p, &t, pos2(l, y + 6.), w, "Requests");
-                        y += 14.;
-                    }
-                    for (i, (id, title)) in rows.into_iter().enumerate() {
-                        let card = Rect::from_min_size(pos2(l, y + 2.), vec2(w, 56.));
-                        p.rect_filled(card, rad(12.), t.s1);
-                        let cy = card.center().y;
-                        self.avatar(ui, None, pos2(card.min.x + 10. + 16., cy), 16., Some(&title));
-                        let yw = text_w(&p, "Accept", font_w(12.5, Weight::Semi)) + 24.;
-                        let yes = Rect::from_min_size(pos2(card.max.x - 10. - yw, cy - 14.), vec2(yw, 28.));
-                        let no_c = pos2(yes.min.x - 6. - 14., cy);
-                        let tx = card.min.x + 10. + 32. + 10.;
-                        let nw = no_c.x - 14. - 8. - tx;
-                        trunc(&p, pos2(tx, cy - 8.), nw, &title, font_w(13., Weight::Semi), t.tx);
-                        trunc(&p, pos2(tx, cy + 9.), nw, "Wants to join", font(11.5), t.tm);
-                        let no_hit = press(ui, ("party-no", i), Rect::from_center_size(no_c, vec2(28., 28.)));
-                        p.circle_filled(no_c, 14., if no_hit.hovered() { t.s2 } else { t.s3 });
-                        icon(ui, icon!("x"), no_c, 13., t.tm);
-                        let yes_hit = press(ui, ("party-yes", i), yes);
-                        p.rect_filled(yes, rad(14.), if yes_hit.hovered() { t.tx.gamma_multiply(0.88) } else { t.tx });
-                        p.text(yes.center(), Align2::CENTER_CENTER, "Accept", font_w(12.5, Weight::Semi), t.s0);
-                        if let Some(ok) = [(yes_hit.clicked(), true), (no_hit.clicked(), false)].into_iter().find(|c| c.0).map(|c| c.1) {
-                            let id = id.clone();
-                            act = Some(Box::new(move |a: &mut App| a.party.answer_join(&id, ok)));
-                        }
-                        y += 56. + 6.;
-                    }
-
-                    y += 12.;
-                    if btn(ui, &t, "end", Rect::from_min_size(pos2(l, y), vec2(w, 36.)), if host { "End party" } else { "Leave party" }, false) {
-                        act = Some(Box::new(|a: &mut App| a.party.leave()));
                     }
                     y += 36.;
                 }
@@ -1273,6 +1452,8 @@ mod tests {
         let host = connect(encode("create_room", Some(&pb::Name { username: "host".into(), avatar_url: avatar.into() })));
         let created = pb::Session::decode(&wait(&host, "room_created")[..]).unwrap();
         let guest = connect(encode("join_room", Some(&pb::Join { room_code: created.room_code.clone(), username: "guest".into(), avatar_url: "https://evil.example/a".into() })));
+        let pending = pb::JoinPending::decode(&wait(&guest, "join_pending")[..]).unwrap();
+        assert_eq!((pending.host_name.as_str(), pending.position, pending.host_away), ("host", 1, false), "the joiner is told who they wait on");
         let req = pb::User::decode(&wait(&host, "join_request")[..]).unwrap();
         host.out.send(encode("approve_join", Some(&pb::Id { id: req.user_id.clone(), reason: String::new() }))).unwrap();
         let state = pb::Session::decode(&wait(&guest, "join_approved")[..]).unwrap().state.unwrap();

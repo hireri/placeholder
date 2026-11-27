@@ -482,7 +482,7 @@ func (s *Server) handleJoinRoom(c *Client, payload []byte) {
 	if roomMembersLocked(room) >= MaxClientsPerRoom {
 		room.mu.Unlock()
 		s.mu.RUnlock()
-		c.sendError(s.logger, "room_full", "Room is full")
+		c.sendError(s.logger, "room_full", fmt.Sprintf("This party is full (%d of %d)", MaxClientsPerRoom, MaxClientsPerRoom))
 		return
 	}
 	if len(room.PendingJoins) >= MaxPendingJoins {
@@ -510,8 +510,16 @@ func (s *Server) handleJoinRoom(c *Client, payload []byte) {
 	room.PendingJoins[clientID] = c
 	host := room.Host
 	hostConnected := host != nil && room.HostDisconnectedAt == nil
+	waiting := JoinPendingPayload{Position: uint32(len(room.PendingJoins)), HostAway: !hostConnected}
+	for _, u := range room.State.Users {
+		if u.UserID == room.State.HostID {
+			waiting.HostName = u.Username
+		}
+	}
 	room.mu.Unlock()
 	s.mu.RUnlock()
+
+	c.sendMessage(s.logger, MsgTypeJoinPending, waiting)
 
 	// Notify host of join request if host is currently connected.
 	if hostConnected {
@@ -579,7 +587,7 @@ func (s *Server) handleApproveJoin(c *Client, payload []byte) {
 	}
 	if roomMembersLocked(room) >= MaxClientsPerRoom {
 		room.mu.Unlock()
-		c.sendError(s.logger, "room_full", "Room is full")
+		c.sendError(s.logger, "room_full", fmt.Sprintf("This party is full (%d of %d)", MaxClientsPerRoom, MaxClientsPerRoom))
 		return
 	}
 	if !joiningClient.trySetRoom(room) {

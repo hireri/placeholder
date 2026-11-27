@@ -13,6 +13,7 @@ mod sleep;
 mod backend;
 mod data;
 mod discord;
+mod notify;
 mod live;
 mod library;
 mod media;
