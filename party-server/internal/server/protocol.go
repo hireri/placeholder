@@ -30,6 +30,7 @@ const (
 	MsgTypeBufferWait          = "buffer_wait"
 	MsgTypeMemberSync          = "member_sync"
 	MsgTypeJoinPending         = "join_pending"
+	MsgTypeJoinCancelled       = "join_cancelled" // to the host: a waiting request is gone (payload: JoinRequestPayload)
 	MsgTypeBufferComplete      = "buffer_complete"
 	MsgTypeError               = "error"
 	MsgTypePong                = "pong"

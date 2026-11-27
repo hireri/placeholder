@@ -684,3 +684,20 @@ func receiveJoinPending(t *testing.T, client *Client) {
 		t.Fatalf("message type = %q position %d, want join_pending at 1", got, pending.Position)
 	}
 }
+
+func TestCancelledJoinTellsHost(t *testing.T) {
+	server, room, host, guest := roomTestFixture()
+	delete(room.Clients, guest.clientID())
+	room.State.Users = room.State.Users[:1]
+	guest.setRoom(nil)
+
+	server.handleJoinRoom(guest, encodeTestPayload(t, MsgTypeJoinRoom, &JoinRoomPayload{RoomCode: room.Code, Username: "Guest"}))
+	receiveJoinPending(t, guest)
+	receiveTestMessage(t, host, nil)
+	server.removePendingJoin(guest)
+
+	var gone pb.JoinRequestPayload
+	if got := receiveTestMessage(t, host, &gone); got != MsgTypeJoinCancelled || gone.UserId != guest.clientID() || gone.Username != "Guest" {
+		t.Fatalf("host was not told: type=%q payload=%#v", got, &gone)
+	}
+}

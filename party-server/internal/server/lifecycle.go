@@ -232,11 +232,20 @@ func (s *Server) removePendingJoin(c *Client) {
 	}
 	clientID := c.clientID()
 	room.mu.Lock()
+	var host *Client
 	if pending, exists := room.PendingJoins[clientID]; exists && pending == c {
 		delete(room.PendingJoins, clientID)
+		if room.HostDisconnectedAt == nil {
+			host = room.Host
+		}
 	}
 	c.clearPendingRoom(room)
 	room.mu.Unlock()
+
+	// The host's list would otherwise keep a request nobody is behind.
+	if host != nil {
+		host.sendMessage(s.logger, MsgTypeJoinCancelled, JoinRequestPayload{UserID: clientID, Username: c.userName()})
+	}
 }
 
 // handleClientDisconnect handles a client disconnecting - creates a session for reconnection

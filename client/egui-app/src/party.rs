@@ -764,13 +764,18 @@ impl App {
                 room.requests.push((u.user_id, u.username));
                 self.party_alert(ctx, self.opts.notify_requests && !self.opts.party_auto_accept, "Join request", &format!("{name} wants to join your party"));
             }
+            // Someone who was waiting gave up or dropped: take their request off the host's list.
+            "join_cancelled" => {
+                let u = user();
+                if let Some(room) = &mut self.party.room {
+                    room.requests.retain(|q| q.0 != u.user_id);
+                }
+            }
             "join_rejected" | "kicked" => {
-                let reason = pb::Id::decode(b).unwrap_or_default().id;
+                // The panel says it (and a system notification if you are elsewhere), so no toast on top.
                 let what = if kind == "kicked" { "You were removed from the party" } else { "The host turned down your request" };
-                let msg = if reason.is_empty() { what.to_string() } else { format!("{what}: {reason}") };
-                crate::toast::info(msg.clone());
                 let on = if kind == "kicked" { self.opts.notify_ended } else { self.opts.notify_requests };
-                self.party_alert(ctx, on, "Listening party", &msg);
+                self.party_alert(ctx, on, "Listening party", what);
                 let host = self.party.pending.take().map(|p| p.0).unwrap_or_default();
                 self.party.close(if kind == "kicked" { Closed::Removed } else { Closed::Refused(host) });
             }
@@ -1185,38 +1190,6 @@ impl App {
                     }
                     y += 56. + 10.;
 
-                    // Nothing stacks: a lost connection is in the header, being out of step is a button on your own row,
-                    // and only people asking to come in get rows of their own (three at a time).
-                    if host && !room.requests.is_empty() {
-                        label(&p, &t, pos2(l, y + 6.), w - 30., "Wants to join");
-                        p.text(pos2(l + w, y + 6.), Align2::RIGHT_CENTER, room.requests.len().to_string(), font_w(10.5, Weight::Semi), t.tf);
-                        y += 14.;
-                        for (i, (id, title)) in room.requests.iter().take(3).enumerate() {
-                            let cy = y + 22.;
-                            self.avatar(ui, None, pos2(l + 16., cy), 16., Some(title));
-                            let yw = text_w(&p, "Accept", font_w(12.5, Weight::Semi)) + 24.;
-                            let yes = Rect::from_min_size(pos2(l + w - yw, cy - 13.), vec2(yw, 26.));
-                            let no_c = pos2(yes.min.x - 6. - 13., cy);
-                            trunc(&p, pos2(l + 42., cy), no_c.x - 13. - 8. - (l + 42.), title, font_w(13., Weight::Semi), t.tx);
-                            let no_hit = press(ui, ("party-no", i), Rect::from_center_size(no_c, vec2(26., 26.)));
-                            p.circle_filled(no_c, 13., if no_hit.hovered() { t.s2 } else { t.s3 });
-                            icon(ui, icon!("x"), no_c, 12., t.tm);
-                            let yes_hit = press(ui, ("party-yes", i), yes);
-                            p.rect_filled(yes, rad(13.), if yes_hit.hovered() { t.tx.gamma_multiply(0.88) } else { t.tx });
-                            p.text(yes.center(), Align2::CENTER_CENTER, "Accept", font_w(12.5, Weight::Semi), t.s0);
-                            if let Some(ok) = [(yes_hit.clicked(), true), (no_hit.clicked(), false)].into_iter().find(|c| c.0).map(|c| c.1) {
-                                let id = id.clone();
-                                act = Some(Box::new(move |a: &mut App| a.party.answer_join(&id, ok)));
-                            }
-                            y += 44.;
-                        }
-                        if room.requests.len() > 3 {
-                            p.text(pos2(l + 42., y + 4.), Align2::LEFT_CENTER, format!("+{} more waiting", room.requests.len() - 3), font(12.), t.tm);
-                            y += 16.;
-                        }
-                        y += 4.;
-                    }
-
                     label(&p, &t, pos2(l, y + 6.), w, "Listeners");
                     y += 14.;
                     for m in &room.members {
@@ -1266,7 +1239,38 @@ impl App {
                         }
                         y += 44.;
                     }
-                    if others == 0 {
+                    // People at the door follow the listeners (three at a time), so everyone not yet in is in one place.
+                    if host && !room.requests.is_empty() {
+                        label(&p, &t, pos2(l, y + 6.), w - 30., "Wants to join");
+                        p.text(pos2(l + w, y + 6.), Align2::RIGHT_CENTER, room.requests.len().to_string(), font_w(10.5, Weight::Semi), t.tf);
+                        y += 14.;
+                        for (i, (id, title)) in room.requests.iter().take(3).enumerate() {
+                            let cy = y + 22.;
+                            self.avatar(ui, None, pos2(l + 16., cy), 16., Some(title));
+                            let yw = text_w(&p, "Accept", font_w(12.5, Weight::Semi)) + 24.;
+                            let yes = Rect::from_min_size(pos2(l + w - yw, cy - 13.), vec2(yw, 26.));
+                            let no_c = pos2(yes.min.x - 6. - 13., cy);
+                            trunc(&p, pos2(l + 42., cy), no_c.x - 13. - 8. - (l + 42.), title, font_w(13., Weight::Semi), t.tx);
+                            let no_hit = press(ui, ("party-no", i), Rect::from_center_size(no_c, vec2(26., 26.)));
+                            p.circle_filled(no_c, 13., if no_hit.hovered() { t.s2 } else { t.s3 });
+                            icon(ui, icon!("x"), no_c, 12., t.tm);
+                            let yes_hit = press(ui, ("party-yes", i), yes);
+                            p.rect_filled(yes, rad(13.), if yes_hit.hovered() { t.tx.gamma_multiply(0.88) } else { t.tx });
+                            p.text(yes.center(), Align2::CENTER_CENTER, "Accept", font_w(12.5, Weight::Semi), t.s0);
+                            if let Some(ok) = [(yes_hit.clicked(), true), (no_hit.clicked(), false)].into_iter().find(|c| c.0).map(|c| c.1) {
+                                let id = id.clone();
+                                act = Some(Box::new(move |a: &mut App| a.party.answer_join(&id, ok)));
+                            }
+                            y += 44.;
+                        }
+                        if room.requests.len() > 3 {
+                            p.text(pos2(l + 42., y + 4.), Align2::LEFT_CENTER, format!("+{} more waiting", room.requests.len() - 3), font(12.), t.tm);
+                            y += 16.;
+                        }
+                        y += 4.;
+                    }
+
+                    if others == 0 && room.requests.is_empty() {
                         let c = pos2(l + 16., y + 22.);
                         p.circle_stroke(c, 15., egui::Stroke::new(1.5, t.s3));
                         p.text(c, Align2::CENTER_CENTER, "+", font_w(14., Weight::Semi), t.tf);
@@ -1313,7 +1317,7 @@ impl App {
                     self.avatar(ui, None, pos2(card.min.x + 14. + 26., card.center().y), 26., Some(&host));
                     let tx = card.min.x + 14. + 52. + 12.;
                     trunc(&p, pos2(tx, card.center().y - 9.), card.max.x - 12. - tx, &host, font_w(14., Weight::Bold), t.tx);
-                    let sub = if pos > 1 { format!("Host · you are number {pos} in line") } else { "Host · deciding whether to let you in".to_string() };
+                    let sub = if pos > 1 { format!("Host · number {pos} in line") } else { "Host · hasn't answered yet".to_string() };
                     trunc(&p, pos2(tx, card.center().y + 10.), card.max.x - 12. - tx, &sub, font(12.), t.tm);
                     y += 72. + 12.;
                     if btn(ui, &t, "cancel", Rect::from_min_size(pos2(l, y), vec2(w, 36.)), "Cancel request", false) {
@@ -1556,5 +1560,226 @@ mod tests {
             }
         }
         h.out.send(encode("leave_room", None)).unwrap();
+    }
+
+    /// Joins the party in PARTY_CODE as a listener with no audio and acts on commands written (one per line) to the file
+    /// in PARTY_CMDS: `pause`, `play`, `seek <secs>`, `next`, `queue <youtube id>`, `leave`. Logs what the room does.
+    /// `PARTY_CODE=ABC123 PARTY_CMDS=/tmp/cmds cargo test -p serafin join_party -- --ignored --nocapture`
+    #[test]
+    #[ignore = "joins a live room; needs PARTY_CODE and PARTY_CMDS"]
+    fn join_party() {
+        let code = std::env::var("PARTY_CODE").expect("PARTY_CODE").trim().to_uppercase();
+        let cmds = std::env::var("PARTY_CMDS").expect("PARTY_CMDS");
+        let g = connect(encode("join_room", Some(&pb::Join { room_code: code, username: "Claude (test bot)".into(), avatar_url: String::new() })));
+        let t0 = Instant::now();
+        let log = |m: String| println!("[{:5.1}s] {m}", t0.elapsed().as_secs_f32());
+        // What the room is doing, as far as the bot has heard.
+        let (mut cur, mut playing, mut pos, mut at) = (String::new(), false, 0i64, 0i64);
+        let now_pos = |g: &Conn, pos: i64, at: i64, playing: bool| g.clock.lock().unwrap().position_at(pos, at, playing);
+        let act = |g: &Conn, action: &str, track: &str, pos: i64, info: Option<pb::TrackInfo>| {
+            let captured = g.clock.lock().unwrap().now().unwrap_or(0);
+            g.out.send(encode("playback_action", Some(&pb::PlaybackAction { action: action.into(), track_id: track.into(), position: pos, track_info: info, volume: 1., captured_at_server_time: captured, ..Default::default() }))).unwrap();
+        };
+        while t0.elapsed() < Duration::from_secs(1200) {
+            if let Ok(In::Msg(k, b)) = g.inbox.recv_timeout(Duration::from_millis(200)) {
+                match k.as_str() {
+                    "join_pending" => {
+                        let p = pb::JoinPending::decode(&b[..]).unwrap();
+                        log(format!("waiting for {} (number {} in line)", p.host_name, p.position));
+                    }
+                    "join_approved" => {
+                        let s = pb::Session::decode(&b[..]).unwrap().state.unwrap_or_default();
+                        log(format!("approved: users={:?} track={:?} playing={} pos={}ms queue={}", s.users.iter().map(|u| (&u.username, u.avatar_url.len())).collect::<Vec<_>>(), s.current_track.as_ref().map(|t| &t.title), s.is_playing, s.position, s.queue.len()));
+                        if let Some(t) = &s.current_track {
+                            (cur, playing, pos, at) = (t.id.clone(), s.is_playing, s.position, s.last_update);
+                            g.out.send(encode("buffer_ready", Some(&pb::Id { id: cur.clone(), reason: String::new() }))).unwrap();
+                        }
+                    }
+                    "sync_playback" => {
+                        let a = pb::PlaybackAction::decode(&b[..]).unwrap();
+                        log(format!("{}: {} track={} pos={}ms queue={:?}", if a.origin_user_id.is_empty() { "server" } else { "someone" }, a.action, a.track_id, a.position, a.queue.iter().map(|t| t.title.as_str()).collect::<Vec<_>>()));
+                        let when = if a.server_time > 0 { a.server_time } else { 0 };
+                        match a.action.as_str() {
+                            "change_track" => {
+                                if let Some(t) = &a.track_info {
+                                    (cur, playing, pos, at) = (t.id.clone(), true, 0, when);
+                                    g.out.send(encode("buffer_ready", Some(&pb::Id { id: cur.clone(), reason: String::new() }))).unwrap();
+                                }
+                            }
+                            "play" => (playing, pos, at) = (true, a.position, when),
+                            "pause" => (playing, pos, at) = (false, a.position, when),
+                            "seek" => (pos, at) = (a.position, when),
+                            _ => {}
+                        }
+                    }
+                    "sync_state" => {
+                        let s = pb::SyncState::decode(&b[..]).unwrap();
+                        if let Some(t) = &s.current_track {
+                            (cur, playing, pos, at) = (t.id.clone(), s.is_playing, s.position, s.last_update);
+                        }
+                        log(format!("sync_state: track={:?} playing={} pos={}ms queue={}", s.current_track.map(|t| t.title), s.is_playing, s.position, s.queue.len()));
+                    }
+                    "member_sync" => {
+                        let m = pb::MemberSync::decode(&b[..]).unwrap();
+                        log(format!("member_sync: in_sync={} drift={}ms", m.in_sync, m.drift_ms));
+                    }
+                    "user_joined" | "user_left" | "user_disconnected" | "user_reconnected" | "join_rejected" | "kicked" => {
+                        let u = pb::User::decode(&b[..]).unwrap_or_default();
+                        log(format!("{k}: {} avatar={}", u.username, !u.avatar_url.is_empty()));
+                    }
+                    "error" => log(format!("error: {:?}", pb::Error::decode(&b[..]).unwrap_or_default())),
+                    _ => log(k.clone()),
+                }
+            }
+            let Ok(text) = std::fs::read_to_string(&cmds) else { continue };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let _ = std::fs::write(&cmds, "");
+            for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
+                let here = now_pos(&g, pos, at, playing);
+                log(format!("bot: {line}"));
+                match cmd {
+                    "pause" => act(&g, "pause", &cur, here, None),
+                    "play" => act(&g, "play", &cur, here, None),
+                    "seek" => act(&g, "seek", &cur, arg.parse::<i64>().unwrap_or(0) * 1000, None),
+                    "next" => act(&g, "skip_next", &cur, 0, None),
+                    "queue" => act(&g, "queue_add", "", 0, Some(pb::TrackInfo { id: arg.into(), title: arg.into(), artist: "bot".into(), duration: 200_000, thumbnail: format!("https://i.ytimg.com/vi/{arg}/hqdefault.jpg"), ..Default::default() })),
+                    "leave" => {
+                        g.out.send(encode("leave_room", None)).unwrap();
+                        std::thread::sleep(Duration::from_millis(500));
+                        return;
+                    }
+                    _ => log("unknown command".into()),
+                }
+            }
+        }
+    }
+
+    /// Hosts a room with no audio and acts on commands written (one per line) to the file in PARTY_CMDS: `approve`, `decline`,
+    /// `kick`, `song`, `pause`, `play`, `seek <secs>`, `fill` (seven more listeners join, to fill the party), `end`.
+    /// Join requests wait for `approve` or `decline`, so the joiner can see the waiting state.
+    /// `PARTY_CMDS=/tmp/cmds cargo test -p serafin host_room -- --ignored --nocapture`
+    #[test]
+    #[ignore = "hosts a live room; needs PARTY_CMDS"]
+    fn host_room() {
+        let cmds = std::env::var("PARTY_CMDS").expect("PARTY_CMDS");
+        let h = connect(encode("create_room", Some(&pb::Name { username: "Claude (test bot)".into(), avatar_url: String::new() })));
+        let room = pb::Session::decode(&wait(&h, "room_created")[..]).unwrap();
+        println!("PARTY CODE: {}", room.room_code);
+        let t0 = Instant::now();
+        let log = |m: String| println!("[{:5.1}s] {m}", t0.elapsed().as_secs_f32());
+        let (mut asking, mut members): (Vec<(String, String)>, Vec<(String, String)>) = (vec![], vec![]);
+        let mut fillers: Vec<Conn> = vec![];
+        let (mut cur, mut playing, mut pos, mut at) = (String::new(), false, 0i64, 0i64);
+        let rick = pb::TrackInfo { id: "dQw4w9WgXcQ".into(), title: "Never Gonna Give You Up".into(), artist: "Rick Astley".into(), duration: 213_000, thumbnail: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg".into(), ..Default::default() };
+        let act = |action: &str, track: &str, pos: i64, info: Option<pb::TrackInfo>| {
+            let captured = h.clock.lock().unwrap().now().unwrap_or(0);
+            h.out.send(encode("playback_action", Some(&pb::PlaybackAction { action: action.into(), track_id: track.into(), position: pos, track_info: info, replace_queue: action == "change_track", volume: 1., captured_at_server_time: captured, ..Default::default() }))).unwrap();
+        };
+        while t0.elapsed() < Duration::from_secs(1500) {
+            if let Ok(In::Msg(k, b)) = h.inbox.recv_timeout(Duration::from_millis(200)) {
+                match k.as_str() {
+                    "join_request" => {
+                        let u = pb::User::decode(&b[..]).unwrap();
+                        if u.username.starts_with("Filler") {
+                            h.out.send(encode("approve_join", Some(&pb::Id { id: u.user_id, reason: String::new() }))).unwrap();
+                        } else {
+                            log(format!("join request from {} (waiting for approve or decline)", u.username));
+                            asking.push((u.user_id, u.username));
+                        }
+                    }
+                    "join_cancelled" => {
+                        let u = pb::User::decode(&b[..]).unwrap();
+                        asking.retain(|q| q.0 != u.user_id);
+                        log(format!("{} gave up waiting", u.username));
+                    }
+                    "user_joined" | "user_left" | "user_disconnected" | "user_reconnected" => {
+                        let u = pb::User::decode(&b[..]).unwrap();
+                        if !u.username.starts_with("Filler") {
+                            log(format!("{k}: {} avatar={}", u.username, !u.avatar_url.is_empty()));
+                        }
+                        if k == "user_joined" && !u.username.starts_with("Filler") {
+                            members.push((u.user_id.clone(), u.username));
+                        }
+                        if k == "user_left" {
+                            members.retain(|m| m.0 != u.user_id);
+                        }
+                    }
+                    "sync_playback" => {
+                        let a = pb::PlaybackAction::decode(&b[..]).unwrap();
+                        log(format!("{}: {} track={} pos={}ms queue={:?}", if a.origin_user_id == room.user_id { "bot" } else { "someone" }, a.action, a.track_id, a.position, a.queue.iter().map(|t| t.title.as_str()).collect::<Vec<_>>()));
+                        match a.action.as_str() {
+                            "change_track" => (cur, playing, pos, at) = (a.track_id.clone(), true, 0, a.server_time),
+                            "play" => (playing, pos, at) = (true, a.position, a.server_time),
+                            "pause" => (playing, pos, at) = (false, a.position, a.server_time),
+                            "seek" => (pos, at) = (a.position, a.server_time),
+                            _ => {}
+                        }
+                    }
+                    "member_sync" => {
+                        let m = pb::MemberSync::decode(&b[..]).unwrap();
+                        log(format!("member_sync: in_sync={} drift={}ms", m.in_sync, m.drift_ms));
+                    }
+                    "error" => log(format!("error: {:?}", pb::Error::decode(&b[..]).unwrap_or_default())),
+                    _ => {}
+                }
+            }
+            for f in &fillers {
+                while f.inbox.try_recv().is_ok() {}
+            }
+            let Ok(text) = std::fs::read_to_string(&cmds) else { continue };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let _ = std::fs::write(&cmds, "");
+            for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
+                let here = h.clock.lock().unwrap().position_at(pos, at, playing);
+                log(format!("bot: {line}"));
+                match cmd {
+                    "approve" if !asking.is_empty() => {
+                        let (id, _) = asking.remove(0);
+                        h.out.send(encode("approve_join", Some(&pb::Id { id, reason: String::new() }))).unwrap();
+                    }
+                    "decline" if !asking.is_empty() => {
+                        let (id, _) = asking.remove(0);
+                        h.out.send(encode("reject_join", Some(&pb::Id { id, reason: String::new() }))).unwrap();
+                    }
+                    "kick" if !members.is_empty() => {
+                        let (id, _) = members.remove(0);
+                        h.out.send(encode("kick_user", Some(&pb::Id { id, reason: String::new() }))).unwrap();
+                    }
+                    "song" => act("change_track", "", 0, Some(rick.clone())),
+                    "pause" => act("pause", &cur, here, None),
+                    "play" => act("play", &cur, here, None),
+                    "seek" => act("seek", &cur, arg.parse::<i64>().unwrap_or(0) * 1000, None),
+                    "fill" => {
+                        for i in 1..=7 {
+                            fillers.push(connect(encode("join_room", Some(&pb::Join { room_code: room.room_code.clone(), username: format!("Filler {i}"), avatar_url: String::new() }))));
+                        }
+                    }
+                    "end" => {
+                        h.out.send(encode("leave_room", None)).unwrap();
+                        std::thread::sleep(Duration::from_millis(500));
+                        return;
+                    }
+                    _ => log("nothing to do".into()),
+                }
+            }
+        }
+    }
+
+    /// Asks to join the room in PARTY_CODE and gives up, as Cancel does: the host should be told. `PARTY_CODE=ABC123 cargo test -p serafin cancel_join -- --ignored --nocapture`
+    #[test]
+    #[ignore = "joins a live room; needs PARTY_CODE"]
+    fn cancel_join() {
+        let code = std::env::var("PARTY_CODE").expect("PARTY_CODE").trim().to_uppercase();
+        let g = connect(encode("join_room", Some(&pb::Join { room_code: code, username: "Cancelling bot".into(), avatar_url: String::new() })));
+        wait(&g, "join_pending");
+        // Dropping the sender ends the worker, which closes the socket.
+        drop(g.out);
+        std::thread::sleep(Duration::from_secs(2));
     }
 }

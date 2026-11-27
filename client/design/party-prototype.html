@@ -257,7 +257,7 @@ function vIdle() {
 
 function vWaiting() {
   const host = PEOPLE[S.host];
-  const line = S.position > 1 ? `Host · you are number ${S.position} in line` : 'Host · deciding whether to let you in';
+  const line = S.position > 1 ? `Host · number ${S.position} in line` : "Host · hasn't answered yet";
   return `${header()}<div class="card who">${av(S.host, host, 'big')}<div><b>${host}</b><span class="muted">${line}</span></div></div>
   <div class="foot"><button class="btn" data-act="cancel">Cancel request</button></div>`;
 }
@@ -286,18 +286,18 @@ function vInside() {
   out += `<div class="code"><div><small>Party code · ${n >= MAX ? 'full' : MAX - n + ' left'}</small><span>${S.code}</span></div><button class="btn sm" data-act="copy">${S.copied ? IC.check + 'Copied' : IC.copy + 'Copy code'}</button></div>`;
   // Nothing stacks: a lost connection is in the header, being out of step is a button on your own row,
   // and the only thing that gets its own rows is people asking to come in (three at a time).
+  out += `<div class="lbl"><span>Listeners</span></div><div class="people ${S.reconnecting ? 'dim' : ''}">` + S.members.map(m => {
+    const you = m.id === 'me';
+    const slot = m.host ? `<span class="slot">${IC.crown}</span>` : host && !you ? `<span class="slot"><button class="x" data-act="kick" data-id="${m.id}" aria-label="Remove ${m.name}">${IC.x}</button></span>` : `<span class="slot"></span>`;
+    const status = you && m.state === 'drift' ? `<span class="st">${Math.abs(m.drift).toFixed(1)}s ${m.drift > 0 ? 'ahead' : 'behind'}</span><button class="btn sm strong" data-act="resync">Sync</button>` : statusOf(m);
+    return `<div class="p ${m.state === 'offline' ? 'off' : ''}">${av(m.id, m.name)}<div class="nm"><b>${m.name}${you ? ' (you)' : ''}</b><small>${m.host ? 'Host' : 'Guest'}</small></div>${status}${slot}</div>`;
+  }).join('') + (n <= 1 && !S.requests.length ? `<div class="p"><span class="av ghost">+</span><div class="nm muted">Waiting for friends…</div></div>` : '') + `</div>`;
   const shownReq = S.requests.slice(0, 3);
   if (host && S.requests.length) {
     out += `<div class="lbl"><span>Wants to join</span><span>${S.requests.length}</span></div>` + shownReq.map(r =>
       `<div class="p">${av(r.id, r.name)}<div class="nm"><b>${r.name}</b></div><button class="x" data-act="decline" data-id="${r.id}" aria-label="Decline ${r.name}">${IC.x}</button><button class="btn sm strong" data-act="accept" data-id="${r.id}">Accept</button></div>`).join('')
       + (S.requests.length > 3 ? `<div class="more">+${S.requests.length - 3} more waiting</div>` : '');
   }
-  out += `<div class="lbl"><span>Listeners</span></div><div class="people ${S.reconnecting ? 'dim' : ''}">` + S.members.map(m => {
-    const you = m.id === 'me';
-    const slot = m.host ? `<span class="slot">${IC.crown}</span>` : host && !you ? `<span class="slot"><button class="x" data-act="kick" data-id="${m.id}" aria-label="Remove ${m.name}">${IC.x}</button></span>` : `<span class="slot"></span>`;
-    const status = you && m.state === 'drift' ? `<span class="st">${Math.abs(m.drift).toFixed(1)}s ${m.drift > 0 ? 'ahead' : 'behind'}</span><button class="btn sm strong" data-act="resync">Sync</button>` : statusOf(m);
-    return `<div class="p ${m.state === 'offline' ? 'off' : ''}">${av(m.id, m.name)}<div class="nm"><b>${m.name}${you ? ' (you)' : ''}</b><small>${m.host ? 'Host' : 'Guest'}</small></div>${status}${slot}</div>`;
-  }).join('') + (n <= 1 ? `<div class="p"><span class="av ghost">+</span><div class="nm muted">Waiting for friends…</div></div>` : '') + `</div>`;
   // 4. host options
   if (host) out += `<div class="lbl"><span>Host options</span></div><div class="opt"><div><b style="font-weight:600">Let people in automatically</b><small>Skip the request. Anyone with the code can join.</small></div><button class="tg" role="switch" aria-checked="${S.autoAccept}" data-act="auto" aria-label="Let people in automatically"></button></div>`;
   // 5. leave, last
