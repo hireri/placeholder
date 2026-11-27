@@ -16,6 +16,7 @@ mod discord;
 mod notify;
 mod live;
 mod library;
+mod logo3d;
 mod media;
 mod menu;
 mod page;

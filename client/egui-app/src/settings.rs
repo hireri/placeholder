@@ -126,6 +126,8 @@ pub struct Opts {
     pub viz_style: u8,
     /// The app logo pulses with the bass.
     pub viz_logo: bool,
+    /// The titlebar and window logo: 0 = flat, 1 = metal (a 3D model you can drag to turn), 2 = fuzzy.
+    pub logo: u8,
     /// Blurred album art glows behind the album-page cover, breathing with the bass.
     pub viz_ambient: bool,
     /// The progress bar is a waveform of the track.
@@ -136,7 +138,7 @@ pub struct Opts {
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { compact: false, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, discord_listen: true, discord_get: false, party_auto_accept: false, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, lyrics_center: false, lyrics_follow: true, lyrics_tap_seek: true, reduce_motion: false, close_tray: true, start_minimized: false, autostart: false, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false, image_cache: 96, hide_recents: false, hide_moods: false, hide_top_picks: false, hide_shorts: false, music_only: false, auto_playlists: true, auto_update: true, restore_queue: false, skip_on_error: false, output: String::new(), viz_style: 1, viz_logo: false, viz_ambient: false, viz_wave: false, viz_fps: 60 }
+        Opts { compact: false, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, discord_listen: true, discord_get: false, party_auto_accept: false, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, lyrics_center: false, lyrics_follow: true, lyrics_tap_seek: true, reduce_motion: false, close_tray: true, start_minimized: false, autostart: false, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false, image_cache: 96, hide_recents: false, hide_moods: false, hide_top_picks: false, hide_shorts: false, music_only: false, auto_playlists: true, auto_update: true, restore_queue: false, skip_on_error: false, output: String::new(), viz_style: 1, viz_logo: false, logo: 1, viz_ambient: false, viz_wave: false, viz_fps: 60 }
     }
 }
 
@@ -571,6 +573,9 @@ impl App {
         }
         if let Some(cy) = self.row(ui, pg, "Pulse the logo", "The app logo beats with the bass") {
             toggle(ui, &self.t, "viz-logo", right, cy, &mut self.opts.viz_logo);
+        }
+        if let Some(cy) = self.row(ui, pg, "Logo", "The titlebar logo; Metal is a 3D model you can drag and it springs back") {
+            self.opts.logo = segmented(ui, &self.t, "logo", right, cy, &["Flat", "Metal", "Fuzzy"], (self.opts.logo as usize).min(2)) as u8;
         }
         if let Some(cy) = self.row(ui, pg, "Ambient glow", "Soft album-art glow behind album covers") {
             toggle(ui, &self.t, "viz-ambient", right, cy, &mut self.opts.viz_ambient);
