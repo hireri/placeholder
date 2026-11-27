@@ -1282,14 +1282,13 @@ impl App {
                         y += 6.;
                         label(&p, &t, pos2(l, y + 6.), w, "Host options");
                         y += 14.;
-                        let cy = y + 24.;
-                        trunc(&p, pos2(l, cy - 8.), w - 56., "Let people in automatically", font_w(13., Weight::Semi), t.tx);
-                        trunc(&p, pos2(l, cy + 9.), w - 56., "Skip the request. Anyone with the code can join", font(11.5), t.tm);
+                        let cy = y + 20.;
+                        trunc(&p, pos2(l, cy), w - 56., "Let people in automatically", font_w(13., Weight::Semi), t.tx);
                         let mut on = self.opts.party_auto_accept;
                         if crate::settings::toggle(ui, &t, "party-auto", l + w, cy, &mut on) {
                             act = Some(Box::new(move |a: &mut App| a.opts.party_auto_accept = on));
                         }
-                        y += 48.;
+                        y += 40.;
                     }
                     y += 10.;
                     if host && self.party.confirm_end {
@@ -1328,12 +1327,12 @@ impl App {
                 // A party that did not happen or has ended: what happened, and what to do next.
                 None if self.party.closed.is_some() => {
                     let (glyph, title, body, retry) = match self.party.closed.clone().unwrap_or(Closed::Left) {
-                        Closed::Refused(h) => (icon!("x"), "Request declined".to_string(), format!("{} turned down your request.", if h.is_empty() { "The host".into() } else { h }), false),
-                        Closed::Full => (icon!("group"), format!("This party is full ({MAX} of {MAX})"), "Ask the host to make room, then try again.".into(), false),
-                        Closed::Unreachable => (icon!("x"), "Can't reach the party server".into(), "Check your connection and try again.".into(), true),
-                        Closed::Removed => (icon!("x"), "You were removed".into(), "The host removed you from the party.".into(), false),
-                        Closed::Ended => (icon!("party"), "The party has ended".into(), "The host ended it for everyone.".into(), false),
-                        Closed::Left => (icon!("check"), "You left the party".into(), "Playback is yours again.".into(), false),
+                        Closed::Refused(_) => (icon!("x"), "Request declined".to_string(), String::new(), false),
+                        Closed::Full => (icon!("group"), format!("This party is full ({MAX} of {MAX})"), String::new(), false),
+                        Closed::Unreachable => (icon!("x"), "Can't reach the party server".into(), String::new(), true),
+                        Closed::Removed => (icon!("x"), "You were removed".into(), String::new(), false),
+                        Closed::Ended => (icon!("party"), "The party has ended".into(), String::new(), false),
+                        Closed::Left => (icon!("check"), "You left the party".into(), String::new(), false),
                         Closed::Other(m) => (icon!("x"), "Something went wrong".into(), m, true),
                     };
                     let c = pos2(l + w / 2., y + 24.);
@@ -1342,10 +1341,14 @@ impl App {
                     y += 56.;
                     p.text(pos2(l + w / 2., y), Align2::CENTER_TOP, &title, font_w(15., Weight::Bold), t.tx);
                     y += 24.;
-                    let g = p.layout(body, font(13.), t.tm, w);
-                    let gh = g.size().y;
-                    p.galley(pos2(l + (w - g.size().x) / 2., y), g, t.tm);
-                    y += gh + 14.;
+                    if body.is_empty() {
+                        y += 6.;
+                    } else {
+                        let g = p.layout(body, font(13.), t.tm, w);
+                        let gh = g.size().y;
+                        p.galley(pos2(l + (w - g.size().x) / 2., y), g, t.tm);
+                        y += gh + 14.;
+                    }
                     if btn(ui, &t, "again", Rect::from_min_size(pos2(l, y), vec2(w, 36.)), if retry { "Try again" } else { "Join another party" }, true) {
                         act = Some(Box::new(|a: &mut App| a.party.closed = None));
                     }
@@ -1362,10 +1365,6 @@ impl App {
                 // Not in a party: start one or join with a code. While one is being set up, the buttons say so.
                 None => {
                     let busy = self.party.busy;
-                    let g = p.layout("Listen in sync with friends. Everyone hears the same song at the same moment, and everyone is in control.".into(), font(13.), t.tm, w);
-                    let gh = g.size().y;
-                    p.galley(pos2(l, y), g, t.tm);
-                    y += gh + 12.;
                     let start = Rect::from_min_size(pos2(l, y), vec2(w, 36.));
                     if btn(ui, &t, "start", start, if busy == Some(false) { "Starting…" } else { "Start a party" }, busy.is_none()) && busy.is_none() {
                         let (n, c, av) = (name.clone(), ctx.clone(), my_pic.clone());

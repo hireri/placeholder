@@ -958,26 +958,26 @@ impl App {
         if let Some(cy) = self.row(ui, pg, "Discord activity", "Show the song you are listening to on your Discord profile") {
             toggle(ui, &self.t, "discord", pg.right(), cy, &mut self.opts.discord);
         }
-        if let Some(cy) = self.row(ui, pg, "Keep activity when paused", "Leave the song on your profile, marked as paused, instead of clearing it") {
+        if let Some(cy) = self.row(ui, pg, "Keep activity when paused", "Show it as paused instead of clearing it") {
             toggle(ui, &self.t, "discord-paused", pg.right(), cy, &mut self.opts.discord_paused);
         }
-        if let Some(cy) = self.row(ui, pg, "Show listening party", "In a party, show how many are listening and the elapsed time instead of a progress bar") {
+        if let Some(cy) = self.row(ui, pg, "Show listening party", "Show the party size instead of a progress bar") {
             toggle(ui, &self.t, "discord-party", pg.right(), cy, &mut self.opts.discord_party);
         }
         self.sec(ui, pg, "Listening party");
-        if let Some(cy) = self.row(ui, pg, "Let people in automatically", "As host, accept join requests without asking. Anyone with the party code can join") {
+        if let Some(cy) = self.row(ui, pg, "Let people in automatically", "Accept join requests without asking") {
             toggle(ui, &self.t, "party-auto", pg.right(), cy, &mut self.opts.party_auto_accept);
         }
-        if let Some(cy) = self.row(ui, pg, "Notify about join requests", "When someone asks to join your party, and when the host answers yours") {
+        if let Some(cy) = self.row(ui, pg, "Notify about join requests", "Requests, and the host's answers") {
             toggle(ui, &self.t, "notify-requests", pg.right(), cy, &mut self.opts.notify_requests);
         }
-        if let Some(cy) = self.row(ui, pg, "Notify when people join or leave", "A system notification each time someone comes or goes") {
+        if let Some(cy) = self.row(ui, pg, "Notify when people join or leave", "Each time someone comes or goes") {
             toggle(ui, &self.t, "notify-people", pg.right(), cy, &mut self.opts.notify_people);
         }
-        if let Some(cy) = self.row(ui, pg, "Notify when the party ends", "If you are removed, or the party closes") {
+        if let Some(cy) = self.row(ui, pg, "Notify when the party ends", "Removed, or the party closes") {
             toggle(ui, &self.t, "notify-ended", pg.right(), cy, &mut self.opts.notify_ended);
         }
-        if let Some(cy) = self.row(ui, pg, "Only when Serafin is in the background", "Skip notifications while the window is in front of you") {
+        if let Some(cy) = self.row(ui, pg, "Only when Serafin is in the background", "Skip them while the window is in front") {
             toggle(ui, &self.t, "notify-background", pg.right(), cy, &mut self.opts.notify_background);
         }
     }

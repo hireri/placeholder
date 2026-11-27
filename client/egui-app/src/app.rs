@@ -901,6 +901,8 @@ impl App {
             self.video = None;
         }
         self.started = false;
+        // Open popups carry times from the old window's clock, so they would be "open" yet never drawn.
+        (self.me_menu, self.party_open, self.ctx_menu, self.palette, self.lib_menu, self.vol_open) = (None, None, None, None, false, false);
         self.pl.reset_clock();
         self.theme_anim.2 = f64::NEG_INFINITY;
     }

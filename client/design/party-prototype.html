@@ -249,7 +249,6 @@ function header(count) {
 
 function vIdle() {
   return `${header()}
-  <p class="muted" style="margin:0 0 12px">Listen in sync with friends. Everyone hears the same song at the same moment, and everyone is in control.</p>
   <button class="btn strong" data-act="start" ${S.busy ? 'disabled' : ''}>${S.busy === 'start' ? 'Starting…' : 'Start a party'}</button>
   <form class="field" data-form="join"><input id="code" placeholder="Enter a party code" maxlength="12" value="${esc(S.code === 'ZXXAK2JV' ? '' : S.code)}" autocomplete="off"><button class="btn" type="submit" ${S.busy ? 'disabled' : ''}>${S.busy === 'join' ? 'Joining…' : 'Join'}</button></form>
   ${S.error ? `<div class="err">${IC.warn}<span>${esc(S.error)}</span></div>` : ''}`;
@@ -262,16 +261,16 @@ function vWaiting() {
   <div class="foot"><button class="btn" data-act="cancel">Cancel request</button></div>`;
 }
 const CLOSED = {
-  refused: { ic: IC.x, t: 'Request declined', p: 'Mia turned down your request.', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
-  full: { ic: IC.group, t: `This party is full (${MAX} of ${MAX})`, p: 'Ask the host to make room, then try again.', a: ['Try again', 'idle'], b: ['Start your own', 'start'] },
-  unreachable: { ic: IC.wifi, t: "Can't reach the party server", p: 'Check your connection and try again.', a: ['Try again', 'idle'], b: null },
-  removed: { ic: IC.door, t: 'You were removed', p: 'Mia removed you from the party.', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
-  ended: { ic: IC.door, t: 'The party has ended', p: 'Mia ended it for everyone.', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
-  left: { ic: IC.check, t: 'You left the party', p: 'Playback is yours again.', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
+  refused: { ic: IC.x, t: 'Request declined', p: '', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
+  full: { ic: IC.group, t: `This party is full (${MAX} of ${MAX})`, p: '', a: ['Try again', 'idle'], b: ['Start your own', 'start'] },
+  unreachable: { ic: IC.wifi, t: "Can't reach the party server", p: '', a: ['Try again', 'idle'], b: null },
+  removed: { ic: IC.door, t: 'You were removed', p: '', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
+  ended: { ic: IC.door, t: 'The party has ended', p: '', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
+  left: { ic: IC.check, t: 'You left the party', p: '', a: ['Join another party', 'idle'], b: ['Start your own', 'start'] },
 };
 function vClosed() {
   const c = CLOSED[S.closed];
-  return `${header()}<div class="end"><div class="ic">${c.ic}</div><h3>${c.t}</h3><p>${c.p}</p>
+  return `${header()}<div class="end"><div class="ic">${c.ic}</div><h3>${c.t}</h3>${c.p ? `<p>${c.p}</p>` : '<div style="height:10px"></div>'}
   <button class="btn strong" data-act="${c.a[1] === 'start' ? 'start' : 'reset'}">${c.a[0]}</button>${c.b ? `<button class="btn" data-act="start">${c.b[0]}</button>` : ''}</div>`;
 }
 
@@ -299,7 +298,7 @@ function vInside() {
       + (S.requests.length > 3 ? `<div class="more">+${S.requests.length - 3} more waiting</div>` : '');
   }
   // 4. host options
-  if (host) out += `<div class="lbl"><span>Host options</span></div><div class="opt"><div><b style="font-weight:600">Let people in automatically</b><small>Skip the request. Anyone with the code can join.</small></div><button class="tg" role="switch" aria-checked="${S.autoAccept}" data-act="auto" aria-label="Let people in automatically"></button></div>`;
+  if (host) out += `<div class="lbl"><span>Host options</span></div><div class="opt"><div><b style="font-weight:600">Let people in automatically</b></div><button class="tg" role="switch" aria-checked="${S.autoAccept}" data-act="auto" aria-label="Let people in automatically"></button></div>`;
   // 5. leave, last
   out += `<div class="foot">` + (host
     ? (S.confirmEnd ? `<div class="muted" style="margin-bottom:6px">This ends the party for ${n - 1} other${n - 1 === 1 ? '' : 's'}.</div><div style="display:flex;gap:6px"><button class="btn" data-act="noend">Keep going</button><button class="btn danger" data-act="end">End party</button></div>` : `<button class="btn" data-act="${n > 1 ? 'confirm' : 'end'}">End party</button>`)
