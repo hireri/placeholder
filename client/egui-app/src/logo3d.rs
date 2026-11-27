@@ -64,7 +64,7 @@ fn ramp(accent: [u8; 3]) -> [[u8; 3]; 256] {
 }
 
 fn render_culled(px: usize, yaw: f32, pitch: f32, accent: [u8; 3], cull: bool) -> ColorImage {
-    const SS: usize = 2;
+    const SS: usize = 4;
     let (m, mc, lut) = (model(), matcap(), ramp(accent));
     let w = px * SS;
     let (sy, cy) = yaw.sin_cos();
@@ -240,33 +240,78 @@ fn fuzzy() -> &'static image::RgbaImage {
     })
 }
 
+/// Brightest unpremultiplied luma of the fuzzy render, so tinting spans the whole shade ramp.
+fn fuzzy_luma_max() -> f32 {
+    static M: OnceLock<f32> = OnceLock::new();
+    *M.get_or_init(|| {
+        fuzzy().pixels().filter(|p| p.0[3] > 0).map(|p| luma(p.0, p.0[3] as f32 / 255.)).fold(1., f32::max)
+    })
+}
+
+/// Rec. 601 luma of a premultiplied pixel with alpha `a` (0..1).
+fn luma(p: [u8; 4], a: f32) -> f32 {
+    (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / a
+}
+
 /// Visible glyph width as a fraction of the slot, matching the metal model.
 const FUZZY_FILL: f32 = 0.82;
 
-/// The still fuzzy logo in the same `size` slot as [`show`], pulsed by `scale`. Not draggable, and its colour is baked in.
-pub fn show_fuzzy(ui: &mut Ui, center: egui::Pos2, size: f32, scale: f32) {
+/// The still fuzzy logo in the same `size` slot as [`show`], pulsed by `scale`. Not draggable. Its shading is baked; the colour is the theme `accent` run through the same ramp as the metal.
+pub fn show_fuzzy(ui: &mut Ui, center: egui::Pos2, size: f32, scale: f32, accent: Color32) {
     let ctx = ui.ctx().clone();
     let src = fuzzy();
     let w = size * FUZZY_FILL;
     let (pw, ph) = (w * ctx.pixels_per_point(), w * src.height() as f32 / src.width() as f32 * ctx.pixels_per_point());
     let (pw, ph) = ((pw.round() as u32).max(1), (ph.round() as u32).max(1));
     let id = Id::unique("logo-fuzzy");
-    let tex = match ctx.data(|d| d.get_temp::<(TextureHandle, u32)>(id)) {
-        Some((t, lw)) if lw == pw => t,
+    let accent = [accent.r(), accent.g(), accent.b()];
+    let tex = match ctx.data(|d| d.get_temp::<(TextureHandle, u32, [u8; 3])>(id)) {
+        Some((t, lw, lac)) if lw == pw && lac == accent => t,
         _ => {
+            let (lut, lmax) = (ramp(accent), fuzzy_luma_max());
             let r = image::imageops::resize(src, pw, ph, image::imageops::FilterType::Lanczos3);
             let px = r.pixels().map(|p| {
                 let a = p.0[3];
-                Color32::from_rgba_premultiplied(p.0[0].min(a), p.0[1].min(a), p.0[2].min(a), a)
+                if a == 0 {
+                    return Color32::TRANSPARENT;
+                }
+                let c = lut[(luma(p.0, a as f32 / 255.) / lmax * 255.).clamp(0., 255.) as usize];
+                let k = |v: u8| (v as u32 * a as u32 / 255) as u8;
+                Color32::from_rgba_premultiplied(k(c[0]), k(c[1]), k(c[2]), a)
             });
             let t = ctx.load_texture("logo-fuzzy", ColorImage { size: [pw as usize, ph as usize], pixels: px.collect(), source_size: vec2(pw as f32, ph as f32) }, TextureOptions::LINEAR);
-            ctx.data_mut(|d| d.insert_temp(id, (t.clone(), pw)));
+            ctx.data_mut(|d| d.insert_temp(id, (t.clone(), pw, accent)));
             t
         }
     };
     let r = Rect::from_center_size(center, vec2(w, w * ph as f32 / pw as f32) * scale);
     ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0., 0.), pos2(1., 1.)), Color32::WHITE);
 }
+
+/// Linux launchers and Wayland compositors take the app icon from the icon theme, not the window, so put the chosen logo where
+/// `Icon=serafin` is looked up first. Skipped when unchanged; the cache refresh is best-effort and off the UI thread.
+#[cfg(target_os = "linux")]
+pub fn install_launcher_icon(n: u8) {
+    let bytes: &'static [u8] = match n {
+        0 => include_bytes!("../assets/logo/serafin-app-icon.png"),
+        1 => include_bytes!("../assets/logo/serafin-app-icon-metal-256.png"),
+        _ => include_bytes!("../assets/logo/serafin-app-icon-fuzzy-256.png"),
+    };
+    std::thread::spawn(move || {
+        let Some(home) = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".local/share"))) else { return };
+        let theme = home.join("icons/hicolor");
+        let file = theme.join("256x256/apps/serafin.png");
+        if std::fs::read(&file).is_ok_and(|old| old == bytes) {
+            return;
+        }
+        if std::fs::create_dir_all(file.parent().unwrap()).and_then(|_| std::fs::write(&file, bytes)).is_ok() {
+            let _ = std::process::Command::new("gtk-update-icon-cache").args(["-f", "-t"]).arg(&theme).output();
+        }
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn install_launcher_icon(_: u8) {}
 
 /// Window icon for logo choice `n` (0 flat, 1 metal, 2 fuzzy), decoded once.
 pub fn window_icon(n: u8) -> std::sync::Arc<egui::IconData> {

@@ -409,7 +409,7 @@ impl App {
         let logo = self.opts.logo.min(2);
         match logo {
             1 => crate::logo3d::show(ui, pos2(tb.min.x + 30., cy), 28., scale, t.ax),
-            2 => crate::logo3d::show_fuzzy(ui, pos2(tb.min.x + 30., cy), 28., scale),
+            2 => crate::logo3d::show_fuzzy(ui, pos2(tb.min.x + 30., cy), 28., scale, t.ax),
             _ => icon(ui, icon!("serafin"), pos2(tb.min.x + 30., cy), 30. * scale, t.ax.lerp_to_gamma(Color32::WHITE, flash)),
         }
         // Only a change (or the first frame) needs the command; the main.rs builder icon covers the flat default until then.
@@ -417,6 +417,7 @@ impl App {
         if ctx.data(|d| d.get_temp::<u8>(wid)) != Some(logo) {
             ctx.data_mut(|d| d.insert_temp(wid, logo));
             ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(crate::logo3d::window_icon(logo))));
+            crate::logo3d::install_launcher_icon(logo);
         }
         if icon_button(ui, &t, "back", pos2(tb.min.x + 71., cy), 32., icon!("back"), 16., if self.back.is_empty() { t.tf } else { t.tm }).clicked() {
             self.back();
