@@ -631,6 +631,11 @@ impl App {
         *self.party.report.lock().unwrap() = Report { track, pos_ms };
     }
 
+    /// Who we are in a party: the signed-in account's name, else the stored "Guest 1234".
+    fn party_name(&self) -> String {
+        self.user_name().unwrap_or_else(|| self.guest.clone())
+    }
+
     fn my_avatar(&self) -> String {
         self.youtube_user().and_then(|u| u.0).unwrap_or_default()
     }
@@ -656,7 +661,7 @@ impl App {
             "room_created" => {
                 let s = pb::Session::decode(b).unwrap_or_default();
                 *self.party.token.lock().unwrap() = s.session_token;
-                let name = self.user_name().unwrap_or_else(|| "You".into());
+                let name = self.party_name();
                 let mut room = Room::from_state(s.room_code, s.user_id.clone(), None);
                 room.host_id = s.user_id.clone();
                 room.members.push(Member { id: s.user_id, name, avatar: self.my_avatar(), host: true, connected: true });
@@ -976,7 +981,10 @@ impl App {
 
         let extra = live.len().saturating_sub(SHOWN);
         let shown: Vec<&(usize, f32)> = faces.iter().take(SHOWN).collect();
-        let stack = if shown.is_empty() { 0. } else { D + STEP * (shown.iter().map(|f| f.1).sum::<f32>() - 1.).max(0.) };
+        // Alone in the party, the party icon sits behind your picture; it tucks away when someone else arrives.
+        let alone = if live.len() <= 1 { 1. } else { 0. };
+        let ik = if motion { ctx.animate_value_with_time(Id::unique("party-alone"), alone, 0.28) } else { alone };
+        let stack = if shown.is_empty() { 0. } else { D + STEP * (ik + shown.iter().map(|f| f.1).sum::<f32>() - 1.).max(0.) };
         let chip = if extra > 0 { STEP } else { 0. };
         let w = if self.party.room.is_some() { (stack + chip + 14.).max(32.) } else { 32. };
         let rect = Rect::from_min_max(pos2(right - w, cy - 16.), pos2(right, cy + 16.));
@@ -990,6 +998,14 @@ impl App {
         } else {
             let mut x = rect.center().x - (stack + chip) / 2. + D / 2.;
             let mut last = x;
+            if ik > 0.001 {
+                ui.scope(|ui| {
+                    ui.set_opacity(ik.clamp(0., 1.));
+                    let c = pos2(x, cy);
+                    icon(ui, icon!("partyf"), c, 22. * ik, t.tx);
+                });
+                x += STEP * ik;
+            }
             for (i, k) in shown.iter().map(|f| (f.0, f.1)) {
                 last = x;
                 let f = &self.party.faces[i];
@@ -1047,7 +1063,7 @@ impl App {
             self.party_open = None;
             return;
         }
-        let name = self.user_name().unwrap_or_else(|| "Serafin listener".into());
+        let name = self.party_name();
         // Until the account has loaded, the name and picture would be the fallbacks, and the room would take us for someone else.
         let account_loading = matches!(&*self.data.status.lock(), crate::data::State::Idle | crate::data::State::Loading);
         let my_pic = self.my_avatar();

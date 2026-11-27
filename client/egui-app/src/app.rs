@@ -161,6 +161,8 @@ pub struct App {
     pub(crate) party_open: Option<f64>,
     pub(crate) party_btn: Rect,
     pub(crate) party_code: String,
+    /// "Guest 1234": who a signed-out listener is in a party; kept between runs.
+    pub(crate) guest: String,
     /// Private session: Discord, YouTube history and Last.fm are paused. Never saved; the time is the last playback.
     pub private: Option<std::time::Instant>,
     pub sleep: crate::sleep::Sleep,
@@ -195,11 +197,13 @@ struct Prefs {
     /// Player modes, kept only while `opts.remember_modes` is on.
     shuffle: bool,
     repeat: u8,
+    /// Name used in listening parties while signed out, so a rejoin is recognised as the same person.
+    guest: String,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, opts: Opts::default(), recents: Vec::new(), shuffle: false, repeat: 0 }
+        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, opts: Opts::default(), recents: Vec::new(), shuffle: false, repeat: 0, guest: String::new() }
     }
 }
 
@@ -326,6 +330,7 @@ impl App {
             party_open: None,
             party_btn: Rect::NOTHING,
             party_code: String::new(),
+            guest: Some(prefs.guest).filter(|g| !g.is_empty()).unwrap_or_else(|| format!("Guest {:04}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos()) % 10_000)),
             private: None,
             sleep: Default::default(),
             faded: false,
@@ -1139,7 +1144,7 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, opts: self.opts.clone(), recents: self.recents.clone(), shuffle: self.opts.remember_modes && self.pl.shuffle, repeat: if self.opts.remember_modes { self.pl.repeat } else { 0 } };
+        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, opts: self.opts.clone(), recents: self.recents.clone(), shuffle: self.opts.remember_modes && self.pl.shuffle, repeat: if self.opts.remember_modes { self.pl.repeat } else { 0 }, guest: self.guest.clone() };
         eframe::set_value(storage, PREFS, &p);
     }
 
