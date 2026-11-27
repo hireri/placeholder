@@ -17,6 +17,9 @@ pub struct LibItem {
     /// Index into `FILTERS`: 1 playlist, 2 album, 3 artist.
     pub kind: usize,
     pub editable: bool,
+    /// Why the item's source is off or unreachable; the row is greyed out and cannot be opened.
+    pub off: Option<String>,
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -58,14 +61,15 @@ impl LibItem {
     pub fn from_item(kind: usize, i: crate::data::Item) -> LibItem {
         let label = ["", "Playlist", "Album", "Artist"][kind];
         let by = i.subtitle.clone().unwrap_or_default();
-        let sub = if kind == 3 || by.is_empty() { label.to_string() } else { format!("{label} · {by}") };
-        LibItem { id: i.id, thumb: i.thumbnail, title: i.title, sub, by, kind, editable: i.editable }
+        let shown = if kind == 2 && by.is_empty() { crate::data::UNKNOWN_ARTIST } else { by.as_str() };
+        let sub = if kind == 3 || shown.is_empty() { label.to_string() } else { format!("{label} · {shown}") };
+        LibItem { id: i.id, thumb: i.thumbnail, title: i.title, sub, by, kind, editable: i.editable, off: i.unavailable.then(|| i.reason.unwrap_or_default()), source: i.source }
     }
 
     /// As a generic item, for the right-click menu.
     pub fn item(&self) -> crate::data::Item {
         let r#type = ["", "playlist", "album", "artist"][self.kind].to_string();
-        crate::data::Item { r#type, id: self.id.clone(), title: self.title.clone(), thumbnail: self.thumb.clone(), editable: self.editable, ..Default::default() }
+        crate::data::Item { r#type, id: self.id.clone(), title: self.title.clone(), thumbnail: self.thumb.clone(), editable: self.editable, source: self.source.clone(), ..Default::default() }
     }
 
     pub fn endpoint(&self) -> &'static str {
@@ -81,6 +85,15 @@ impl App {
         let ui = &mut owned;
         let p = ui.painter().clone();
         let d = self.data.clone();
+        let _ = self.sources.list(ui.ctx());
+        let off = self.sources.off_list();
+        if self.pl.off != off {
+            self.pl.off = off;
+        }
+        if self.sources.take_changed(ui.ctx()) {
+            d.reset_content();
+            d.refilter(); // suggestions were made against the old set of sources
+        }
         d.load_library(ui.ctx());
         match &*d.library.lock() {
             State::Ready(v) if !self.lib_loaded || self.lib_rev != d.lib_rev.load(std::sync::atomic::Ordering::Relaxed) => {
@@ -197,7 +210,7 @@ impl App {
         let mut order: Vec<usize> = (0..self.lib_items.len())
             .filter(|&i| {
                 let it = &self.lib_items[i];
-                (self.opts.auto_playlists || it.id != "LM") && (self.lib_filter == 0 || it.kind == self.lib_filter) && (q.is_empty() || it.title.to_lowercase().contains(&q))
+                (self.opts.auto_playlists || it.id != "LM") && !(self.opts.hide_off && it.off.is_some()) && (self.lib_filter == 0 || it.kind == self.lib_filter) && (q.is_empty() || it.title.to_lowercase().contains(&q))
             })
             .collect();
         let items = &self.lib_items;
@@ -206,6 +219,9 @@ impl App {
             LibSort::Alpha => order.sort_by_cached_key(|&i| items[i].title.to_lowercase()),
             LibSort::Creator => order.sort_by_cached_key(|&i| (items[i].by.to_lowercase(), items[i].title.to_lowercase())),
         }
+
+        // Only a list that mixes sources badges each row (items from a source that is off always do); a single-source list needs no repeating.
+        let lib_mixed = crate::sources::mixed(order.iter().map(|&i| self.lib_items[i].source.as_deref().unwrap_or("yt")));
 
         // List: virtualized by row; grids pack several items per row. Collapsed always shows the icon list.
         // View switches fade the list out, swap, then fade it in; reversing mid-fade just reverses the fade.
@@ -241,21 +257,30 @@ impl App {
         let bar = if self.lib_open { egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded } else { egui::scroll_area::ScrollBarVisibility::AlwaysHidden };
         let out = ScrollArea::vertical().id_salt("lib-list").auto_shrink(false).scroll_bar_visibility(bar)
             .show_rows(&mut lui, row_h, order.len().div_ceil(cols), |ui, range| {
+                let base = ui.opacity();
                 for r in range {
                     let (_, row) = ui.allocate_space(vec2(list.width(), row_h));
                     for c in 0..cols {
                         let Some(&ix) = order.get(r * cols + c) else { break };
                         let it = &self.lib_items[ix];
+                        let off = it.off.is_some();
+                        ui.set_opacity(if off { base * 0.55 } else { base });
                         let on = ix == cur && on_item;
                         let ax = x0 + if view == LibView::Grid { 3. } else { 0. } + c as f32 * (cw + gap);
                         let cell = Rect::from_min_size(pos2(ax, row.min.y), vec2(cw, if view == LibView::Grid { cw } else { row_h }));
                         let hit = tonal(ui, &t, ("li", ix), cell, if view == LibView::Grid { 6. } else { 10. }, (on && view != LibView::Grid).then_some(t.axc));
-                        if hit.hovered() {
+                        if let Some(why) = &it.off {
+                            crate::tip::tip(&hit, &t, why, false);
+                        } else if hit.hovered() {
                             self.data.detail(ui.ctx(), it.endpoint(), &it.id);
                         }
                         if hit.clicked() {
-                            self.lib_current = ix;
-                            open_item = Some((it.route(), it.endpoint(), it.id.clone()));
+                            if let Some(why) = &it.off {
+                                crate::toast::info(why.clone());
+                            } else {
+                                self.lib_current = ix;
+                                open_item = Some((it.route(), it.endpoint(), it.id.clone()));
+                            }
                         }
                         if let (true, Some(pos)) = (hit.secondary_clicked(), hit.interact_pointer_pos()) {
                             menu_at = Some((pos, Target::Item(it.item())));
@@ -271,16 +296,16 @@ impl App {
                             LibView::Compact => (cell.min.x + 10., cell.center().y, cell.width() - 20.),
                             LibView::List => {
                                 let art = Rect::from_center_size(pos2(cell.min.x + 26., cell.center().y), vec2(40., 40.));
-                                self.thumb(ui, it.thumb.as_deref(), art, if it.round() { 20. } else { 6. });
+                                self.thumb_g(ui, it.thumb.as_deref(), art, if it.round() { 20. } else { 6. }, off);
                                 (cell.min.x + 56., cell.center().y, cell.max.x - cell.min.x - 62.)
                             }
                             LibView::Grid => {
-                                self.thumb(ui, it.thumb.as_deref(), cell, if it.round() { cw / 2. } else { 6. });
+                                self.thumb_g(ui, it.thumb.as_deref(), cell, if it.round() { cw / 2. } else { 6. }, off);
                                 if on {
                                     tp.rect_stroke(cell.expand(2.), rad(8.), egui::Stroke::new(2., t.tx), egui::StrokeKind::Outside);
                                 }
                                 if let Some((at, size)) = badge {
-                                    if self.play_badge(ui, cell, at, size, ("lib-play", ix)) {
+                                    if !off && self.play_badge(ui, cell, at, size, ("lib-play", ix)) {
                                         play_req = Some(it.item());
                                     }
                                 }
@@ -288,24 +313,27 @@ impl App {
                             }
                             LibView::Grid2 => {
                                 let art = Rect::from_min_size(cell.min + vec2(8., 8.), vec2(cw - 16., cw - 16.));
-                                self.thumb(ui, it.thumb.as_deref(), art, if it.round() { (cw - 16.) / 2. } else { 6. });
+                                self.thumb_g(ui, it.thumb.as_deref(), art, if it.round() { (cw - 16.) / 2. } else { 6. }, off);
                                 (art.min.x, art.max.y + 8. + 8., cw - 16.)
                             }
                         };
                         if let Some((at, size)) = badge.filter(|_| view != LibView::Grid) {
-                            if self.play_badge(ui, cell, at, size, ("lib-play", ix)) {
+                            if !off && self.play_badge(ui, cell, at, size, ("lib-play", ix)) {
                                 play_req = Some(it.item());
                             }
                         }
                         if view == LibView::Compact {
                             let tr = trunc(&tp, pos2(tx, ty), tw, &it.title, font_w(13., Weight::Medium), t.tx);
                             let sx = tr.max.x + 6.;
-                            trunc(&tp, pos2(sx, ty), (tx + tw - sx).max(0.), &format!("· {}", it.sub), font(12.), t.tm);
+                            let dx = self.source_mark_if(ui, (lib_mixed || off).then_some(it.source.as_deref().unwrap_or("yt")), off, sx, ty, t.tm);
+                            trunc(&tp, pos2(sx + dx, ty), (tx + tw - sx - dx).max(0.), &format!("· {}", it.sub), font(12.), t.tm);
                         } else {
                             let dy = if view == LibView::List { 8. } else { 9. };
                             let fade = if view == LibView::List { ta } else { 1. };
                             trunc(&tp, pos2(tx, ty - if view == LibView::List { dy } else { 0. }), tw, &it.title, font_w(13., Weight::Medium), t.tx.gamma_multiply(fade));
-                            trunc(&tp, pos2(tx, ty + if view == LibView::List { 9. } else { 17. }), tw, &it.sub, font(12.), t.tm.gamma_multiply(fade));
+                            let sy = ty + if view == LibView::List { 9. } else { 17. };
+                            let dx = if fade > 0.5 { self.source_mark_if(ui, (lib_mixed || off).then_some(it.source.as_deref().unwrap_or("yt")), off, tx, sy, t.tm) } else { 0. };
+                            trunc(&tp, pos2(tx + dx, sy), (tw - dx).max(0.), &it.sub, font(12.), t.tm.gamma_multiply(fade));
                         }
                     }
                 }

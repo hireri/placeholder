@@ -64,6 +64,21 @@ fn song_of(t: &Track) -> Song {
 }
 
 impl Song {
+    /// Id of the source it came from (`yt` for YouTube Music).
+    pub fn source(&self) -> &str {
+        if self.source == "youtube" { "yt" } else { &self.source }
+    }
+
+    /// Its cover is a public URL, safe to hand to Discord. A server's cover URL carries its API key or token and points at a LAN address.
+    pub fn public_cover(&self) -> bool {
+        matches!(self.source().split('-').next(), Some("yt" | "soundcloud" | "spotify" | "bandcamp"))
+    }
+
+    /// The artist credit as shown: the placeholder when the song has none.
+    pub fn artist_line(&self) -> &str {
+        if self.artist.is_empty() { crate::data::UNKNOWN_ARTIST } else { &self.artist }
+    }
+
     /// YouTube id the stream comes from; empty until a Spotify song is matched.
     pub fn vid(&self) -> &str {
         &self.vid
@@ -128,6 +143,8 @@ pub struct Player {
     pub no_dupes: bool,
     /// A song that fails to play is skipped (a setting), up to `fails` times in a row.
     pub skip_on_error: bool,
+    /// (source id, reason) for each source that is turned off or unreachable; set by the app. Their songs stay queued but are skipped.
+    pub off: Vec<(String, String)>,
     fails: usize,
     /// Queue row being dragged by its handle (queue index).
     qdrag: Option<usize>,
@@ -192,13 +209,13 @@ fn stream(vid: &str, title: &str, artist: &str) -> Result<(String, audio::Stream
     } else {
         vid.to_string()
     };
-    let info = backend::get(&format!("/stream/{vid}"))?;
+    let info = backend::get(&format!("/music/stream/{vid}"))?;
     Ok((vid, info))
 }
 
 impl Player {
     pub fn new(engine: audio::Engine) -> Self {
-        Player { engine, quality: None, queue: vec![], cur: 0, playing: false, pos: 0., loaded: false, scrub: false, seeks: 0, pending: None, req: 0, retried: false, error: None, shuffle: false, repeat: 0, endless: false, no_dupes: false, skip_on_error: false, fails: 0, qdrag: None, qgen: 0, qgrab: 26., qjump: None, moved: None, more: None, seeded: String::new(), liked: false, like: None, like_event: None, scroll: 0., lyr_anim: LyrAnim::default(), card_scroll: 0., lyr: Lyr::Idle, romaji: false, lyr_size: 1., shown: (PlayerView::Art, f64::NEG_INFINITY), ahead: None, queued: None }
+        Player { engine, quality: None, queue: vec![], cur: 0, playing: false, pos: 0., loaded: false, scrub: false, seeks: 0, pending: None, req: 0, retried: false, error: None, shuffle: false, repeat: 0, endless: false, no_dupes: false, skip_on_error: false, off: vec![], fails: 0, qdrag: None, qgen: 0, qgrab: 26., qjump: None, moved: None, more: None, seeded: String::new(), liked: false, like: None, like_event: None, scroll: 0., lyr_anim: LyrAnim::default(), card_scroll: 0., lyr: Lyr::Idle, romaji: false, lyr_size: 1., shown: (PlayerView::Art, f64::NEG_INFINITY), ahead: None, queued: None }
     }
 
     /// Drops every stored egui timestamp. A new window's `Context` restarts its clock near zero, so times taken from the
@@ -214,8 +231,15 @@ impl Player {
         self.queue.get(self.cur)
     }
 
+    /// The next song that can play: songs from a source that is turned off stay queued but are passed over.
     pub fn next_song(&self) -> Option<&Song> {
-        self.queue.get(self.cur + 1)
+        self.queue.iter().skip(self.cur + 1).find(|s| self.off_of(s).is_none())
+    }
+
+    /// Why `s` cannot play (its source is off or unreachable), if so.
+    pub fn off_of(&self, s: &Song) -> Option<&str> {
+        let id = if s.source == "youtube" { "yt" } else { s.source.as_str() };
+        self.off.iter().find(|(o, _)| o == id).map(|(_, r)| r.as_str())
     }
 
     /// True when the engine holds the current song's stream.
@@ -342,6 +366,9 @@ impl Player {
 
     /// Plays queue item `idx` from `at` seconds. The stream is looked up on a worker; `tick` loads it when it arrives.
     fn play_at(&mut self, ctx: &egui::Context, idx: usize, at: f32) {
+        if let Some(why) = self.queue.get(idx).and_then(|s| self.off_of(s)).map(str::to_string) {
+            return crate::toast::info(why);
+        }
         self.enter(ctx, idx);
         self.resolve(ctx, at);
     }
@@ -420,20 +447,25 @@ impl Player {
     }
 
     pub fn next(&mut self, ctx: &egui::Context) {
-        if self.cur + 1 < self.queue.len() {
-            self.play_at(ctx, self.cur + 1, 0.);
-        } else if self.repeat == 1 && !self.queue.is_empty() {
-            self.play_at(ctx, 0, 0.);
-        } else {
-            self.halt();
+        let playable = |i: usize| self.off_of(&self.queue[i]).is_none();
+        let target = (self.cur + 1..self.queue.len()).find(|&i| playable(i)).or_else(|| if self.repeat == 1 { (0..self.queue.len()).find(|&i| playable(i)) } else { None });
+        match target {
+            Some(i) => {
+                let skipped = i.saturating_sub(self.cur + 1);
+                if skipped > 0 {
+                    crate::toast::info(format!("Skipped {skipped} song{} from a source that is turned off", if skipped == 1 { "" } else { "s" }));
+                }
+                self.play_at(ctx, i, 0.);
+            }
+            None => self.halt(),
         }
     }
 
     pub fn prev(&mut self, ctx: &egui::Context) {
-        if self.pos > 3. || self.cur == 0 {
-            self.seek(0.);
-        } else {
-            self.play_at(ctx, self.cur - 1, 0.);
+        let before = (0..self.cur).rev().find(|&i| self.off_of(&self.queue[i]).is_none());
+        match before.filter(|_| self.pos <= 3.) {
+            Some(i) => self.play_at(ctx, i, 0.),
+            None => self.seek(0.),
         }
     }
 
@@ -544,7 +576,7 @@ impl Player {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(backend::get(&format!("/youtube/radio/{vid}")));
+            let _ = tx.send(backend::get(&format!("/music/radio/{vid}")));
             ctx.request_repaint();
         });
         self.more = Some(rx);
@@ -561,7 +593,7 @@ impl Player {
             album: Some(s.album.clone()).filter(|a| !a.is_empty()),
             duration_sec: Some(s.dur),
             thumbnail: s.thumbnail.clone(),
-            source: "youtube".into(),
+            source: s.source.clone(),
             artist_id: s.artist_id.clone(),
             album_id: s.album_id.clone(),
             ..Default::default()
@@ -574,7 +606,7 @@ impl Player {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(backend::post(&format!("/youtube/like/{vid}?on={on}")));
+            let _ = tx.send(backend::post(&format!("/music/like/{vid}?on={on}")));
             ctx.request_repaint();
         });
         self.like = Some((on, track, rx));
@@ -819,7 +851,10 @@ impl App {
         // Ink: text and controls over the backdrop switch to dark tones when the cover is bright, so they stay readable.
         // 0.575 is where white and dark ink have equal contrast; the faint tiers keep a lightness gap from mid-tone backdrops.
         // The controls sit on the cover's lower 40%; the lyrics/queue body sits on a different band, so it gets its own ink.
+        // MilkDrop paints over the backdrop, so the cover's brightness says nothing: always white ink.
+        let milk = view == PlayerView::Viz && self.opts.viz_style.max(1) == crate::viz::MILKDROP;
         let tones = |ctx: &egui::Context, key: &str, l: f32| {
+            let l = if milk { 0. } else { l };
             let dark = ctx.calm_value(ui_id.with(key), if l > 0.575 { 1. } else { 0. }, 0.4);
             let ink = |light: f32, gap: f32, dark_l: f32| mix(oklch(light.max((l + gap).min(0.9)), 0.02, t.hue), oklch(dark_l, 0.02, t.hue), dark);
             let theme = Theme {
@@ -872,6 +907,9 @@ impl App {
         // Cover: a square at the top of the art view (a wide video thumbnail floats instead), a 46px thumbnail in the compact header.
         let ident_top = base + 12. + 32. + 14.;
         let aspect = url.as_deref().and_then(|u| cover_aspect(ui.ctx(), u, square.size()));
+        // A cover that fails to load (a server's URL for a song with no art can 404) must not keep the previous song's cover up
+        // forever: the crossfade below only swaps once the new cover has loaded.
+        let url = url.filter(|u| aspect.is_some() || !cover_broken(ui.ctx(), u, square.size()));
         let wide = aspect.filter(|a| *a > 1.2);
         // A wide cover is a video's: with videos on, the video itself plays in the floating rect (paced by the audio playhead).
         let want = (self.video_on && wide.is_some() && open > 0.5).then(|| self.pl.song().map(|s| s.vid.clone())).flatten().filter(|v| !v.is_empty());
@@ -984,7 +1022,7 @@ impl App {
             let end = cr.max.y + 1.;
             let fp = ui.painter().with_clip_rect(Rect::from_min_max(cr.min, pos2(cr.max.x, end)));
             if let Some(o) = old_blur.filter(|_| f < 1.) {
-                fade_blur(&fp, o, c, square, cr.center().y, end, dis);
+                fade_blur_under(&fp, o, c, square, cr.center().y, end, dis, f);
             }
             if let Some(b) = cur_blur {
                 fade_blur(&fp, b, c, square, cr.center().y, end, dis * f);
@@ -1039,7 +1077,7 @@ impl App {
         let fade = self.fade();
         let pl = &mut self.pl;
         let dur = pl.dur();
-        let (title, artist, album) = pl.song().map_or_else(|| ("Nothing playing".to_string(), "Pick a song to start listening".to_string(), String::new()), |s| (s.title.clone(), s.artist.clone(), s.album.clone()));
+        let (title, artist, album) = pl.song().map_or_else(|| ("Nothing playing".to_string(), "Pick a song to start listening".to_string(), String::new()), |s| (s.title.clone(), s.artist_line().to_string(), s.album.clone()));
         let artist_id = pl.song().and_then(|s| s.artist_id.clone());
 
         // The pointer only moves the shown playhead; playback carries on and the new spot is committed on release.
@@ -1168,9 +1206,10 @@ impl App {
         let cy = lerp(body_bottom - 50. + 23.0..=ident_top + 23., va);
         let tx = lerp(x0..=small.max.x + 10., va);
         let text_w = x1 - 72. - tx;
-        let title_r = trunc(&p, pos2(tx, cy - 9.), text_w, &title, font_w(15., Weight::Bold), it.tx);
-        let badge = if pl.song().is_some_and(|s| s.explicit) { explicit_badge(&p, pos2(tx, cy + 10.), it.s1, it.tm, 14.) } else { 0. };
-        let artist_r = trunc(&p, pos2(tx + badge, cy + 10.), text_w - badge, &artist, font(13.), it.tm);
+        let explicit = pl.song().is_some_and(|s| s.explicit).then_some((16., it.tm));
+        let title_r = title_trunc(ui, &p, pos2(tx, cy - 9.), text_w, &title, font_w(15., Weight::Bold), it.tx, explicit);
+        let mark = pl.song().filter(|_| self.sources.multi()).map_or(0., |s| crate::live::source_mark_at(ui, &self.t, &s.source, &self.sources.name(&s.source), tx, cy + 10., it.tm));
+        let artist_r = trunc(&p, pos2(tx + mark, cy + 10.), text_w - mark, &artist, font(13.), it.tm);
         let (mut title_click, mut artist_click) = (false, false);
         if !empty {
             let resp = ui.interact(title_r, ui.scope_id().with("pl-title"), Sense::click());
@@ -1249,9 +1288,18 @@ impl App {
                     let now = ui.input(|i| i.time);
                     let ctx = ui.ctx().clone();
                     let (ls, gap_row) = (pl.lyr_size, GAP_ROW * pl.lyr_size);
-                    let gs: Vec<_> = l.lines.iter().map(|(_, tx)| bp.layout(tx.clone(), font_w(30. * ls, Weight::Extra), Color32::WHITE, w)).collect();
+                    let mid = self.opts.lyrics_center;
+                    // Centered jobs anchor each wrapped row around x = 0, so every row (not just the block) is centered.
+                    let lay = |tx: &str, f: egui::FontId| {
+                        let mut j = egui::text::LayoutJob::simple(tx.to_owned(), f, Color32::WHITE, w);
+                        if mid {
+                            j.halign = egui::Align::Center;
+                        }
+                        bp.layout_job(j)
+                    };
+                    let gs: Vec<_> = l.lines.iter().map(|(_, tx)| lay(tx, font_w(30. * ls, Weight::Extra))).collect();
                     // Romaji sits under its line in a smaller face, drawn separately so it can be dimmer.
-                    let rs: Vec<_> = (0..n).map(|i| l.romaji.get(i).filter(|r| !r.is_empty()).map(|r| bp.layout(r.clone(), font_w(17. * ls, Weight::Medium), Color32::WHITE, w))).collect();
+                    let rs: Vec<_> = (0..n).map(|i| l.romaji.get(i).filter(|r| !r.is_empty()).map(|r| lay(r, font_w(17. * ls, Weight::Medium)))).collect();
                     let ex = |i: usize| rs[i].as_ref().map_or(0., |r| r.size().y + 2.);
                     // Instrumental breaks (empty lines) swell open while they play: a row of three dots that fill with the break.
                     let until = |i: usize| l.lines.get(i + 1).map_or(f32::INFINITY, |n| n.0);
@@ -1335,7 +1383,7 @@ impl App {
                     });
                     let hover_ok = l.synced && self.opts.lyrics_tap_seek && b.rect_contains_pointer(area) && !btn.is_some_and(|r| ui.rect_contains_pointer(r));
                     let scroll_line = cur.unwrap_or(0);
-                    let lx = |g: &std::sync::Arc<egui::Galley>| if self.opts.lyrics_center { x0 + (w - g.size().x) / 2. } else { x0 };
+                    let lx = |_: &std::sync::Arc<egui::Galley>| if mid { x0 + w / 2. } else { x0 };
                     for (i, g) in gs.into_iter().enumerate() {
                         let gap = l.lines[i].1.is_empty();
                         let rh = if gap { gap_row * swell[i] } else { g.size().y + ex(i) + 2. * GLOW_ROOM };
@@ -1458,9 +1506,17 @@ impl App {
                 let clip = Rect::from_min_max(pos2(list.min.x, slot.max(list.min.y)), list.max);
                 let vp = bp.with_clip_rect(clip);
                 // Returns (clicked, removed, right-click position, drag handle). Only upcoming rows have a remove button and a handle.
+                // Songs from a source that is off stay in the queue, greyed out and skipped; the source's mark shows with 2+ sources on.
+                let (offs, th) = (pl.off.clone(), self.t);
+                let names = (self.sources.multi() && crate::sources::mixed(pl.queue.iter().map(Song::source))).then(|| self.sources.names());
                 let row = |b: &mut egui::Ui, id: usize, s: &Song, qy: f32, on: bool, removable: bool, pad: f32, alpha: f32| -> (bool, bool, Option<egui::Pos2>, Option<egui::Response>) {
+                    let sid = if s.source == "youtube" { "yt" } else { s.source.as_str() };
+                    let why = offs.iter().find(|(o, _)| o == sid).map(|(_, r)| r.as_str());
                     let r = Rect::from_min_size(pos2(x0, qy), vec2(w, 52.));
                     let resp = press(b, ("q", id), r);
+                    if let Some(w) = why {
+                        crate::tip::tip(&resp, &th, w, false);
+                    }
                     let play = !on && resp.clicked();
                     let menu = resp.interact_pointer_pos().filter(|_| resp.secondary_clicked());
                     let cy = r.center().y;
@@ -1484,6 +1540,7 @@ impl App {
                     let aspect = s.thumbnail.as_deref().and_then(|u| cover_aspect(b.ctx(), u, vec2(38., 38.))).filter(|&a| a > 1.3).unwrap_or(1.);
                     let art = Rect::from_center_size(pos2(r.min.x + pad + 19., cy), vec2(38., 38. / aspect));
                     match &s.thumbnail {
+                        Some(u) if why.is_some() => paint_cover_gray(b, u, art, rad(6.), Color32::WHITE),
                         Some(u) => paint_cover(b, u, art, rad(6.), Color32::WHITE),
                         None => {
                             b.painter().rect_filled(art, rad(6.), it.s3);
@@ -1491,10 +1548,13 @@ impl App {
                     }
                     let tx = art.max.x + 10.;
                     let tw = (r.max.x - 30. - tx).max(0.);
+                    let mark = names.as_ref().map_or(0., |n| {
+                        let name = n.iter().find(|(i, _)| i == sid).map_or(sid, |(_, nm)| nm.as_str());
+                        crate::live::source_mark_at(b, &th, sid, name, tx, cy + 9., if why.is_some() { it.tf } else { it.tm })
+                    });
                     let lp = b.painter().with_clip_rect(clip);
-                    trunc(&lp, pos2(tx, cy - 8.), tw, &s.title, font_w(13., Weight::Medium), if on { it.ax } else { it.tx });
-                    let badge = if s.explicit { explicit_badge(&lp, pos2(tx, cy + 9.), it.s1, it.tm, 13.) } else { 0. };
-                    trunc(&lp, pos2(tx + badge, cy + 9.), tw - badge, &s.artist, font(12.), it.tm);
+                    title_trunc(b, &lp, pos2(tx, cy - 8.), tw, &s.title, font_w(13., Weight::Medium), if why.is_some() { it.tf } else if on { it.ax } else { it.tx }, s.explicit.then_some((14., it.tm)));
+                    trunc(&lp, pos2(tx + mark, cy + 9.), tw - mark, s.artist_line(), font(12.), if why.is_some() { it.tf } else { it.tm });
                     (play, gone, menu, handle.map(|h| h.0))
                 };
                 let mut b = App::region(&mut b, list);

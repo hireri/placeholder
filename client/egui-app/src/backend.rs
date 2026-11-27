@@ -89,7 +89,7 @@ fn daemon_command() -> Command {
 /// Blocking on first call: starts the daemon and reads its `{"port":..,"token":..}` handshake line.
 fn conn() -> Result<&'static (String, String), String> {
     CONN.get_or_init(|| {
-        let mut child = daemon_command().env("METROLIST_LOG", "1").env("SERAFIN_POTOKEN_HELPER", potoken_helper()).stdout(Stdio::piped()).stderr(log_file()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
+        let mut child = daemon_command().env("METROLIST_LOG", "1").env("SERAFIN_EXIT_ON_STDIN_EOF", "1").env("SERAFIN_POTOKEN_HELPER", potoken_helper()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log_file()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).map_err(|e| e.to_string())?;
         if line.trim().is_empty() {
@@ -232,6 +232,19 @@ fn send_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(method: &str, 
         Ok(r) => r.into_json().map_err(|e| e.to_string()),
         Err(e) => Err(failure(e)),
     }
+}
+
+/// Blocking JSON request whose answer is empty (the daemon answers 204); call from a worker thread.
+pub fn send_json_ok<B: serde::Serialize>(method: &str, path: &str, body: &B) -> Result<(), String> {
+    let (url, token) = conn()?;
+    let body = serde_json::to_string(body).map_err(|e| e.to_string())?;
+    ureq::request(method, &format!("{url}{path}")).set("X-Metrolist-Token", token).set("Content-Type", "application/json").send_string(&body).map(drop).map_err(failure)
+}
+
+/// Blocking PUT of raw bytes (an image) with its content type; the daemon answers 204.
+pub fn put_bytes(path: &str, mime: &str, bytes: &[u8]) -> Result<(), String> {
+    let (url, token) = conn()?;
+    ureq::put(&format!("{url}{path}")).set("X-Metrolist-Token", token).set("Content-Type", mime).send_bytes(bytes).map(drop).map_err(failure)
 }
 
 /// The daemon's `error` message for an HTTP failure, else the transport error.

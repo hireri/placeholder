@@ -1,6 +1,6 @@
 //! Login popup: opens the service's own sign-in page in a wry webview, waits until the session
 //! exists, then hands the credentials straight to the daemon (they never pass through the UI).
-//! Usage: serafin-login <youtube|spotify>   env: METROLIST_URL, METROLIST_TOKEN, METROLIST_DATA
+//! Usage: serafin-login <youtube|spotify|soundcloud>   env: METROLIST_URL, METROLIST_TOKEN, METROLIST_DATA
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
@@ -17,9 +17,11 @@ use wry::{PageLoadEvent, WebContext, WebViewBuilder};
 
 const YT_START: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F";
 const SP_START: &str = "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F";
+const SC_START: &str = "https://soundcloud.com/signin";
 const YT_JS: &str = "JSON.stringify({v:(window.ytcfg&&ytcfg.get('VISITOR_DATA'))||null,d:(window.ytcfg&&ytcfg.get('DATASYNC_ID'))||null,l:(window.ytcfg&&ytcfg.get('LOGGED_IN'))||false})";
 
 enum Ev {
+    Tick,
     Loaded(String),
     YtScript(String),
 }
@@ -47,8 +49,9 @@ fn main() {
     let (start, host) = match service.as_str() {
         "youtube" => (YT_START, "https://music.youtube.com"),
         "spotify" => (SP_START, "https://open.spotify.com"),
+        "soundcloud" => (SC_START, "https://soundcloud.com"),
         _ => {
-            eprintln!("usage: serafin-login <youtube|spotify>");
+            eprintln!("usage: serafin-login <youtube|spotify|soundcloud>");
             std::process::exit(2);
         }
     };
@@ -56,7 +59,7 @@ fn main() {
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
     let proxy = event_loop.create_proxy();
     let window = WindowBuilder::new()
-        .with_title(if service == "youtube" { "Sign in to YouTube Music" } else { "Sign in to Spotify" })
+        .with_title(match service.as_str() { "youtube" => "Sign in to YouTube Music", "soundcloud" => "Sign in to SoundCloud", _ => "Sign in to Spotify" })
         .with_inner_size(tao::dpi::LogicalSize::new(480.0, 720.0))
         .build(&event_loop)
         .unwrap();
@@ -75,7 +78,17 @@ fn main() {
     let webview = builder.build_gtk(window.default_vbox().unwrap());
     let webview = webview.unwrap();
 
-    let mut ok = false;
+    // SoundCloud is a single-page app: signing in changes the page without a load event, so look for the cookie on a timer too.
+    if service == "soundcloud" {
+        let p = proxy.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            if p.send_event(Ev::Tick).is_err() {
+                break;
+            }
+        });
+    }
+    let (mut ok, mut ticks) = (false, 0u32);
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
         match event {
@@ -85,10 +98,32 @@ fn main() {
                     let _ = webview.evaluate_script_with_callback(YT_JS, move |r| {
                         let _ = p.send_event(Ev::YtScript(r));
                     });
+                } else if service == "soundcloud" {
+                    if let Some(c) = webview.cookies_for_url(host).unwrap_or_default().iter().find(|c| c.name() == "oauth_token") {
+                        match post("/auth/soundcloud", serde_json::json!({ "token": c.value() })) {
+                            Ok(()) => { ok = true; *flow = ControlFlow::Exit }
+                            Err(e) => eprintln!("daemon rejected credentials: {e}"),
+                        }
+                    }
                 } else if let Some(c) = webview.cookies_for_url(host).unwrap_or_default().iter().find(|c| c.name() == "sp_dc") {
                     match post("/auth/spotify", serde_json::json!({ "spDc": c.value() })) {
                         Ok(()) => { ok = true; *flow = ControlFlow::Exit }
                         Err(e) => eprintln!("daemon rejected credentials: {e}"),
+                    }
+                }
+            }
+            Event::UserEvent(Ev::Tick) if !ok => {
+                let all = webview.cookies().unwrap_or_default();
+                if let Some(c) = all.iter().find(|c| c.name() == "oauth_token" && c.domain().is_none_or(|d| d.contains("soundcloud.com"))) {
+                    match post("/auth/soundcloud", serde_json::json!({ "token": c.value() })) {
+                        Ok(()) => { ok = true; *flow = ControlFlow::Exit }
+                        Err(e) => eprintln!("daemon rejected credentials: {e}"),
+                    }
+                } else {
+                    ticks += 1;
+                    if ticks % 10 == 0 {
+                        let names: Vec<String> = all.iter().map(|c| format!("{}@{}", c.name(), c.domain().unwrap_or("?"))).collect();
+                        eprintln!("soundcloud login: no oauth_token yet; cookies: {}", names.join(", "));
                     }
                 }
             }

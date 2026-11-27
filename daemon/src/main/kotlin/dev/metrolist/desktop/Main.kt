@@ -30,7 +30,7 @@ import java.util.Base64
 
 @Serializable private data class ErrorDto(val error: String)
 
-private val creds = CredentialStore()
+private val creds = Sources.store
 
 private suspend fun status(): AuthStatus {
     val stored = creds.load()
@@ -73,12 +73,24 @@ fun main() {
     val server = embeddedServer(CIO, host = "127.0.0.1", port = System.getenv("METROLIST_PORT")?.toInt() ?: 0) {
         install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true; encodeDefaults = true }) }
         install(StatusPages) {
+            exception<IllegalArgumentException> { call, e -> call.respond(HttpStatusCode.BadRequest, ErrorDto(e.message ?: "invalid request")) }
+            exception<UnsupportedOperationException> { call, e -> call.respond(HttpStatusCode.NotImplemented, ErrorDto(e.message ?: "unsupported")) }
             exception<Throwable> { call, e -> e.printStackTrace(); call.respond(HttpStatusCode.BadGateway, ErrorDto(e.message ?: e::class.simpleName ?: "error")) }
         }
         install(TokenGuard(token))
 
         routing {
+            // A turned-off YouTube Music makes no Google calls: its legacy routes are refused before they run.
+            intercept(io.ktor.server.application.ApplicationCallPipeline.Plugins) {
+                val p = call.request.local.uri
+                if ((p.startsWith("/youtube/") || p.startsWith("/stream/") || p.startsWith("/video/")) && !creds.load().youtubeEnabled) {
+                    call.respond(HttpStatusCode.Conflict, ErrorDto("YouTube Music is turned off"))
+                    finish()
+                }
+            }
             get("/health") { call.respondText("ok") }
+
+            sourceRoutes()
 
             get("/settings") { call.respond(Settings.get()) }
             put("/settings") {
@@ -165,7 +177,16 @@ fun main() {
     }
     server.start(wait = false)
     val port = runBlocking { server.engine.resolvedConnectors().first().port }
+    Hls.base = "http://127.0.0.1:$port"; Hls.token = token
     println("""{"port":$port,"token":"$token"}""")
     System.out.flush()
+    if (System.getenv("SERAFIN_EXIT_ON_STDIN_EOF") != null) {
+        // The client holds our stdin; however it dies, the OS closes the pipe. Exit then, helpers included, instead of lingering.
+        kotlin.concurrent.thread(isDaemon = true) {
+            System.`in`.use { while (it.read() != -1) Unit }
+            ProcessHandle.current().descendants().forEach { it.destroy() }
+            kotlin.system.exitProcess(0)
+        }
+    }
     Thread.currentThread().join()
 }

@@ -1,5 +1,7 @@
 // Discord Rich Presence over the local Discord client's IPC socket (no OAuth: the desktop client is already signed in).
 
+use std::collections::HashMap;
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use discord_rich_presence::{
@@ -32,6 +34,41 @@ pub struct Discord {
     shown: Option<Shown>,
     /// Position and time of the last push, to detect seeks.
     last: (f32, Instant),
+    covers: HashMap<String, Option<String>>,
+    lookup: Option<(String, Receiver<Option<Option<String>>>)>,
+    /// No new lookup before this (after a failed request).
+    lookup_after: Instant,
+}
+
+#[derive(serde::Deserialize)]
+struct CoverReply {
+    url: Option<String>,
+}
+
+/// Discord rejects text under 2 or over 128 characters: cut long text, pad short with trailing spaces.
+fn field(s: &str) -> String {
+    let mut t: String = s.chars().take(128).collect();
+    while t.chars().count() < 2 {
+        t.push(' ');
+    }
+    t
+}
+
+/// First artist of a joined credit.
+fn first_artist(a: &str) -> &str {
+    // ponytail: splits on common separators, so a band named "A, B" loses its tail; harmless for a search.
+    a.split([',', '&', ';']).next().unwrap_or(a).trim()
+}
+
+/// Public search/page link for a server song, built from metadata only. `kind`: 1 Last.fm, 2 MusicBrainz.
+pub fn meta_link(kind: u8, artist: &str, title: &str) -> Option<(&'static str, String)> {
+    use crate::backend::enc;
+    let artist = first_artist(artist);
+    match kind {
+        1 => Some(("View on Last.fm", format!("https://www.last.fm/music/{}/_/{}", enc(artist), enc(title)))),
+        2 => Some(("Look up on MusicBrainz", format!("https://musicbrainz.org/search?query={}&type=recording", enc(&format!("{artist} {title}"))))),
+        _ => None,
+    }
 }
 
 impl Discord {
@@ -42,7 +79,45 @@ impl Discord {
             next_try: Instant::now(),
             shown: None,
             last: (0., Instant::now()),
+            covers: HashMap::new(),
+            lookup: None,
+            lookup_after: Instant::now(),
         }
+    }
+
+    /// Cover for a server song from the daemon's MusicBrainz lookup: the cached answer, or None while it is fetched (one request at a time; the repaint on arrival refreshes the presence).
+    pub fn lookup_cover(&mut self, ctx: &eframe::egui::Context, artist: &str, album: &str, title: &str) -> Option<String> {
+        let artist = first_artist(artist);
+        // Without an album the title is the key, so singles don't share one answer.
+        let key = format!("{artist}\0{album}\0{}", if album.is_empty() { title } else { "" });
+        if let Some((k, rx)) = &self.lookup {
+            match rx.try_recv() {
+                Ok(r) => {
+                    match r {
+                        Some(url) => drop(self.covers.insert(k.clone(), url)),
+                        None => self.lookup_after = Instant::now() + RETRY * 4,
+                    }
+                    self.lookup = None;
+                }
+                Err(TryRecvError::Disconnected) => self.lookup = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(c) = self.covers.get(&key) {
+            return c.clone();
+        }
+        if self.lookup.is_none() && !artist.is_empty() && Instant::now() >= self.lookup_after {
+            let (tx, rx) = channel();
+            let path = format!("/cover?artist={}&album={}&title={}", crate::backend::enc(artist), crate::backend::enc(album), crate::backend::enc(title));
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                // Err (daemon unreachable) is reported as None so the miss isn't cached.
+                let _ = tx.send(crate::backend::get::<CoverReply>(&path).ok().map(|r| r.url.filter(|u| u.starts_with("https://"))));
+                ctx.request_repaint();
+            });
+            self.lookup = Some((key, rx));
+        }
+        None
     }
 
     fn ensure(&mut self) -> bool {
@@ -97,7 +172,7 @@ impl Discord {
             .activity_type(ActivityType::Listening)
             .name("Serafin")
             .status_display_type(StatusDisplayType::Details)
-            .details(title);
+            .details(field(title));
         if playing {
             let start = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64) - (pos * 1000.) as i64;
             let mut ts = Timestamps::new().start(start);
@@ -105,10 +180,13 @@ impl Discord {
             if dur > 0. && party.is_none() {
                 ts = ts.end(start + (dur * 1000.) as i64);
             }
-            act = act.state(artist).timestamps(ts);
+            act = act.timestamps(ts);
+            if !artist.is_empty() {
+                act = act.state(field(artist));
+            }
         } else {
             // No timestamps, so nothing ticks while paused.
-            act = act.state(format!("{artist} · Paused"));
+            act = act.state(field(&if artist.is_empty() { "Paused".to_string() } else { format!("{artist} · Paused") }));
         }
         if let Some((code, n)) = &want.party {
             act = act.party(Party::new().id(code).size([(*n).clamp(1, crate::party::MAX), crate::party::MAX]));
@@ -146,3 +224,23 @@ impl Discord {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_limits() {
+        assert_eq!(field("A"), "A ");
+        assert_eq!(field(""), "  ");
+        assert_eq!(field("ab"), "ab");
+        assert_eq!(field(&"é".repeat(200)).chars().count(), 128);
+    }
+
+    #[test]
+    fn links() {
+        assert_eq!(meta_link(1, "A & B", "x y").unwrap().1, "https://www.last.fm/music/A/_/x%20y");
+        assert_eq!(meta_link(2, "A", "x").unwrap().1, "https://musicbrainz.org/search?query=A%20x&type=recording");
+        assert!(meta_link(0, "A", "x").is_none());
+    }
+}

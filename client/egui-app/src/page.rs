@@ -102,6 +102,7 @@ fn sort_tracks(tracks: &[Track], col: usize, asc: bool) -> Vec<Track> {
 impl App {
     /// Shared card shell for every route: shadow, rounded panel, routed content, bottom fade and corner fix.
     pub fn page(&mut self, ui: &mut egui::Ui, card: Rect) {
+        self.pl_ctx = None; // set again below by a playlist page the user can edit
         let t = self.t;
         let mut owned = App::region(ui, card.expand(40.));
         let ui = &mut owned;
@@ -256,13 +257,19 @@ impl App {
         let wash = Rect::from_min_size(card.min, vec2(card.width(), 192. + (HERO_MIN - 192.) * k));
         // Album and artist pages can be right-clicked and opened from the menu; `sel` is only set on those.
         let page_item = match (&self.sel, self.route) {
-            (Some((kind, id)), Route::Album | Route::Artist) if *kind != "song" => Some(Item {
-                r#type: match *kind { "albums" => "album", "playlists" => "playlist", "artists" => "artist", _ => "spotify" }.into(),
-                id: id.clone(),
-                title: title.into(),
-                thumbnail: cover_url.map(String::from),
-                ..Default::default()
-            }),
+            (Some((kind, id)), Route::Album | Route::Artist) if *kind != "song" => {
+                // The page's own data says which source it is and whether the user can edit it, which the menu's entries depend on.
+                let loaded = self.data.detail(ui.ctx(), kind, id).ready().map(|d| d.item.clone());
+                Some(Item {
+                    r#type: match *kind { "albums" => "album", "playlists" => "playlist", "artists" => "artist", _ => "spotify" }.into(),
+                    id: id.clone(),
+                    title: title.into(),
+                    thumbnail: cover_url.map(String::from),
+                    source: loaded.as_ref().and_then(|i| i.source.clone()),
+                    editable: loaded.is_some_and(|i| i.editable),
+                    ..Default::default()
+                })
+            }
             _ => None,
         };
         let wash_hit = ui.interact(wash, ui.scope_id().with("wash"), egui::Sense::click());
@@ -335,7 +342,9 @@ impl App {
         let by_y = art.max.y - lerp(10., 6.);
         let (name, aid) = by.unzip();
         let aid = aid.flatten();
-        let mut x = mx;
+        // The provider is named once, here, when the whole page comes from one source.
+        let one = tracks.first().filter(|f| tracks.iter().all(|t| t.source == f.source)).map(|f| f.source.as_str()).or(page_item.as_ref().and_then(|i| i.source.as_deref()).filter(|_| tracks.is_empty()));
+        let mut x = mx + self.source_mark(ui, one, mx, by_y, t.tm);
         if let Some(n) = name {
             let nf = font_w(14., Weight::Semi);
             let r = trunc(&p, pos2(x, by_y), mw, n, nf.clone(), t.tx);
@@ -523,6 +532,8 @@ impl App {
         let time = ui.ctx().input(|i| i.time) as f32;
         let mut a = Acts::default();
         let mut spinning = false;
+        // A playlist or album from one source says so once, in its header; rows only say it when the list mixes sources.
+        let mixed = crate::sources::mixed(tracks.iter().map(|t| t.source.as_str()));
         self.data.detail(ui.ctx(), "playlists", "LM"); // starts loading Liked songs so the stars know what is liked
         for ix in range {
             let (_, r) = ui.allocate_space(vec2(tr - tl + 12., rh));
@@ -582,15 +593,16 @@ impl App {
                 p.text(pos2(cols[0].0 + NUM_X, cy), Align2::CENTER_CENTER, ix + 1, font(13.), t.tm);
             }
             let title_col = if dim { t.tf } else if cur { t.ax } else { t.tx };
-            trunc(p, pos2(cols[1].0, cy), cols[1].1, &tk.title, if cur && !dim { font_w(14., Weight::Semi) } else { font_w(14., Weight::Medium) }, title_col);
+            title_trunc(ui, p, pos2(cols[1].0, cy), cols[1].1, &tk.title, if cur && !dim { font_w(14., Weight::Semi) } else { font_w(14., Weight::Medium) }, title_col, tk.explicit.then_some((15., if dim { t.tf } else { t.tm })));
             // The first artist links to its page; the rest of the credit follows in plain text.
-            let first_artist = tk.artists.first().map_or("", String::as_str);
+            let known = tk.artists.first().filter(|a| !a.is_empty());
+            let first_artist = known.map_or(crate::data::UNKNOWN_ARTIST, String::as_str);
             let rest = if tk.artists.len() > 1 { format!(", {}", tk.artists[1..].join(", ")) } else { String::new() };
-            let badge = if tk.explicit { explicit_badge(p, pos2(cols[2].0, cy), if hot || ix % 2 == 1 { band } else { t.s1 }, if dim { t.tf } else { t.tm }, 14.) } else { 0. };
-            let (ax0, aw) = (cols[2].0 + badge, (cols[2].1 - badge).max(0.));
+            let sdx = self.source_mark(ui, mixed.then_some(tk.source.as_str()), cols[2].0, cy, if dim { t.tf } else { t.tm });
+            let (ax0, aw) = (cols[2].0 + sdx, cols[2].1 - sdx);
             let fw = text_w(p, first_artist, font(13.)).min(aw);
             let ar = Rect::from_min_size(pos2(ax0, cy - 9.), vec2(fw, 18.));
-            let link = !dim && tk.artist_id.is_some() && !first_artist.is_empty();
+            let link = !dim && tk.artist_id.is_some() && known.is_some();
             let over = link && ui.rect_contains_pointer(ar);
             let p = ui.painter();
             trunc(p, pos2(ax0, cy), aw, first_artist, font(13.), if over { t.tx } else if dim { t.tf } else { t.tm });
@@ -608,9 +620,10 @@ impl App {
             }
             ui.painter().text(pos2(cols[4].0 + cols[4].1, cy), Align2::RIGHT_CENTER, tk.dur(), font(13.), if dim { t.tf } else { t.tm });
             // Fav and more: shown on hover (the fav star stays while liked).
-            let liked = tk.source == "youtube" && self.data.is_liked(&tk.id);
+            let likable = self.sources.can(&tk.source, "like");
+            let liked = likable && self.data.is_liked(&tk.id);
             if hot || liked {
-                if tk.source == "youtube" {
+                if likable {
                     let col = if liked { t.ax } else { t.tm };
                     if icon_button(ui, &t, (sid, "row-fav", ix), pos2(cols[5].0 + 14., cy), 28., if liked { icon!("starf") } else { icon!("star") }, 16., col).clicked() {
                         a.like = Some(ix);
@@ -645,7 +658,10 @@ impl App {
             self.data.like(ui.ctx(), tracks[ix].clone(), on);
         }
         if let Some((pos, ix)) = a.menu {
-            self.ctx_menu = Some((pos, Target::Track(tracks[ix].clone())));
+            self.ctx_menu = Some((pos, match &self.pl_ctx {
+                Some(id) => Target::PlTrack(tracks[ix].clone(), id.clone()),
+                None => Target::Track(tracks[ix].clone()),
+            }));
         }
         if a.playing {
             ui.ctx().request_repaint_after(Duration::from_millis(33));

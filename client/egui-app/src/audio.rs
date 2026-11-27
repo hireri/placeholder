@@ -22,8 +22,7 @@ use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptio
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::packet::Packet;
 use symphonia::core::units::{Time, TimeBase};
-use symphonia::default::codecs::AacDecoder;
-use symphonia::default::get_probe;
+use symphonia::default::{get_codecs, get_probe};
 
 const DEFAULT_CHUNK: u64 = 1 << 20;
 const OPUS_RATE: u32 = 48_000;
@@ -316,7 +315,8 @@ impl Resample {
 
 enum Codec {
     Opus(opus::Decoder),
-    Aac(Box<dyn AudioDecoder>),
+    /// Anything symphonia decodes (AAC, MP3, FLAC, Vorbis, ALAC, ...); Opus goes through libopus.
+    Sym(Box<dyn AudioDecoder>),
 }
 
 impl Codec {
@@ -330,7 +330,7 @@ impl Codec {
                 tmp.truncate(n * 2);
                 Ok((OPUS_RATE, 2))
             }
-            Codec::Aac(d) => {
+            Codec::Sym(d) => {
                 let buf = d.decode(packet).map_err(|_| ())?;
                 tmp.clear();
                 buf.copy_to_vec_interleaved(tmp);
@@ -371,6 +371,11 @@ impl Session {
             (Some(d), Some(tb)) => tb.calc_duration(d).map(|t| t.as_secs_f64() as f32),
             _ => None,
         };
+        // A fragmented MP4 (the stitched SoundCloud HLS) reports only its first fragment's length.
+        let duration = match (duration, info.duration_sec) {
+            (Some(d), Some(s)) if s as f32 > d + 2.0 => Some(s as f32),
+            (d, _) => d,
+        };
         let codec = if info.mime_type.contains("opus") {
             let d = opus::Decoder::new(OPUS_RATE, opus::Channels::Stereo).map_err(|e| e.to_string())?;
             Codec::Opus(d)
@@ -378,9 +383,8 @@ impl Session {
             let Some(CodecParameters::Audio(params)) = track.codec_params.as_ref() else {
                 return Err("no audio codec parameters".into());
             };
-            let d = AacDecoder::try_new(params, &AudioDecoderOptions::default())
-                .map_err(|e| e.to_string())?;
-            Codec::Aac(Box::new(d))
+            let d = get_codecs().make_audio_decoder(params, &AudioDecoderOptions::default()).map_err(|e| e.to_string())?;
+            Codec::Sym(d)
         };
         Ok(Session { reader, track_id, time_base, codec, tmp: Vec::new(), resample: None, duration, cache, lufs: info.loudness_lufs })
     }
@@ -395,7 +399,7 @@ impl Session {
             Codec::Opus(d) => {
                 let _ = d.reset_state();
             }
-            Codec::Aac(d) => d.reset(),
+            Codec::Sym(d) => d.reset(),
         }
         if let Some(rs) = self.resample.as_mut() {
             rs.reset();
@@ -747,16 +751,23 @@ fn fill<T: FromSample<f32>>(shared: &Shared, data: &mut [T]) {
     }
 }
 
+/// Name to list `d` under, or None for ALSA plumbing (rate converters, surround/hw/plughw variants, one entry per HDMI jack...).
+/// Only the sound servers and each card's `sysdefault` survive; other platforms report no driver and keep everything.
+fn listed(d: &cpal::Device) -> Option<String> {
+    let desc = d.description().ok()?;
+    let keep = desc.driver().is_none_or(|k| matches!(k, "pipewire" | "pulse" | "jack") || k.starts_with("sysdefault:"));
+    keep.then(|| desc.name().to_string())
+}
+
 /// Names of the output devices, for the settings picker.
 pub fn output_names() -> Vec<String> {
-    let devs = cpal::default_host().output_devices().into_iter().flatten();
-    devs.filter_map(|d| d.description().ok().map(|d| d.name().to_string())).collect()
+    cpal::default_host().output_devices().into_iter().flatten().filter_map(|d| listed(&d)).collect()
 }
 
 /// The device called `name`, or the default one when `name` is empty or no longer exists.
 fn output_device(name: &str) -> Option<(cpal::Device, SupportedStreamConfig)> {
     let host = cpal::default_host();
-    let named = || host.output_devices().ok()?.find(|d| d.description().is_ok_and(|d| d.name() == name));
+    let named = || host.output_devices().ok()?.find(|d| listed(d).is_some_and(|n| n == name));
     let dev = Some(name).filter(|n| !n.is_empty()).and_then(|_| named()).or_else(|| host.default_output_device())?;
     let cfg = dev
         .supported_output_configs()
@@ -1116,7 +1127,7 @@ mod tests {
     #[ignore]
     fn live_playback() {
         let id = std::env::var("VIDEO_ID").unwrap_or_else(|_| "dQw4w9WgXcQ".into());
-        let info: super::StreamInfo = crate::backend::get(&format!("/stream/{id}")).expect("resolve");
+        let info: super::StreamInfo = crate::backend::get(&format!("/music/stream/{id}")).expect("resolve");
         println!("mime {} client {}", info.mime_type, info.client);
         let e = super::Engine::new(|| {});
         e.load(info, 0.);
@@ -1137,7 +1148,7 @@ mod tests {
     fn live_pause_resume() {
         let sleep = |s| std::thread::sleep(std::time::Duration::from_secs(s));
         let id = std::env::var("VIDEO_ID").unwrap_or_else(|_| "dQw4w9WgXcQ".into());
-        let info: super::StreamInfo = crate::backend::get(&format!("/stream/{id}")).expect("resolve");
+        let info: super::StreamInfo = crate::backend::get(&format!("/music/stream/{id}")).expect("resolve");
         let e = super::Engine::new(|| {});
         e.load(info, 0.);
         sleep(3);

@@ -5,7 +5,7 @@ use eframe::egui::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -16,11 +16,12 @@ pub enum State<T> {
     Failed(String),
 }
 
-pub struct Remote<T>(Arc<Mutex<State<T>>>);
+/// The value and a generation that `reset`/`replace` bump, so a fetch started before one cannot overwrite what came after.
+pub struct Remote<T>(Arc<Mutex<State<T>>>, Arc<std::sync::atomic::AtomicU64>);
 
 impl<T: Send + Sync + 'static> Remote<T> {
     pub fn new() -> Self {
-        Remote(Arc::new(Mutex::new(State::Idle)))
+        Remote(Arc::new(Mutex::new(State::Idle)), Arc::default())
     }
 
     pub fn lock(&self) -> MutexGuard<'_, State<T>> {
@@ -34,10 +35,15 @@ impl<T: Send + Sync + 'static> Remote<T> {
             return;
         }
         *s = State::Loading;
-        let (slot, ctx) = (self.0.clone(), ctx.clone());
+        let (slot, gens, ctx) = (self.0.clone(), self.1.clone(), ctx.clone());
+        let gen = gens.load(Ordering::SeqCst);
         std::thread::spawn(move || {
             let r = load();
-            *slot.lock().unwrap() = r.map_or_else(State::Failed, |v| State::Ready(Arc::new(v)));
+            let mut g = slot.lock().unwrap();
+            if gens.load(Ordering::SeqCst) == gen {
+                *g = r.map_or_else(State::Failed, |v| State::Ready(Arc::new(v)));
+            }
+            drop(g);
             ctx.request_repaint();
         });
     }
@@ -51,7 +57,16 @@ impl<T: Send + Sync + 'static> Remote<T> {
     }
 
     pub fn reset(&self) {
-        *self.lock() = State::Idle;
+        let mut g = self.lock();
+        self.1.fetch_add(1, Ordering::SeqCst);
+        *g = State::Idle;
+    }
+
+    /// Swaps in a value without passing through `Loading`, so a visible page never falls back to its skeleton.
+    pub fn replace(&self, v: Arc<T>) {
+        let mut g = self.lock();
+        self.1.fetch_add(1, Ordering::SeqCst);
+        *g = State::Ready(v);
     }
 }
 
@@ -75,6 +90,11 @@ pub struct Item {
     pub video: bool,
     /// Playlists only: owned by the user, so it can be deleted.
     pub editable: bool,
+    /// Which source it came from: `yt` for YouTube Music, otherwise a configured source's id.
+    pub source: Option<String>,
+    /// From a source that is off or unreachable (library snapshot): shown greyed out, `reason` is the tooltip.
+    pub unavailable: bool,
+    pub reason: Option<String>,
 }
 
 /// Content filters from the settings page (upstream `HideExplicitKey` / `HideVideoSongsKey`); applied as responses arrive.
@@ -109,7 +129,29 @@ pub fn clean_sections(v: &mut Vec<Section>) {
     v.retain(|s| !s.items.is_empty());
 }
 
+/// Shown where a song's or album's artist line is empty (server files without artist tags); display-only, never a link.
+pub const UNKNOWN_ARTIST: &str = "Unknown Artist";
+
+/// A real artist credit: neither empty nor the placeholder (Last.fm rejects those).
+pub fn real_artist(a: &str) -> bool {
+    !a.trim().is_empty() && a != UNKNOWN_ARTIST
+}
+
 impl Item {
+    /// Source id, with YouTube Music (no source set) as `yt`.
+    pub fn src(&self) -> &str {
+        self.source.as_deref().unwrap_or("yt")
+    }
+
+    /// The subtitle, or the placeholder for a song or album that has none (playlists and artists legitimately have none).
+    pub fn sub(&self) -> &str {
+        match self.subtitle.as_deref().filter(|s| !s.is_empty()) {
+            Some(s) => s,
+            None if matches!(self.r#type.as_str(), "song" | "album" | "video") => UNKNOWN_ARTIST,
+            None => "",
+        }
+    }
+
     /// A song item as a playable track; the subtitle holds the artists.
     pub fn track(&self) -> Track {
         Track {
@@ -119,7 +161,7 @@ impl Item {
             album: self.album.clone(),
             duration_sec: self.duration_sec,
             thumbnail: self.thumbnail.clone(),
-            source: "youtube".into(),
+            source: self.source.as_deref().filter(|s| *s != "yt").unwrap_or("youtube").into(),
             artist_id: self.artist_id.clone(),
             album_id: self.album_id.clone(),
             ..Default::default()
@@ -131,6 +173,8 @@ impl Item {
 #[serde(default)]
 pub struct Section {
     pub title: String,
+    /// Source id the shelf comes from; none when it mixes several.
+    pub source: Option<String>,
     pub items: Vec<Item>,
 }
 
@@ -349,6 +393,15 @@ pub struct Detail {
     pub monthly_listeners: Option<String>,
 }
 
+fn fetch_library() -> Result<Vec<(usize, Item)>, String> {
+    let mut all = vec![];
+    for (kind, n) in [("playlists", 1), ("albums", 2), ("artists", 3)] {
+        let items: Vec<Item> = backend::get(&format!("/mix/library/{kind}"))?;
+        all.extend(items.into_iter().map(|i| (n, i)));
+    }
+    Ok(all)
+}
+
 impl Detail {
     /// What playing this page plays: its track list, or for artists the songs on their shelves.
     fn clean(mut self) -> Self {
@@ -417,6 +470,8 @@ pub struct Data {
     pub library: Remote<Vec<(usize, Item)>>,
     /// Bumped whenever `library` is edited in place, so the sidebar rebuilds its copy.
     pub lib_rev: AtomicUsize,
+    /// Unix seconds when Home last finished loading (0 = never).
+    pub home_at: AtomicU64,
     /// Song search results by query.
     pub searches: Mutex<HashMap<String, Arc<Remote<Vec<Track>>>>>,
     /// Album and artist search results by `type/query`.
@@ -429,11 +484,23 @@ pub struct Data {
     exporting: Arc<AtomicBool>,
     /// Songs looked up by id, to learn which album a feed item sits on.
     pub song_infos: Mutex<HashMap<String, Arc<Remote<Track>>>>,
+    /// Liked songs from non-YouTube sources, by their prefixed id (they have no cached page to live in).
+    pub provider_likes: Mutex<HashSet<String>>,
     /// Set while a sign-in/out is in flight (the login window blocks), with the last error.
     pub busy: Arc<Mutex<(Option<&'static str>, Option<String>)>>,
 }
 
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 impl Data {
+    /// Seconds since Home was last loaded; 0 while it is loading or not loaded.
+    pub fn home_age(&self) -> u64 {
+        let at = self.home_at.load(Ordering::Relaxed);
+        if at == 0 || !matches!(*self.home.lock(), State::Ready(_)) { 0 } else { now_secs().saturating_sub(at) }
+    }
+
     pub fn new() -> Self {
         Data {
             status: Remote::new(),
@@ -443,6 +510,7 @@ impl Data {
             spotify: Remote::new(),
             library: Remote::new(),
             lib_rev: AtomicUsize::new(0),
+            home_at: AtomicU64::new(0),
             searches: Default::default(),
             item_searches: Default::default(),
             details: Default::default(),
@@ -450,6 +518,7 @@ impl Data {
             matcher: SpotifyMatcher::start(),
             exporting: Default::default(),
             song_infos: Default::default(),
+            provider_likes: Default::default(),
             busy: Default::default(),
         }
     }
@@ -469,7 +538,7 @@ impl Data {
                 Ok(Detail { item, tracks, ..Default::default() })
             });
         } else {
-            let path = format!("/youtube/{kind}/{id}");
+            let path = format!("/music/{}/{id}", kind.trim_end_matches('s'));
             r.ensure(ctx, move || backend::get::<Detail>(&path).map(Detail::clean));
         }
         r
@@ -525,18 +594,161 @@ impl Data {
         });
     }
 
-    /// Deletes a playlist the user owns. It leaves the sidebar at once; a refusal puts it back, success refetches the library.
+    /// Edits a loaded page in place (no refetch, so no skeleton); returns the page as it was, for `put_detail`.
+    fn patch_detail(&self, key: &str, f: impl FnOnce(&mut Detail)) -> Option<Arc<Detail>> {
+        let r = self.details.lock().unwrap().get(key).cloned()?;
+        let mut s = r.lock();
+        let State::Ready(a) = &mut *s else { return None };
+        let prev = a.clone();
+        f(Arc::make_mut(a));
+        Some(prev)
+    }
+
+    /// Puts back what `patch_detail` returned after a refused edit.
+    fn put_detail(&self, key: &str, prev: Option<Arc<Detail>>) {
+        let r = self.details.lock().unwrap().get(key).cloned();
+        if let (Some(r), Some(prev)) = (r, prev) {
+            r.replace(prev);
+        }
+    }
+
+    /// Refetches a loaded page and swaps it in place when it arrives (blocking: call from a worker thread).
+    fn refresh_detail(&self, kind: &str, id: &str) {
+        let r = self.details.lock().unwrap().get(&format!("{kind}s/{id}")).cloned();
+        if let Some(r) = r {
+            if let Ok(d) = backend::get::<Detail>(&format!("/music/{kind}/{id}")).map(Detail::clean) {
+                r.replace(Arc::new(d));
+            }
+        }
+    }
+
+    /// Edits a playlist's sidebar entry in place.
+    fn patch_library(&self, id: &str, f: impl FnOnce(&mut Item)) {
+        if let State::Ready(v) = &mut *self.library.lock() {
+            if let Some((_, i)) = Arc::make_mut(v).iter_mut().find(|(k, i)| *k == 1 && i.id == id) {
+                f(i);
+                self.lib_rev.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Creates a playlist on `source` holding `tracks` (which must come from that source).
+    pub fn create_playlist(self: &Arc<Self>, ctx: &Context, source: &str, title: String, tracks: Vec<Track>) {
+        #[derive(Deserialize)]
+        struct Created {
+            #[allow(dead_code)]
+            id: String,
+        }
+        let (me, ctx, source) = (self.clone(), ctx.clone(), source.to_string());
+        std::thread::spawn(move || {
+            let body = serde_json::json!({ "source": source, "title": title, "trackIds": tracks.iter().map(|t| t.id.clone()).collect::<Vec<_>>() });
+            match backend::post_json::<_, Created>("/music/playlist", &body) {
+                Ok(_) => {
+                    crate::toast::info(format!("Created “{title}”"));
+                    me.refresh_library();
+                }
+                Err(e) => crate::toast::error(format!("Couldn't create the playlist: {e}")),
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn add_to_playlist(self: &Arc<Self>, ctx: &Context, id: &str, title: &str, tracks: Vec<Track>) {
+        self.edit_playlist(ctx, id, "add", tracks, format!("Added to “{title}”"), "add to the playlist");
+    }
+
+    pub fn remove_from_playlist(self: &Arc<Self>, ctx: &Context, id: &str, track: &Track) {
+        self.edit_playlist(ctx, id, "remove", vec![track.clone()], "Removed from the playlist".into(), "remove it from the playlist");
+    }
+
+    /// The page changes at once; a refusal puts it back, success swaps in the daemon's version silently.
+    fn edit_playlist(self: &Arc<Self>, ctx: &Context, id: &str, op: &'static str, tracks: Vec<Track>, done: String, what: &'static str) {
+        let key = format!("playlists/{id}");
+        // ponytail: removal drops every copy of the track from the cached page until the refresh corrects it.
+        let prev = self.patch_detail(&key, |d| match op {
+            "add" => d.tracks.extend(tracks.iter().cloned()),
+            _ => d.tracks.retain(|t| !tracks.iter().any(|r| r.id == t.id)),
+        });
+        let (me, ctx, id) = (self.clone(), ctx.clone(), id.to_string());
+        std::thread::spawn(move || {
+            let body = serde_json::json!({ "trackIds": tracks.iter().map(|t| t.id.clone()).collect::<Vec<_>>() });
+            match backend::send_json_ok("POST", &format!("/music/playlist/{}/{op}", backend::enc(&id)), &body) {
+                Ok(()) => {
+                    crate::toast::info(done);
+                    me.refresh_detail("playlist", &id);
+                }
+                Err(e) => {
+                    me.put_detail(&key, prev);
+                    crate::toast::error(format!("Couldn't {what}: {e}"));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn rename_playlist(self: &Arc<Self>, ctx: &Context, id: &str, new: String) {
+        let key = format!("playlists/{id}");
+        let old = self.library_item(id).map(|i| i.title);
+        let prev = self.patch_detail(&key, |d| d.item.title = new.clone());
+        self.patch_library(id, |i| i.title = new.clone());
+        let (me, ctx, id) = (self.clone(), ctx.clone(), id.to_string());
+        std::thread::spawn(move || {
+            match backend::send_json_ok("PUT", &format!("/music/playlist/{}", backend::enc(&id)), &serde_json::json!({ "title": new })) {
+                Ok(()) => {
+                    crate::toast::info("Playlist renamed");
+                    me.refresh_detail("playlist", &id);
+                }
+                Err(e) => {
+                    me.put_detail(&key, prev);
+                    if let Some(old) = old {
+                        me.patch_library(&id, |i| i.title = old);
+                    }
+                    crate::toast::error(format!("Couldn't rename the playlist: {e}"));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Sets the cover of a playlist, album or artist (`kind` is the singular) from an image file.
+    pub fn set_image(self: &Arc<Self>, ctx: &Context, kind: &'static str, id: &str, path: std::path::PathBuf) {
+        let (me, ctx, id) = (self.clone(), ctx.clone(), id.to_string());
+        std::thread::spawn(move || {
+            let sent = (|| {
+                let mime = match path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+                    Some("jpg" | "jpeg") => "image/jpeg",
+                    Some("png") => "image/png",
+                    Some("webp") => "image/webp",
+                    _ => return Err("Use a JPEG, PNG or WebP image".to_string()),
+                };
+                let bytes = std::fs::read(&path).map_err(|e| format!("couldn't read the file: {e}"))?;
+                backend::put_bytes(&format!("/music/image/{kind}/{}", backend::enc(&id)), mime, &bytes)
+            })();
+            match sent {
+                Ok(()) => {
+                    crate::toast::info("Image updated");
+                    me.refresh_detail(kind, &id);
+                    me.refresh_library();
+                    me.home.reset();
+                }
+                Err(e) => crate::toast::error(format!("Couldn't change the image: {e}")),
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Deletes a playlist the user owns. It leaves the sidebar at once; a refusal puts it back, success refreshes the library in place.
     pub fn delete_playlist(self: &Arc<Self>, ctx: &Context, id: &str) {
         let item = self.library_item(id).unwrap_or_else(|| self.known_item("playlists", id, "playlist"));
         self.set_saved(1, item.clone(), false);
         let (me, ctx) = (self.clone(), ctx.clone());
-        let path = format!("/youtube/playlists/{}", backend::enc(id));
+        let path = format!("/music/playlist/{}", backend::enc(id));
         std::thread::spawn(move || {
             match backend::delete(&path) {
                 Ok(()) => {
                     crate::toast::info("Playlist deleted");
                     me.details.lock().unwrap().remove(&format!("playlists/{}", item.id));
-                    me.library.reset();
+                    me.refresh_library();
                 }
                 Err(e) => {
                     me.set_saved(1, item, true);
@@ -556,14 +768,14 @@ impl Data {
 
     pub fn song_info(&self, ctx: &Context, id: &str) -> Arc<Remote<Track>> {
         let r = self.song_infos.lock().unwrap().entry(id.to_string()).or_insert_with(|| Arc::new(Remote::new())).clone();
-        let path = format!("/youtube/song/{}", backend::enc(id));
+        let path = format!("/music/song/{}", backend::enc(id));
         r.ensure(ctx, move || backend::get(&path));
         r
     }
 
     pub fn search(&self, ctx: &Context, q: &str) -> Arc<Remote<Vec<Track>>> {
         let r = self.searches.lock().unwrap().entry(q.to_string()).or_insert_with(|| Arc::new(Remote::new())).clone();
-        let path = format!("/youtube/search?q={}", backend::enc(q));
+        let path = format!("/mix/search?q={}", backend::enc(q));
         r.ensure(ctx, move || backend::get::<Vec<Track>>(&path).map(|mut v| {
             v.retain(|t| !hidden(t.explicit, t.video));
             v
@@ -573,7 +785,7 @@ impl Data {
 
     pub fn suggest(&self, ctx: &Context, q: &str) -> Arc<Remote<Suggest>> {
         let r = self.suggests.lock().unwrap().entry(q.to_string()).or_insert_with(|| Arc::new(Remote::new())).clone();
-        let path = format!("/youtube/suggest?q={}", backend::enc(q));
+        let path = format!("/mix/suggest?q={}", backend::enc(q));
         r.ensure(ctx, move || backend::get::<Suggest>(&path).map(|mut s| {
             s.items.retain(|i| !hidden(i.explicit, i.video));
             s
@@ -594,7 +806,7 @@ impl Data {
     /// Albums or artists (`kind` is the search filter: album | artist) matching `q`.
     pub fn search_items(&self, ctx: &Context, q: &str, kind: &'static str) -> Arc<Remote<Vec<Item>>> {
         let r = self.item_searches.lock().unwrap().entry(format!("{kind}/{q}")).or_insert_with(|| Arc::new(Remote::new())).clone();
-        let path = format!("/youtube/search/items?q={}&type={kind}", backend::enc(q));
+        let path = format!("/mix/search/items?q={}&type={kind}", backend::enc(q));
         r.ensure(ctx, move || backend::get::<Vec<Item>>(&path).map(|mut v| {
             v.retain(|i| !hidden(i.explicit, i.video));
             v
@@ -627,14 +839,15 @@ impl Data {
     }
 
     pub fn load_library(&self, ctx: &Context) {
-        self.library.ensure(ctx, || {
-            let mut all = vec![];
-            for (kind, n) in [("playlists", 1), ("albums", 2), ("artists", 3)] {
-                let items: Vec<Item> = backend::get(&format!("/youtube/library/{kind}"))?;
-                all.extend(items.into_iter().map(|i| (n, i)));
-            }
-            Ok(all)
-        });
+        self.library.ensure(ctx, fetch_library);
+    }
+
+    /// Refetches the library and swaps it in place (blocking: call from a worker thread).
+    fn refresh_library(&self) {
+        if let Ok(v) = fetch_library() {
+            self.library.replace(Arc::new(v));
+            self.lib_rev.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn reset_content(&self) {
@@ -695,6 +908,9 @@ impl Data {
 
     /// Whether `id` is in the loaded Liked songs page (false until it loads).
     pub fn is_liked(&self, id: &str) -> bool {
+        if self.provider_likes.lock().unwrap().contains(id) {
+            return true;
+        }
         let page = self.details.lock().unwrap().get("playlists/LM").cloned();
         page.is_some_and(|p| matches!(&*p.lock(), State::Ready(d) if d.tracks.iter().any(|t| t.id == id)))
     }
@@ -704,7 +920,7 @@ impl Data {
         self.mirror_like(track.clone(), on);
         crate::toast::info(if on { "Added to liked songs" } else { "Removed from liked songs" });
         let (me, ctx) = (self.clone(), ctx.clone());
-        let path = format!("/youtube/like/{}?on={on}", backend::enc(&track.id));
+        let path = format!("/music/like/{}?on={on}", backend::enc(&track.id));
         std::thread::spawn(move || {
             if let Err(e) = backend::post(&path) {
                 me.mirror_like(track, !on);
@@ -714,8 +930,13 @@ impl Data {
         });
     }
 
-    /// Mirrors a like into the cached Liked songs page (`LM`) so it shows without a refetch.
+    /// Mirrors a like into the cached Liked songs page (`LM`) so it shows without a refetch. Other sources only set the liked flag.
     pub fn mirror_like(&self, track: Track, on: bool) {
+        if track.source != "youtube" {
+            let mut set = self.provider_likes.lock().unwrap();
+            if on { set.insert(track.id) } else { set.remove(&track.id) };
+            return;
+        }
         for key in ["playlists/LM", "playlists/VLLM"] {
             let page = self.details.lock().unwrap().get(key).cloned();
             if let Some(p) = page {
@@ -770,5 +991,21 @@ impl Data {
             me.reset_content();
             ctx.request_repaint();
         });
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_artist() {
+        let it = |ty: &str, sub: Option<&str>| Item { r#type: ty.into(), subtitle: sub.map(Into::into), ..Default::default() };
+        assert_eq!(it("song", None).sub(), UNKNOWN_ARTIST);
+        assert_eq!(it("album", Some("")).sub(), UNKNOWN_ARTIST);
+        assert_eq!(it("album", Some("Me")).sub(), "Me");
+        assert_eq!(it("playlist", None).sub(), "");
+        assert_eq!(it("artist", None).sub(), "");
+        assert!(!real_artist("") && !real_artist(" ") && !real_artist(UNKNOWN_ARTIST) && real_artist("A"));
     }
 }

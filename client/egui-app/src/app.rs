@@ -102,6 +102,8 @@ pub struct App {
     pub lib_w: f32,
     pub lib_shown: LibView,
     pub lib_menu: bool,
+    /// Settings > Output device dropdown.
+    pub out_menu: bool,
     pub lib_filter: usize,
     pub lib_current: usize,
     pub lib_search: String,
@@ -161,6 +163,7 @@ pub struct App {
     media: Option<Media>,
     discord: crate::discord::Discord,
     pub scrobbler: crate::scrobble::Scrobbler,
+    pub sources: crate::sources::Sources,
     history: crate::history::History,
     pub party: crate::party::Party,
     /// Listening party popover: when it opened, the titlebar button it hangs from, and the code typed to join.
@@ -179,7 +182,13 @@ pub struct App {
     seek_run: (f32, f64, u32),
     started: bool,
     /// Playlist waiting on the delete popup: (id, label).
-    delete_ask: Option<(String, String)>,
+    delete_ask: Option<(String, String, String)>,
+    /// Songs waiting for a playlist to be picked from the "Add to playlist" menu, and where it opened.
+    pub pl_pick: Option<(egui::Pos2, Vec<Track>)>,
+    /// The name prompt for a new or renamed playlist.
+    pub name_ask: Option<NameAsk>,
+    /// The playlist (if the user can edit it) whose songs the page is listing, for "Remove from this playlist".
+    pub pl_ctx: Option<String>,
     pub lfm_buf: Option<[String; 2]>,
 }
 
@@ -311,6 +320,7 @@ impl App {
             lib_w: prefs.lib_w,
             lib_shown: if prefs.lib_open { prefs.lib_view } else { LibView::List },
             lib_menu: false,
+            out_menu: false,
             lib_filter: 0,
             lib_current: usize::MAX,
             lib_search: String::new(),
@@ -350,6 +360,7 @@ impl App {
             media,
             discord: crate::discord::Discord::new(),
             scrobbler: Default::default(),
+            sources: Default::default(),
             history: Default::default(),
             party: Default::default(),
             party_open: None,
@@ -363,6 +374,9 @@ impl App {
             seek_run: (0., f64::NEG_INFINITY, 0),
             started: false,
             delete_ask: None,
+            pl_pick: None,
+            name_ask: None,
+            pl_ctx: None,
             lfm_buf: None,
         }
     }
@@ -733,7 +747,7 @@ impl App {
         let cy = tc - 4.;
         self.thumb(ui, self.pl.song().and_then(|s| s.thumbnail.as_deref()), Rect::from_center_size(pos2(sec.min.x + 8. + 18., cy), vec2(36., 36.)), 6.);
         let (tx, tw) = (sec.min.x + 8. + 36. + 10., sec.width() - 8. - 36. - 10. - 8.);
-        let (title, artist) = self.pl.song().map_or(("Nothing playing".to_string(), String::new()), |s| (s.title.clone(), s.artist.clone()));
+        let (title, artist) = self.pl.song().map_or(("Nothing playing".to_string(), String::new()), |s| (s.title.clone(), s.artist_line().to_string()));
         trunc(&p, pos2(tx, cy - 8.), tw, &title, font_w(13., Weight::Semi), t.tx);
         trunc(&p, pos2(tx, cy + 9.), tw, &artist, font(12.), t.tm);
         let bar = Rect::from_min_max(pos2(sec.min.x + 8., rect.max.y - 13.), pos2(sec.max.x - 8., rect.max.y - 11.));
@@ -954,35 +968,89 @@ impl App {
     /// Deleting a playlist is permanent: ask first, unless Shift is held.
     pub fn confirm_delete(&mut self, ctx: &Context, id: &str) {
         if ctx.input(|i| i.modifiers.shift) {
-            return self.data.delete_playlist(ctx, id);
+            return self.delete_now(ctx, id);
         }
-        let label = self.data.library_item(id).map_or_else(|| "This playlist".into(), |i| format!("“{}”", i.title));
-        self.delete_ask = Some((id.into(), label));
+        let item = self.data.library_item(id);
+        let label = item.as_ref().map_or_else(|| "This playlist".into(), |i| format!("“{}”", i.title));
+        let source = self.sources.name(item.and_then(|i| i.source).as_deref().unwrap_or("yt"));
+        self.delete_ask = Some((id.into(), label, source));
+    }
+
+    /// Deletes the playlist and leaves its page, so nobody is left on a dead one.
+    fn delete_now(&mut self, ctx: &Context, id: &str) {
+        let dead = |l: &Loc| l.sel.as_ref().is_some_and(|(k, i)| *k == "playlists" && i == id);
+        let open = self.route == Route::Album && self.sel.as_ref().is_some_and(|(k, i)| *k == "playlists" && i == id);
+        self.back.retain(|l| !dead(l));
+        if open {
+            if self.back.is_empty() {
+                self.open(Route::Home, None);
+            } else {
+                self.back();
+            }
+        }
+        self.fwd.retain(|l| !dead(l));
+        self.data.delete_playlist(ctx, id);
+    }
+
+    /// Prompt for a playlist's name: a new one (holding `tracks`, on `source`) or a rename.
+    fn name_modal(&mut self, ctx: &Context) {
+        let Some(ask) = self.name_ask.as_mut() else { return };
+        let (t, rename) = (&self.t, ask.rename.is_some());
+        let (mut go, mut cancel) = (false, false);
+        let closed = crate::modal::show(ctx, t, "name-playlist", 340., |c| {
+            c.title(icon!("pl"), if rename { "Rename playlist" } else { "New playlist" });
+            c.field("name", "Name", &mut ask.text, "Playlist name");
+            let ok = !ask.text.trim().is_empty();
+            match c.actions(if rename { "Rename" } else { "Create" }, crate::modal::Kind::Primary, ok) {
+                Some(true) => go = true,
+                Some(false) => cancel = true,
+                None => {}
+            }
+            go |= ok && crate::modal::enter(c.ui.ctx());
+        });
+        let ask = self.name_ask.clone().unwrap_or_default();
+        if go && !ask.text.trim().is_empty() {
+            match &ask.rename {
+                Some(id) => self.data.rename_playlist(ctx, id, ask.text.trim().into()),
+                None => self.data.create_playlist(ctx, &ask.source, ask.text.trim().into(), ask.tracks),
+            }
+        }
+        if go || cancel || closed {
+            self.name_ask = None;
+        }
+    }
+
+    /// An image file dropped on the window becomes the cover of the open cover prompt, else of the page being shown when it can take one.
+    fn dropped_cover(&mut self, ctx: &Context) {
+        let Some(file) = ctx.input(|i| i.raw.dropped_files.first().cloned()) else { return };
+        let path = file.path().to_path_buf();
+        let target = match (&self.route, &self.sel) {
+            (Route::Album | Route::Artist, Some((kind, id))) if matches!(*kind, "albums" | "artists" | "playlists") => self.data.detail(ctx, kind, id).ready().map(|d| (*kind, id.clone(), d)),
+            _ => None,
+        };
+        match target {
+            Some((kind, id, d)) if self.can_image(&d.item) => self.data.set_image(ctx, kind.trim_end_matches('s'), &id, path),
+            _ => crate::toast::info("Open a playlist you can edit, then drop the image on it"),
+        }
     }
 
     fn delete_modal(&mut self, ctx: &Context) {
-        let Some((id, label)) = self.delete_ask.clone() else { return };
+        let Some((id, label, source)) = self.delete_ask.clone() else { return };
+        let t = &self.t;
         let mut answer = None;
-        let m = egui::Modal::new(egui::Id::NULL.with("delete-playlist")).show(ctx, |ui| {
-            ui.set_width(320.);
-            ui.heading("Delete playlist?");
-            ui.add_space(6.);
-            ui.label(format!("{label} will be permanently deleted from YouTube Music. This can't be undone."));
-            ui.label(egui::RichText::new("Hold Shift to skip this prompt.").weak());
-            ui.add_space(10.);
-            ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(0xc6, 0x28, 0x28))).clicked() {
-                    answer = Some(true);
-                }
-                if ui.button("Cancel").clicked() {
-                    answer = Some(false);
-                }
-            });
+        let closed = crate::modal::show(ctx, t, "delete-playlist", 340., |c| {
+            c.title(icon!("mtrash"), "Delete playlist?");
+            c.text(&format!("{label} will be permanently deleted from {source}. This can't be undone."), true);
+            c.text("Hold Shift to skip this prompt.", false);
+            answer = c.actions("Delete", crate::modal::Kind::Danger, true);
+            if crate::modal::enter(c.ui.ctx()) {
+                answer = Some(true);
+            }
         });
         if answer == Some(true) {
-            self.data.delete_playlist(ctx, &id);
+            self.delete_now(ctx, &id);
         }
-        if answer.is_some() || m.should_close() {
+        if answer.is_some() || closed {
             self.delete_ask = None;
         }
     }
@@ -1018,8 +1086,9 @@ impl App {
         let private = self.private.is_some();
         let (dur, now) = (self.pl.dur(), self.pl.song());
         let shared = now.filter(|_| !private);
-        self.scrobbler.update(ctx, shared.map(|s| (s.title.as_str(), s.artist.as_str(), s.album.as_str())), self.pl.playing, self.pl.pos, dur);
-        self.history.update(shared.map(|s| s.vid()), self.pl.playing);
+        let scrobbled = shared.filter(|s| !self.sources.server_scrobbles(s.source()));
+        self.scrobbler.update(ctx, scrobbled.map(|s| (s.title.as_str(), s.artist.as_str(), s.album.as_str())), self.pl.playing, self.pl.pos, dur);
+        self.history.update(shared.map(|s| (s.vid(), s.source() != "yt")), self.pl.playing, self.pl.pos, dur);
         if self.sleep.due(now.map(|s| (s.title.as_str(), s.artist.as_str()))) && self.pl.playing {
             self.pl.toggle(ctx);
         }
@@ -1029,12 +1098,19 @@ impl App {
             self.faded = fade < 1.;
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
-        let cover = self.pl.song().and_then(|s| s.thumbnail.as_deref().map(|u| sized_url(u, 544)));
+        let mut cover = self.pl.song().filter(|s| s.public_cover()).and_then(|s| s.thumbnail.as_deref().map(|u| sized_url(u, 544)));
+        if cover.is_none() && self.opts.discord && !private && self.opts.discord_cover {
+            if let Some(s) = self.pl.song().filter(|s| !s.public_cover()) {
+                cover = self.discord.lookup_cover(ctx, &s.artist, &s.album, &s.title);
+            }
+        }
         let song = self.pl.song().map(|s| (s.title.as_str(), s.artist.as_str(), cover.as_deref()));
         if self.opts.discord && !private {
             let party = self.party.room.as_ref().filter(|_| self.opts.discord_party).map(|r| (r.code.as_str(), r.members.iter().filter(|m| m.connected).count() as i32));
             let mut links = Vec::new();
-            if let Some(s) = self.pl.song().filter(|s| self.opts.discord_listen && !s.vid().is_empty()) {
+            if let Some(l) = self.pl.song().filter(|s| !s.public_cover()).and_then(|s| crate::discord::meta_link(self.opts.discord_link, &s.artist, &s.title)) {
+                links.push(l);
+            } else if let Some(s) = self.pl.song().filter(|s| self.opts.discord_listen && matches!(s.source(), "yt" | "spotify") && !s.vid().is_empty()) {
                 links.push(("Listen on YouTube Music", format!("https://music.youtube.com/watch?v={}", s.vid())));
             }
             if self.opts.discord_get {
@@ -1320,5 +1396,18 @@ impl eframe::App for App {
         self.party_popover(&ctx);
         self.palette(&ctx);
         self.delete_modal(&ctx);
+        self.playlist_picker(&ctx);
+        self.name_modal(&ctx);
+        self.dropped_cover(&ctx);
     }
 }
+
+/// A new or renamed playlist waiting for its name. `rename` is the playlist's id when renaming.
+#[derive(Clone, Default)]
+pub struct NameAsk {
+    pub rename: Option<String>,
+    pub source: String,
+    pub tracks: Vec<Track>,
+    pub text: String,
+}
+

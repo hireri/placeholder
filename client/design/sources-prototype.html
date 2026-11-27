@@ -1,0 +1,153 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Serafin Sources Prototype</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+/* Mixed-source Home + Library layout options. Same tokens as settings-prototype.html. Fake data; only layout is under test. */
+:root { --sans: "Inter", system-ui, sans-serif; color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0d0e11; color: #d8dae0; font: 400 13px/1.5 var(--sans); padding: 20px 20px 60px; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px 22px; align-items: center; max-width: 1100px; margin: 0 auto 14px; font-size: 12px; color: #9aa0ab; }
+.bar .g { display: flex; align-items: center; gap: 6px; } .bar .g > b { color: #e8eaee; font-weight: 600; margin-right: 2px; }
+.bar button { font: inherit; color: #d8dae0; background: #1a1d23; border: 1px solid #2a2e37; border-radius: 999px; padding: 4px 12px; cursor: pointer; }
+.bar button[aria-pressed=true] { border-color: #93a6ff; color: #93a6ff; }
+.note { max-width: 1100px; margin: 0 auto 14px; color: #9aa0ab; font-size: 12px; min-height: 36px; }
+.note b { color: #e8eaee; }
+
+.mock {
+  --h: 265; --ac: 0.13; --nc: 0.012;
+  --s0: oklch(0.17 var(--nc) var(--h)); --s1: oklch(0.205 var(--nc) var(--h)); --s2: oklch(0.25 var(--nc) var(--h)); --s3: oklch(0.30 var(--nc) var(--h));
+  --tx: oklch(0.96 0.008 var(--h)); --tm: oklch(0.72 0.02 var(--h)); --tf: oklch(0.56 0.02 var(--h));
+  --ax: oklch(0.78 var(--ac) var(--h)); --on-ax: oklch(0.2 0.03 var(--h)); --axc: oklch(0.32 calc(var(--ac) * 0.55) var(--h));
+  --nd: oklch(0.78 0.14 150); --yt: oklch(0.70 0.19 25); --sc: oklch(0.76 0.16 60);
+  width: 1100px; height: 720px; margin: 0 auto; background: var(--s0); color: var(--tx); border-radius: 12px; overflow: hidden; box-shadow: 0 20px 60px #0008;
+  display: grid; grid-template-columns: 220px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 68px;
+}
+.mock button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.mock :focus-visible { outline: 2px solid var(--ax); outline-offset: 2px; }
+
+.rail { padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.rail .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; padding: 0 12px 12px; } .rail .logo i { width: 24px; height: 24px; border-radius: 8px; background: var(--ax); }
+.rail .li { display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 12px; border-radius: 999px; color: var(--tm); font-weight: 500; width: 100%; }
+.rail .li:hover { background: var(--s1); } .rail .li.on { background: var(--s2); color: var(--tx); }
+.rail h6 { margin: 14px 12px 4px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--tf); }
+.gl { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; color: var(--tm); flex: none; }
+.card .b { opacity: 0; transition: opacity 120ms; } .card:hover .b { opacity: 1; }
+.set .r[draggable] { cursor: grab; } .set .r.over { background: var(--s3); } .set .r.drag { opacity: .4; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--c); } .dot.nd { --c: var(--nd); } .dot.yt { --c: var(--yt); } .dot.sc { --c: var(--sc); }
+.rail .li .n { margin-left: auto; font-size: 11px; color: var(--tf); }
+
+.mn { margin: 0 10px 0 0; background: var(--s1); border-radius: 18px 18px 0 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.scroll { flex: 1; overflow-y: auto; padding: 22px 24px 28px; scrollbar-width: none; display: flex; flex-direction: column; gap: 22px; } .scroll::-webkit-scrollbar { display: none; }
+.top { display: flex; align-items: center; gap: 10px; }
+.top h2 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.015em; flex: 1; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.mock .chip { height: 30px; padding: 0 13px; border-radius: 999px; background: var(--s2); color: var(--tm); display: inline-flex; align-items: center; gap: 7px; font-weight: 500; }
+.mock .chip:hover { background: var(--s3); } .mock .chip.on { background: var(--axc); color: var(--tx); }
+
+.sec { display: flex; flex-direction: column; gap: 10px; }
+.sh { display: flex; align-items: center; gap: 8px; } .sh h3 { margin: 0; font-size: 15px; font-weight: 650; } .sh .more { margin-left: auto; color: var(--tm); font-size: 12px; } .sh .sub { color: var(--tf); font-size: 12px; }
+.row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; }
+.card { display: flex; flex-direction: column; gap: 6px; min-width: 0; } .card .cv { aspect-ratio: 1; border-radius: 10px; position: relative; background: linear-gradient(140deg, oklch(0.66 0.15 var(--hh)), oklch(0.34 0.09 calc(var(--hh) - 70))); }
+.card .cv.round { border-radius: 50%; }
+.card .b { position: absolute; right: 6px; bottom: 6px; width: 18px; height: 18px; border-radius: 50%; background: oklch(0.15 0.01 var(--h) / .78); display: grid; place-items: center; }
+.card .t { font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .card .s { color: var(--tm); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: -4px; }
+.grid6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+
+.err { display: flex; align-items: center; gap: 10px; background: var(--s2); border-radius: 12px; padding: 10px 14px; color: var(--tm); } .err b { color: var(--tx); font-weight: 600; } .err button { margin-left: auto; color: var(--ax); font-weight: 600; }
+.grp { border-top: 1px solid var(--s2); padding-top: 14px; } .grp > .sh { cursor: pointer; }
+
+.np { grid-column: 1 / -1; background: var(--s2); display: flex; align-items: center; gap: 12px; padding: 0 18px; }
+.np .cv { width: 44px; height: 44px; border-radius: 8px; background: linear-gradient(140deg, oklch(0.66 0.15 40), oklch(0.34 0.09 330)); } .np .t { font-weight: 600; } .np .s { color: var(--tm); font-size: 12px; }
+.np .bar2 { flex: 1; max-width: 420px; margin: 0 auto; height: 4px; border-radius: 2px; background: var(--s3); position: relative; } .np .bar2 i { position: absolute; inset: 0 60% 0 0; background: var(--tx); border-radius: 2px; }
+
+.rowl { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 10px; } .rowl:hover { background: var(--s2); }
+.rowl .cv { width: 40px; height: 40px; border-radius: 7px; background: linear-gradient(140deg, oklch(0.66 0.15 var(--hh)), oklch(0.34 0.09 calc(var(--hh) - 70))); flex: none; }
+.rowl .tx { flex: 1; min-width: 0; } .rowl .t { font-weight: 550; } .rowl .s { color: var(--tm); font-size: 12px; } .rowl .d { color: var(--tf); font-size: 12px; display: flex; align-items: center; gap: 8px; }
+.card.off { opacity: .4; }
+.srch { height: 40px; border-radius: 999px; background: var(--s0); display: flex; align-items: center; padding: 0 16px; color: var(--tx); font-size: 14px; }
+.set { background: var(--s2); border-radius: 14px; display: flex; flex-direction: column; } .set .r { display: flex; align-items: center; gap: 12px; padding: 14px 16px; } .set .r + .r { border-top: 1px solid var(--s3); }
+.set .tx { flex: 1; } .set .t { font-weight: 600; } .set .s { color: var(--tm); font-size: 12px; } .set .ok { color: var(--nd); font-size: 12px; } .set .bad { color: var(--yt); font-size: 12px; }
+.set .ord { color: var(--tf); width: 18px; } .tg { width: 34px; height: 20px; border-radius: 10px; background: var(--ax); position: relative; } .tg::after { content: ""; position: absolute; right: 3px; top: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--on-ax); }
+.hint { color: var(--tm); font-size: 12px; }
+.sel { height: 30px; padding: 0 10px; border-radius: 999px; background: var(--s2); color: var(--tm); border: 0; font: inherit; }
+</style>
+
+<div class="bar" id="ctl"></div>
+<div class="note" id="note"></div>
+<div class="mock" id="m"></div>
+
+<script>
+const SRC = { nd: "Home server", yt: "YouTube Music", sc: "SoundCloud" };
+const st = { order: ["nd", "yt", "sc"], view: "home", n: 3, off: false, type: "all", src: "all" };
+const POOL = ["Midnight Drive|Neon Parade","Salt & Honey|Orla Venn","Paper Satellites|The Low Tide","Glass Garden|Mireille","Slow Orbit|Kaito Ames","Concrete Bloom|Hexa","Afterglow FM|Dune Club","Quiet Engines|Pale Harbor","Velvet Static|Noor","Ghost Signal|Ansel Rey","Tidal Memory|Ivy Marlow","Copper Sky|Roan","Lanterns|Fenwick","Blue Hour|Saoirse K","Understory|Mosswood","Static Hymn|Calla","Rooftop Weather|Juno Park","Dim Light Disco|Sable","Harbor Lights|Eli Moreno","Feral Pop|Tamsin","Feral Hearts|Tamsin","Low Season|Pale Harbor","Night Market|Hexa","Soft Machine|Noor","Daybreak|Kaito Ames","Orchard|Orla Venn","Phosphor|Dune Club","Undertow|Roan"];
+const multi = () => st.n > 1, ids = () => multi() ? st.order : ["yt"];
+const mk = (i, src, kind = "album") => { const [t, s] = POOL[i % POOL.length].split("|"); return { t, s, src, kind, hh: (i * 47) % 360 }; };
+const off = it => st.off && it.src === "nd";
+const GL = { nd: '<rect x="2" y="3" width="12" height="4" rx="1"/><rect x="2" y="9" width="12" height="4" rx="1"/><path d="M5 5h.01M5 11h.01"/>', yt: '<rect x="1.5" y="3.5" width="13" height="9" rx="3"/><path d="M6.7 6v4l3.3-2z"/>', sc: '<path d="M2.5 7v2M5.5 5v6M8.5 3v10M11.5 5v6M14 7v2"/>' };
+const dot = s => `<span title="${SRC[s]}" style="display:inline-flex"><svg class="gl" viewBox="0 0 16 16">${GL[s]}</svg></span>`;
+const card = it => `<div class="card ${off(it) ? "off" : ""}"><div class="cv ${it.kind === "artist" ? "round" : ""}" style="--hh:${it.hh}">${multi() ? `<span class="b">${dot(it.src)}</span>` : ""}</div><div class="t">${it.t}</div><div class="s">${it.s}</div></div>`;
+const row = (a, c = "") => `<div class="row ${c}">${a.map(card).join("")}</div>`;
+const shelf = (t, a) => `<div class="sec"><div class="sh"><h3>${t}</h3><span class="more">Show all</span></div>${row(a)}</div>`;
+const alive = a => a.filter(i => !off(i));
+
+/* Home: one feed. Which source an item came from is invisible here. */
+function home() {
+  const mix = [mk(0,"yt"), mk(1, multi()?"nd":"yt"), mk(2, multi()?"sc":"yt"), mk(3,"yt"), mk(4, multi()?"nd":"yt")];
+  const added = multi() ? [5,6,7,8].map(i => mk(i,"nd")).concat(mk(9,"sc")) : [5,6,7,8,9].map(i => mk(i,"yt"));
+  const mixes = [10,11,12,13,14].map(i => mk(i, multi() && i % 2 ? "sc" : "yt"));
+  return shelf("Continue listening", alive(mix)) + shelf("Recently added", alive(added)) + shelf("Mixes for you", alive(mixes));
+}
+
+/* Library: everything you saved, from any source, de-duplicated. */
+function library() {
+  let all = [];
+  ids().forEach(id => { const n = { nd: 0, yt: 1, sc: 2 }[id]; for (let i = 0; i < (id === "nd" ? 9 : 5); i++) all.push(mk(i * 3 + n * 5 + 2, id)); for (let i = 0; i < 2; i++) all.push(mk(20 + i + n, id, "artist")); });
+  const seen = new Set(); all = all.filter(i => !seen.has(i.t + i.kind) && seen.add(i.t + i.kind));
+  if (st.type !== "all") all = all.filter(i => (st.type === "artist") === (i.kind === "artist"));
+  if (st.src !== "all") all = all.filter(i => i.src === st.src);
+  const chips = ["all", "album", "artist", "playlist"].map(t => `<button class="chip ${st.type === t ? "on" : ""}" onclick="st.type='${t}';draw()">${t === "all" ? "All" : t[0].toUpperCase() + t.slice(1) + "s"}</button>`).join("");
+  const sel = multi() ? `<select class="sel" onchange="st.src=this.value;draw()" style="margin-left:auto"><option value="all">All sources</option>${ids().map(i => `<option value="${i}" ${st.src === i ? "selected" : ""}>${SRC[i]}</option>`).join("")}</select>` : "";
+  return `<div class="chips" style="align-items:center">${chips}${sel}</div>${row(all, "grid6")}`;
+}
+
+/* Search: ranked by ownership. "Your library" first, then everything else, one list each. */
+function search() {
+  const line = (it, ex) => `<div class="rowl ${off(it) ? "card off" : ""}"><div class="cv" style="--hh:${it.hh}"></div><div class="tx"><div class="t">${it.t}</div><div class="s">${it.s}</div></div><div class="d">${multi() ? dot(it.src) : ""}${ex}</div></div>`;
+  const mine = multi() ? [mk(0,"nd"), mk(21,"nd"), mk(7,"nd")] : [];
+  const web = multi() ? [mk(22,"yt"), mk(23,"sc"), mk(24,"yt"), mk(25,"sc")] : [0,22,23,24,25].map(i => mk(i,"yt"));
+  return `<div class="srch">midnight</div>` +
+    (multi() ? `<div class="sec"><div class="sh"><h3>In your library</h3></div>${mine.map(i => line(i, "3:42")).join("")}</div>` : "") +
+    `<div class="sec"><div class="sh"><h3>${multi() ? "More to listen to" : "Songs"}</h3></div>${web.map(i => line(i, "3:42")).join("")}</div>`;
+}
+
+/* Settings: the only place sources are a first-class thing. */
+let dragId = null;
+function dg(e) { dragId = e.currentTarget.dataset.id; e.currentTarget.classList.add("drag"); }
+function dp(e) { e.preventDefault(); const to = e.currentTarget.dataset.id; if (!dragId || dragId === to) return draw(); const o = st.order.filter(x => x !== dragId); o.splice(o.indexOf(to) + (st.order.indexOf(dragId) < st.order.indexOf(to) ? 1 : 0), 0, dragId); st.order = o; dragId = null; draw(); }
+function sources() {
+  const r = (id, n) => `<div class="r" draggable="true" data-id="${id}" ondragstart="dg(event)" ondragover="event.preventDefault();this.classList.add('over')" ondragleave="this.classList.remove('over')" ondrop="dp(event)"><span class="ord">${n}</span><span style="color:var(--tf)">&#8942;&#8942;</span>${dot(id)}<div class="tx"><div class="t">${SRC[id]}</div><div class="s">${id === "nd" ? "navidrome.home.lan, 1,284 albums" : id === "yt" ? "Signed in" : "Signed in as aveline"}</div></div>${id === "nd" && st.off ? `<span class="bad">Can't reach server</span>` : `<span class="ok">Connected</span>`}<span class="tg"></span></div>`;
+  return `<div class="top"><h2 style="font-size:15px">Sources</h2></div>
+    <div class="set">${ids().map((id, n) => r(id, n + 1)).join("")}<div class="r"><div class="tx t" style="color:var(--ax)">Add a server or service</div></div></div>
+    <div class="hint">${multi() ? "Order = which copy plays when the same song exists in several. Drag rows to reorder; Library shows the copy from the highest source." : "Add a Navidrome, Jellyfin or SoundCloud source here. Nothing else in the app changes until you do."}</div>`;
+}
+
+const PAGES = { home: ["Home", home, "One feed, ranked by what you want to hear. Nothing says which server. A source that is down is simply left out."],
+  lib: ["Library", library, "Everything you saved, one grid. Same album on two sources is one card. A single quiet Sources dropdown is the only filter, and only exists with 2+ sources. Dimmed = server offline."],
+  search: ["Search", search, "Ranked by ownership: what you already have first, then everything else. Dots only appear in list rows, never on cards."],
+  set: ["Settings", sources, "The only place sources are a first-class concept. Order sets which copy plays when a song lives in several."] };
+
+function draw() {
+  const [title, fn, why] = PAGES[st.view];
+  const li = (v, l) => `<button class="li ${st.view === v ? "on" : ""}" onclick="st.view='${v}';draw()">${l}</button>`;
+  document.getElementById("m").innerHTML = `<div class="rail"><div class="logo"><i></i>Serafin</div>${li("home","Home")}${li("search","Search")}${li("lib","Library")}${li("set","Settings")}</div>
+    <div class="mn"><div class="scroll">${st.view === "set" ? "" : `<div class="top"><h2>${title}</h2></div>`}${fn()}</div></div>
+    <div class="np"><div class="cv"></div><div><div class="t">Midnight Drive</div><div class="s">Neon Parade${multi() ? " · Home server" : ""}</div></div><div class="bar2"><i></i></div></div>`;
+  document.getElementById("note").innerHTML = `<b>${title}.</b> ${why}`;
+  const g = (l, k, o) => `<span class="g"><b>${l}</b>${o.map(([v, t]) => `<button aria-pressed="${st[k] === v}" onclick="st.${k}=${typeof v === "string" ? `'${v}'` : v};st.src='all';draw()">${t}</button>`).join("")}</span>`;
+  document.getElementById("ctl").innerHTML = g("Sources", "n", [[1, "YouTube only"], [3, "Server + YT + SC"]]) +
+    `<span class="g"><b>State</b><button aria-pressed="${st.off}" onclick="st.off=!st.off;draw()">Server offline</button></span>`;
+}
+draw();
+</script>

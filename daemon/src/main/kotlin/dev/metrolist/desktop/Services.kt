@@ -109,6 +109,25 @@ object Services {
         return CreatedPlaylistDto(id = id, added = added, total = ids.size)
     }
 
+    suspend fun renamePlaylist(id: String, title: String) {
+        writeGate.run { YouTube.renamePlaylist(id.removePrefix("VL"), title) }.getOrThrow()
+    }
+
+    suspend fun addToPlaylist(id: String, videoIds: List<String>) {
+        for (v in videoIds) writeGate.run { YouTube.addToPlaylist(id.removePrefix("VL"), v) }.getOrThrow()
+    }
+
+    /** YouTube removes an entry by its per-playlist `setVideoId`, which only the playlist page knows. */
+    suspend fun removeFromPlaylist(id: String, videoIds: List<String>) {
+        val pid = id.removePrefix("VL")
+        val entries = YouTube.playlist(pid).completed().getOrThrow().songs.filter { it.id in videoIds }
+        for (e in entries) writeGate.run { YouTube.removeFromPlaylist(pid, e.id, e.setVideoId ?: error("YouTube gave no entry id for ${e.title}")) }.getOrThrow()
+    }
+
+    suspend fun setPlaylistImage(id: String, bytes: ByteArray) {
+        writeGate.run { YouTube.uploadCustomThumbnailLink(id.removePrefix("VL"), bytes) }.getOrThrow()
+    }
+
     suspend fun deletePlaylist(id: String) {
         writeGate.run { YouTube.deletePlaylist(id.removePrefix("VL")) }.getOrThrow()
     }
@@ -253,11 +272,23 @@ object Services {
 
     /** First provider (in the stored order) that has lyrics. Upstream's LyricsHelper is DB-bound, so this is the thin desktop equivalent. */
     suspend fun lyrics(id: String, title: String, artist: String, durationSec: Int, album: String?): LyricsDto? {
+        val (src, raw) = Sources.parse(id)
+        if (src != "yt") {
+            try {
+                Sources.use(src).lyrics(raw)?.takeIf { it.isNotBlank() }?.let { return LyricsDto(src, LyricsUtils.filterLyricsCreditLines(it)) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // fall through to the providers
+            }
+        }
+        // YouTube-id providers must not see a namespaced id like "navidrome-x:123".
+        val ytId = if (id.contains(':')) "" else id
         val cleaned = LyricsUtils.cleanTitleForSearch(title)
         for (name in Settings.lyricsOrder()) {
             val provider = LyricsProviderRegistry.getProviderByName(name)?.takeIf { it.isEnabled(context) } ?: continue
             try {
-                provider.getLyrics(context, id, cleaned, artist, durationSec, album).getOrNull()
+                provider.getLyrics(context, ytId, cleaned, artist, durationSec, album).getOrNull()
                     ?.takeIf { it.isNotBlank() }
                     ?.let { return LyricsDto(name, LyricsUtils.filterLyricsCreditLines(it)) }
             } catch (e: CancellationException) {

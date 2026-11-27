@@ -47,6 +47,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("bytes://icons/art.svg", include_bytes!("../assets/icons/art.svg")),
     ("bytes://icons/back.svg", include_bytes!("../assets/icons/back.svg")),
     ("bytes://icons/bell.svg", include_bytes!("../assets/icons/bell.svg")),
+    ("bytes://icons/explicit.svg", include_bytes!("../assets/icons/explicit.svg")),
     ("bytes://icons/lock.svg", include_bytes!("../assets/icons/lock.svg")),
     ("bytes://icons/party.svg", include_bytes!("../assets/icons/party.svg")),
     ("bytes://icons/crown.svg", include_bytes!("../assets/icons/crown.svg")),
@@ -86,6 +87,11 @@ const ICONS: &[(&str, &[u8])] = &[
     ("bytes://icons/vc.svg", include_bytes!("../assets/icons/vc.svg")),
     ("bytes://icons/vg.svg", include_bytes!("../assets/icons/vg.svg")),
     ("bytes://icons/vl.svg", include_bytes!("../assets/icons/vl.svg")),
+    ("bytes://icons/src-youtube.svg", include_bytes!("../assets/sources/youtube.svg")),
+    ("bytes://icons/src-jellyfin.svg", include_bytes!("../assets/sources/jellyfin.svg")),
+    ("bytes://icons/src-soundcloud.svg", include_bytes!("../assets/sources/soundcloud.svg")),
+    ("bytes://icons/src-bandcamp.svg", include_bytes!("../assets/sources/bandcamp.svg")),
+    ("bytes://icons/src-generic.svg", include_bytes!("../assets/sources/generic.svg")),
     ("bytes://icons/x.svg", include_bytes!("../assets/icons/x.svg")),
     ("bytes://icons/vid.svg", include_bytes!("../assets/icons/vid.svg")),
     ("bytes://icons/vidoff.svg", include_bytes!("../assets/icons/vidoff.svg"))
@@ -351,18 +357,12 @@ pub fn wrapped(painter: &Painter, text: &str, font: FontId, color: Color32, max_
     painter.layout_job(job)
 }
 
-/// The "E" mark: a muted rounded square with the letter knocked out in `bg` (the surface behind it).
-/// `at` is the left-centre of the badge; returns the width to skip, gap included.
-pub fn explicit_badge(painter: &Painter, at: Pos2, bg: Color32, fg: Color32, size: f32) -> f32 {
-    let k = size / 14.;
-    let r = Rect::from_min_size(egui::pos2(at.x, at.y - size / 2.), egui::vec2(size, size));
-    painter.rect_filled(r, rad(3. * k), fg);
-    let (x, y, w, h, b) = (r.min.x + 4.5 * k, r.min.y + 3.5 * k, 5. * k, 7. * k, 1.4 * k);
-    painter.rect_filled(Rect::from_min_size(egui::pos2(x, y), egui::vec2(1.5 * k, h)), 0., bg);
-    for i in 0..3 {
-        painter.rect_filled(Rect::from_min_size(egui::pos2(x, y + (h - b) / 2. * i as f32), egui::vec2(w, b)), 0., bg);
-    }
-    size + 5.
+/// [`trunc`] for a track title; an explicit track gets the "E" mark right after the text. Returns the text's rect.
+pub fn title_trunc(ui: &Ui, painter: &Painter, pos: Pos2, max_w: f32, text: &str, font: FontId, color: Color32, explicit: Option<(f32, Color32)>) -> Rect {
+    let Some((size, tint)) = explicit else { return trunc(painter, pos, max_w, text, font, color) };
+    let r = trunc(painter, pos, max_w - size - 5., text, font, color);
+    icon(ui, icon!("explicit"), egui::pos2(r.max.x + 5. + size / 2., pos.y), size, tint);
+    r
 }
 
 pub fn text_w(painter: &Painter, text: &str, font: FontId) -> f32 {
@@ -479,14 +479,19 @@ pub fn trim_covers(ctx: &Context) {
 /// The cover at `url` for a `size` slot, `None` until one has loaded. The CDN bucket is roughly the pixels drawn, in 64px steps,
 /// and never below the largest bucket already loaded for this URL, so a resize keeps the sharp image up while a bigger one loads.
 fn cover_texture(ctx: &Context, url: &str, size: egui::Vec2) -> Option<SizedTexture> {
+    cover_loaded(ctx, url, size).map(|(t, _)| t)
+}
+
+/// [`cover_texture`] plus the uri that was loaded, so a variant of the same pixels can be derived from its cached bytes.
+fn cover_loaded(ctx: &Context, url: &str, size: egui::Vec2) -> Option<(SizedTexture, String)> {
     let key = egui::Id::unique(("cover-px", url));
     let shown = ctx.data(|d| d.get_temp::<u32>(key)).unwrap_or(0);
     let want = ((size.x.max(size.y) * ctx.pixels_per_point() / 64.).ceil() * 64.).clamp(64., 800.) as u32;
     let load = |px: u32| {
         let uri = sized_url(url, px);
         touch_cover(ctx, &uri);
-        match Image::new(uri).texture_options(egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR }).load_for_size(ctx, size) {
-            Ok(TexturePoll::Ready { texture }) => Some(texture),
+        match Image::new(uri.clone()).texture_options(egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR }).load_for_size(ctx, size) {
+            Ok(TexturePoll::Ready { texture }) => Some((texture, uri)),
             _ => None,
         }
     };
@@ -500,10 +505,45 @@ fn cover_texture(ctx: &Context, url: &str, size: egui::Vec2) -> Option<SizedText
     (shown > 0).then(|| load(shown)).flatten()
 }
 
+/// True once the cover at `url` has definitely failed to load (a 404, or bytes that are not an image). Only ask while it has not
+/// loaded: it requests the same size bucket `cover_texture` would, so asking about a loaded cover could fetch another size.
+pub fn cover_broken(ctx: &Context, url: &str, size: egui::Vec2) -> bool {
+    let want = ((size.x.max(size.y) * ctx.pixels_per_point() / 64.).ceil() * 64.).clamp(64., 800.) as u32;
+    Image::new(sized_url(url, want)).load_for_size(ctx, size).is_err()
+}
+
 /// Paints the cover at `url` centre-cropped to fill `rect` (never stretched). Nothing paints until a cover for it has loaded.
 pub fn paint_cover(ui: &Ui, url: &str, rect: Rect, corners: CornerRadius, tint: Color32) {
     let Some(texture) = cover_texture(ui.ctx(), url, rect.size()) else { return };
     let uv = crop_uv(texture.size.x / texture.size.y, rect.width() / rect.height());
+    Image::new(texture).fit_to_exact_size(rect.size()).uv(uv).corner_radius(corners).tint(tint).paint_at(ui, rect);
+}
+
+/// A greyscale copy of the cover at `uri`, decoded once from the bytes the colour version already loaded; `None` until they are there.
+fn gray_texture(ctx: &Context, uri: &str) -> Option<egui::TextureHandle> {
+    let cache = egui::Id::NULL.with("gray-covers");
+    if let Some(t) = ctx.data(|d| d.get_temp::<HashMap<String, egui::TextureHandle>>(cache)).and_then(|m| m.get(uri).cloned()) {
+        return Some(t);
+    }
+    let Ok(egui::load::BytesPoll::Ready { bytes, .. }) = ctx.try_load_bytes(uri) else { return None };
+    let img = image::load_from_memory(&bytes).ok()?.grayscale().to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    let tex = ctx.load_texture(format!("gray:{uri}"), egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| {
+        let m = d.get_temp_mut_or_default::<HashMap<String, egui::TextureHandle>>(cache);
+        if m.len() >= 64 {
+            m.clear(); // ponytail: wholesale reset past 64 covers; few items are ever greyed at once
+        }
+        m.insert(uri.to_owned(), tex.clone());
+    });
+    Some(tex)
+}
+
+/// [`paint_cover`] in greyscale (the colour cover shows for the frame or two until the grey copy is decoded).
+pub fn paint_cover_gray(ui: &Ui, url: &str, rect: Rect, corners: CornerRadius, tint: Color32) {
+    let Some((color, uri)) = cover_loaded(ui.ctx(), url, rect.size()) else { return };
+    let uv = crop_uv(color.size.x / color.size.y, rect.width() / rect.height());
+    let texture = gray_texture(ui.ctx(), &uri).map_or(color, |h| SizedTexture::from_handle(&h));
     Image::new(texture).fit_to_exact_size(rect.size()).uv(uv).corner_radius(corners).tint(tint).paint_at(ui, rect);
 }
 
@@ -647,6 +687,12 @@ pub fn backdrop_uv(anchor: Rect, r: Rect) -> Rect {
 /// Paints the blurred backdrop texture over `y0..y1` of `card` with alpha rising 0 -> 1, so whatever is beneath dissolves into it.
 /// UVs match [`backdrop_uv`] for the same `anchor`.
 pub fn fade_blur(painter: &Painter, tex: TextureId, card: Rect, anchor: Rect, y0: f32, y1: f32, alpha: f32) {
+    fade_blur_under(painter, tex, card, anchor, y0, y1, alpha, 0.);
+}
+
+/// [`fade_blur`] for a layer that a second fade of share `over` is painted on top of: its alpha is cut so the two stacked fades
+/// cover the cover as strongly as one (`1 - (1 - a1)(1 - a2) = a`) instead of compounding.
+pub fn fade_blur_under(painter: &Painter, tex: TextureId, card: Rect, anchor: Rect, y0: f32, y1: f32, alpha: f32, over: f32) {
     const ROWS: usize = 6;
     let uv = backdrop_uv(anchor, Rect::from_x_y_ranges(card.x_range(), y0.min(y1)..=y0.max(y1)));
     let (vy0, vy1) = if y0 <= y1 { (uv.min.y, uv.max.y) } else { (uv.max.y, uv.min.y) };
@@ -654,6 +700,7 @@ pub fn fade_blur(painter: &Painter, tex: TextureId, card: Rect, anchor: Rect, y0
     for i in 0..ROWS {
         let f = i as f32 / (ROWS - 1) as f32;
         let a = f * f * (3. - 2. * f) * alpha;
+        let a = a * (1. - over) / (1. - a * over);
         let (y, al) = (y0 + (y1 - y0) * f, (a * 255.) as u8);
         let g = (DIM as f32 * a) as u8;
         let c = Color32::from_rgba_premultiplied(g, g, g, al);

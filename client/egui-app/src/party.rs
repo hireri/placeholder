@@ -684,7 +684,7 @@ impl App {
         self.party_follow_tick(ctx);
         self.party_announce();
         let (track, pos_ms) = match self.pl.song() {
-            Some(s) if self.pl.loaded() => (s.vid().to_string(), (self.pl.pos * 1000.) as i64),
+            Some(s) if self.pl.loaded() && matches!(s.source(), "yt" | "spotify") => (s.vid().to_string(), (self.pl.pos * 1000.) as i64),
             _ => Default::default(),
         };
         *self.party.report.lock().unwrap() = Report { track, pos_ms };
@@ -709,7 +709,7 @@ impl App {
     /// The player as the room would see it.
     fn local_sent(&self) -> Sent {
         Sent {
-            vid: self.pl.song().map(|s| s.vid().to_string()).unwrap_or_default(),
+            vid: self.pl.song().filter(|s| matches!(s.source(), "yt" | "spotify")).map(|s| s.vid().to_string()).unwrap_or_default(),
             playing: self.pl.playing,
             seeks: self.pl.seeks,
             queue: self.shared_upcoming().iter().map(|t| t.id.clone()).collect(),
@@ -936,7 +936,7 @@ impl App {
     }
 
     fn party_follow_tick(&mut self, ctx: &Context) {
-        let Some(vid) = self.pl.song().map(|s| s.vid().to_string()) else { return };
+        let Some(vid) = self.pl.song().filter(|s| matches!(s.source(), "yt" | "spotify")).map(|s| s.vid().to_string()) else { return };
         // The room only carries title, artist and a thumbnail; the rest comes from looking the song up, as a normal play has it.
         if self.party.filled != vid {
             match &*self.data.song_info(ctx, &vid).lock() {
@@ -985,8 +985,8 @@ impl App {
     /// Tells the room what changed in our player: a new song (with the queue), play or pause, a seek, or the queue.
     fn party_announce(&mut self) {
         let Some(song) = self.pl.song() else { return };
-        // A Spotify song has no YouTube id until it is matched; the others could not play it before then.
-        if song.vid().is_empty() {
+        // A Spotify song has no YouTube id until it is matched; a server's song cannot be streamed by the room.
+        if song.vid().is_empty() || !matches!(song.source(), "yt" | "spotify") {
             return;
         }
         let now = self.local_sent();
@@ -1023,12 +1023,12 @@ impl App {
 const POP_W: f32 = 320.;
 
 /// Small caps label over a section, as in the mockup.
-fn label(p: &egui::Painter, t: &crate::theme::Theme, at: egui::Pos2, w: f32, text: &str) {
+pub(crate) fn label(p: &egui::Painter, t: &crate::theme::Theme, at: egui::Pos2, w: f32, text: &str) {
     trunc(p, at, w, &text.to_uppercase(), font_w(10.5, Weight::Semi), t.tf);
 }
 
 /// Rounded button; `strong` is the filled primary style.
-fn btn(ui: &egui::Ui, t: &crate::theme::Theme, key: &str, r: Rect, text: &str, strong: bool) -> bool {
+pub(crate) fn btn(ui: &egui::Ui, t: &crate::theme::Theme, key: &str, r: Rect, text: &str, strong: bool) -> bool {
     let hit = press(ui, ("party", key), r);
     let (bg, fg) = if strong { (t.tx, t.s0) } else { (if hit.hovered() { t.s1 } else { t.s3 }, t.tx) };
     ui.painter().rect_filled(r, rad(10.), bg);

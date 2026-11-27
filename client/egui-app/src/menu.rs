@@ -16,6 +16,8 @@ const W: f32 = 232.;
 pub enum Target {
     /// A song (track row, song card, the player's current song).
     Track(Track),
+    /// A song listed on a playlist page the user can edit: a song menu plus "Remove from this playlist" (the playlist's id).
+    PlTrack(Track, String),
     /// An album, playlist (YouTube or Spotify) or artist; `r#type` says which.
     Item(data::Item),
     /// Entry `i` of the play queue.
@@ -141,16 +143,29 @@ const SAVE: usize = 8;
 const REMOVE: usize = 9;
 const LINK: usize = 10;
 const DELETE: usize = 11;
+const ADD: usize = 12;
+const REMOVE_PL: usize = 13;
+const RENAME: usize = 14;
+const COVER: usize = 15;
+const NEW_PL: usize = 99;
+const PICK_BASE: usize = 100;
+
+/// Tracks and items from YouTube Music or Spotify have a public link; a server's or SoundCloud's do not (yet).
+fn linkable(src: Option<&str>) -> bool {
+    matches!(src, None | Some("yt" | "youtube" | "spotify"))
+}
 
 fn track_link(t: &Track) -> String {
     if t.source == "spotify" { format!("https://open.spotify.com/track/{}", t.id) } else { format!("https://music.youtube.com/watch?v={}", t.id) }
 }
 
 fn item_link(it: &data::Item) -> String {
+    if it.source.as_deref() == Some("spotify") {
+        return format!("https://open.spotify.com/{}/{}", it.r#type, it.id);
+    }
     match it.r#type.as_str() {
         "artist" => format!("https://music.youtube.com/channel/{}", it.id),
         "playlist" => format!("https://music.youtube.com/playlist?list={}", it.id.strip_prefix("VL").unwrap_or(&it.id)),
-        "spotify" => format!("https://open.spotify.com/playlist/{}", it.id),
         _ => format!("https://music.youtube.com/browse/{}", it.id),
     }
 }
@@ -167,6 +182,50 @@ impl App {
         }
     }
 
+    /// Whether an image can be set on `it`: a playlist the user owns on a source that allows it, or (Jellyfin only) an album or artist.
+    pub fn can_image(&self, it: &data::Item) -> bool {
+        let src = it.source.as_deref().unwrap_or("yt");
+        if !self.sources.can(src, "image") {
+            return false;
+        }
+        match it.r#type.as_str() {
+            "playlist" => it.editable,
+            "album" | "artist" => src.starts_with("jellyfin"),
+            _ => false,
+        }
+    }
+
+    /// The "Add to playlist" list: the user's own playlists on the songs' source, and "New playlist…".
+    pub fn playlist_picker(&mut self, ctx: &Context) {
+        let Some((at, tracks)) = self.pl_pick.clone() else { return };
+        let Some(source) = tracks.first().map(|t| if t.source == "youtube" { "yt".to_string() } else { t.source.clone() }) else {
+            self.pl_pick = None;
+            return;
+        };
+        let mine: Vec<(String, String)> = self.lib_items.iter()
+            .filter(|i| i.kind == 1 && i.editable && i.off.is_none() && i.source.as_deref().is_some_and(|s| s == source))
+            .map(|i| (i.id.clone(), i.title.clone()))
+            .collect();
+        let mut items = vec![Item::Heading(if mine.is_empty() { "No playlists here yet" } else { "Add to playlist" })];
+        items.extend(mine.iter().enumerate().map(|(i, (_, name))| Item::Action(PICK_BASE + i, name.as_str(), Some(icon!("pl")))));
+        items.extend([Item::Divider, Item::Action(NEW_PL, "New playlist…", Some(icon!("pl")))]);
+        let t = self.t;
+        let mut open = true;
+        let picked = show(ctx, &t, "pl-pick", &mut open, at, Rect::NOTHING, &items);
+        if !open || picked.is_some() {
+            self.pl_pick = None;
+        }
+        match picked {
+            Some(NEW_PL) => self.name_ask = Some(crate::app::NameAsk { source, tracks, ..Default::default() }),
+            Some(p) if p >= PICK_BASE => {
+                if let Some((id, name)) = mine.get(p - PICK_BASE) {
+                    self.data.add_to_playlist(ctx, id, name, tracks);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Draws the right-click menu in `ctx_menu`, if any, and runs the picked action.
     pub fn context_menu(&mut self, ctx: &Context) {
         let Some((at, target)) = self.ctx_menu.clone() else { return };
@@ -176,8 +235,14 @@ impl App {
         let mut songs: Option<Vec<Track>> = None;
         let mut saved = None;
         match &target {
-            Target::Track(tr) => {
+            Target::Track(tr) | Target::PlTrack(tr, _) => {
                 items.extend([Item::Action(PLAY, "Play", Some(icon!("mplay"))), Item::Action(NEXT, "Play next", Some(icon!("mnext"))), Item::Action(QUEUE, "Add to queue", Some(icon!("que")))]);
+                if self.sources.can(&tr.source, "playlist_write") {
+                    items.push(Item::Action(ADD, "Add to playlist…", Some(icon!("pl"))));
+                }
+                if matches!(&target, Target::PlTrack(..)) {
+                    items.push(Item::Action(REMOVE_PL, "Remove from this playlist", Some(icon!("mtrash"))));
+                }
                 items.extend([Item::Divider, Item::Action(SONG, "Open", Some(icon!("mnote")))]);
                 if tr.artist_id.is_some() {
                     items.push(Item::Action(ARTIST, "Go to artist", Some(icon!("martist"))));
@@ -201,8 +266,9 @@ impl App {
                     let on = self.lib_items.iter().any(|i| i.kind == lib && i.id == it.id);
                     saved = Some(on);
                     if on && it.editable {
+                        items.push(Item::Action(RENAME, "Rename…", Some(icon!("mnote"))));
                         items.push(Item::Action(DELETE, "Delete playlist", Some(icon!("mtrash"))));
-                    } else {
+                    } else if it.source.as_deref().unwrap_or("yt") == "yt" {
                         items.push(Item::Action(SAVE, if on { "Remove from library" } else { "Save to library" }, Some(if on { icon!("munsave") } else { icon!("msave") })));
                     }
                 }
@@ -214,7 +280,13 @@ impl App {
                 };
                 let cur = self.pl.is_current(&tr);
                 if !cur {
-                    items.extend([Item::Action(PLAY, "Play now", Some(icon!("mplay"))), Item::Action(NEXT, "Play next", Some(icon!("mnext"))), Item::Action(REMOVE, "Remove from queue", Some(icon!("x"))), Item::Divider]);
+                    items.extend([Item::Action(PLAY, "Play now", Some(icon!("mplay"))), Item::Action(NEXT, "Play next", Some(icon!("mnext"))), Item::Action(REMOVE, "Remove from queue", Some(icon!("x")))]);
+                }
+                if self.sources.can(&tr.source, "playlist_write") {
+                    items.push(Item::Action(ADD, "Add to playlist…", Some(icon!("pl"))));
+                }
+                if !cur {
+                    items.push(Item::Divider);
                 }
                 items.push(Item::Action(SONG, "Open", Some(icon!("mnote"))));
                 if tr.artist_id.is_some() {
@@ -222,7 +294,19 @@ impl App {
                 }
             }
         }
-        items.extend([Item::Divider, Item::Action(LINK, "Copy link", Some(icon!("mlink")))]);
+        if let Target::Item(it) = &target {
+            if self.can_image(it) {
+                items.push(Item::Action(COVER, "Change image…", Some(icon!("mopen"))));
+            }
+        }
+        let link_src: Option<String> = match &target {
+            Target::Track(t) | Target::PlTrack(t, _) => Some(t.source.clone()),
+            Target::Item(i) => i.source.clone(),
+            Target::Queue(i) => self.pl.track_at(*i).map(|t| t.source),
+        };
+        if linkable(link_src.as_deref()) {
+            items.extend([Item::Divider, Item::Action(LINK, "Copy link", Some(icon!("mlink")))]);
+        }
         let mut open = true;
         let picked = show(ctx, &t, "ctx-menu", &mut open, at, self.ctx_keep, &items);
         if !open || picked.is_some() {
@@ -231,7 +315,9 @@ impl App {
         }
         let Some(pick) = picked else { return };
         match target {
-            Target::Track(tr) => match pick {
+            Target::PlTrack(tr, pid) if pick == REMOVE_PL => self.data.remove_from_playlist(ctx, &pid, &tr),
+            Target::Track(tr) | Target::PlTrack(tr, _) => match pick {
+                ADD => self.pl_pick = Some((at, vec![tr])),
                 PLAY => self.pl.play_tracks(ctx, std::slice::from_ref(&tr), 0, false),
                 NEXT | QUEUE => {
                     self.pl.enqueue(ctx, std::slice::from_ref(&tr), pick == NEXT);
@@ -258,9 +344,24 @@ impl App {
                         }
                     }
                     DELETE => self.confirm_delete(ctx, &it.id),
+                    RENAME => self.name_ask = Some(crate::app::NameAsk { rename: Some(it.id.clone()), text: it.title.clone(), ..Default::default() }),
+                    COVER => {
+                        let kind = match it.r#type.as_str() { "artist" => "artist", "album" => "album", _ => "playlist" };
+                        let (data, ctx, id) = (self.data.clone(), ctx.clone(), it.id.clone());
+                        std::thread::spawn(move || {
+                            let file = rfd::FileDialog::new().set_title("Choose an image").add_filter("Image", &["jpg", "jpeg", "png", "webp"]).pick_file();
+                            if let Some(path) = file {
+                                data.set_image(&ctx, kind, &id, path);
+                            }
+                        });
+                    }
                     SAVE => {
                         let kind = if it.r#type == "album" { "albums" } else { "playlists" };
-                        self.data.save(ctx, kind, &it.id, !saved.unwrap_or(false));
+                        if kind == "playlists" && saved == Some(true) && self.data.library_item(&it.id).is_some_and(|i| i.editable) {
+                            self.confirm_delete(ctx, &it.id);
+                        } else {
+                            self.data.save(ctx, kind, &it.id, !saved.unwrap_or(false));
+                        }
                     }
                     _ => {
                         ctx.copy_text(item_link(&it));
@@ -271,6 +372,7 @@ impl App {
             Target::Queue(i) => {
                 let Some(tr) = self.pl.track_at(i) else { return };
                 match pick {
+                    ADD => self.pl_pick = Some((at, vec![tr])),
                     PLAY => self.pl.play_index(ctx, i),
                     NEXT => self.pl.move_next(i),
                     REMOVE => {

@@ -1,5 +1,6 @@
 //! Settings page: a tab bar (with a search button at its right end) above titled sections of rows and blocks (cards), one tab at a time.
 
+use crate::menu::Item;
 use crate::gfx::Calm;
 use crate::tip::Tip;
 use crate::app::{App, VIDEO_HEIGHTS};
@@ -18,6 +19,10 @@ use std::sync::Arc;
 pub struct Opts {
     /// 34px track rows instead of 44px.
     pub compact: bool,
+    /// Library items from a source that is off or unreachable are hidden instead of greyed out.
+    pub hide_off: bool,
+    /// Home: 0 shelves mixed from every source, 1 one section per source.
+    pub home_layout: u8,
     /// Album and artist headers wash with the cover's colour instead of a flat tone.
     pub tint: bool,
     /// 0 follow the system, 1 light, 2 dark.
@@ -44,6 +49,11 @@ pub struct Opts {
     pub discord_party: bool,
     pub discord_listen: bool,
     pub discord_get: bool,
+    /// Look up covers of server songs online (the daemon asks MusicBrainz). On by default; the key is new so earlier saved settings pick the default up.
+    #[serde(rename = "discord_server_cover")]
+    pub discord_cover: bool,
+    /// Link button for server songs: 0 none, 1 Last.fm, 2 MusicBrainz.
+    pub discord_link: u8,
     /// Host: let people in without asking.
     pub party_auto_accept: bool,
     /// Party notifications: join requests and answers to yours; people joining and leaving; being removed or the party ending.
@@ -138,7 +148,7 @@ pub struct Opts {
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { compact: false, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, discord_listen: true, discord_get: false, party_auto_accept: false, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, lyrics_center: false, lyrics_follow: true, lyrics_tap_seek: true, reduce_motion: false, close_tray: true, start_minimized: false, autostart: false, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false, image_cache: 96, hide_recents: false, hide_moods: false, hide_top_picks: false, hide_shorts: false, music_only: false, auto_playlists: true, auto_update: true, restore_queue: false, skip_on_error: false, output: String::new(), viz_style: 1, viz_logo: false, logo: 1, viz_ambient: false, viz_wave: false, viz_fps: 60 }
+        Opts { compact: false, hide_off: false, home_layout: 0, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, discord_listen: true, discord_get: false, discord_cover: true, discord_link: 0, party_auto_accept: false, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, lyrics_center: false, lyrics_follow: true, lyrics_tap_seek: true, reduce_motion: false, close_tray: true, start_minimized: false, autostart: false, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false, image_cache: 96, hide_recents: false, hide_moods: false, hide_top_picks: false, hide_shorts: false, music_only: false, auto_playlists: true, auto_update: true, restore_queue: false, skip_on_error: false, output: String::new(), viz_style: 1, viz_logo: false, logo: 1, viz_ambient: false, viz_wave: false, viz_fps: 60 }
     }
 }
 
@@ -188,14 +198,15 @@ pub enum Pick {
 
 const SYSTEM: &str = "SYSTEM_DEFAULT";
 /// Name of each tab, in bar order.
-const TABS: [&str; 7] = ["Appearance", "Playback", "Library", "Storage", "Privacy", "Accounts", "System"];
+const TABS: [&str; 8] = ["Appearance", "Playback", "Library", "Storage", "Privacy", "Sources", "Accounts", "System"];
 pub const APPEARANCE: usize = 0;
-pub const ACCOUNTS: usize = 5;
+const SOURCES: usize = 5;
+pub const ACCOUNTS: usize = 6;
 /// Shortcuts live on the System tab.
-pub const KEYS: usize = 6;
+pub const KEYS: usize = 7;
 const LIBRARY: usize = 2;
 /// Tabs made of plain rows, which the search looks through (Accounts and System are custom layouts).
-const SEARCHABLE: usize = 5;
+const SEARCHABLE: usize = 6;
 pub const SCALES: [u8; 6] = [80, 90, 100, 110, 125, 150];
 const SCROLL: [u8; 3] = [60, 100, 150];
 const LYR_SIZES: [u8; 3] = [85, 100, 125];
@@ -222,6 +233,17 @@ const SHORTCUTS: &[(&str, &[&str])] = &[
     ("Command palette", &["Ctrl", "K"]),
 ];
 
+/// Logo of a source type; Navidrome has no mark of its own.
+fn source_icon(ty: &str) -> &'static str {
+    match ty {
+        "youtube" => icon!("src-youtube"),
+        "jellyfin" => icon!("src-jellyfin"),
+        "soundcloud" => icon!("src-soundcloud"),
+        "bandcamp" => icon!("src-bandcamp"),
+        _ => icon!("src-generic"),
+    }
+}
+
 const ROW_H: f32 = 60.;
 const BAR_H: f32 = 44.;
 /// Room kept free left of a row's text for its control.
@@ -241,6 +263,8 @@ struct Page {
     /// Background slot and top of the open section card.
     card: Option<(egui::layers::ShapeIdx, f32)>,
     rows: usize,
+    /// Extra left inset of a row's text, for rows that carry their own leading art.
+    pad: f32,
 }
 
 impl Page {
@@ -267,7 +291,7 @@ impl App {
             let hid = ui.scope_id().with(("settings-h", tab, !q.is_empty()));
             let h = ui.data(|d| d.get_temp::<f32>(hid)).unwrap_or(area.height());
             let (_, virt) = ui.allocate_space(vec2(area.width(), h));
-            let mut pg = Page { x0: virt.min.x, x1: virt.max.x, y: virt.min.y + 4., q, tab: TABS[tab], head: None, card: None, rows: 0 };
+            let mut pg = Page { x0: virt.min.x, x1: virt.max.x, y: virt.min.y + 4., q, tab: TABS[tab], head: None, card: None, rows: 0, pad: 0. };
             if pg.q.is_empty() {
                 match tab {
                     0 => self.appearance(ui, &mut pg),
@@ -275,6 +299,7 @@ impl App {
                     LIBRARY => self.library_tab(ui, &mut pg),
                     3 => self.storage_tab(ui, &mut pg),
                     4 => self.privacy_tab(ui, &mut pg),
+                    SOURCES => self.sources_tab(ui, &mut pg),
                     ACCOUNTS => self.accounts(ui, &mut pg),
                     _ => self.system(ui, &mut pg),
                 }
@@ -286,6 +311,7 @@ impl App {
                         1 => self.playback(ui, &mut pg),
                         LIBRARY => self.library_tab(ui, &mut pg),
                         3 => self.storage_tab(ui, &mut pg),
+                        SOURCES => self.sources_tab(ui, &mut pg),
                         _ => self.privacy_tab(ui, &mut pg),
                     }
                 }
@@ -466,11 +492,11 @@ impl App {
         if !self.begin_card(ui, pg) {
             p.hline((pg.x0 + 20.)..=(pg.x1 - 20.), pg.y, egui::Stroke::new(1., t.s3.gamma_multiply(0.6)));
         }
-        let w = (pg.x1 - pg.x0 - 40. - CONTROL_W).max(120.);
+        let w = (pg.x1 - pg.x0 - 40. - CONTROL_W - pg.pad).max(120.);
         let (ty, dy) = if desc.is_empty() { (pg.y + ROW_H / 2., 0.) } else { (pg.y + 23., pg.y + 43.) };
-        trunc(p, pos2(pg.x0 + 20., ty), w, title, font(13.), t.tx);
+        trunc(p, pos2(pg.x0 + 20. + pg.pad, ty), w, title, font(13.), t.tx);
         if dy > 0. {
-            trunc(p, pos2(pg.x0 + 20., dy), w, desc, font(12.), t.tm);
+            trunc(p, pos2(pg.x0 + 20. + pg.pad, dy), w, desc, font(12.), t.tm);
         }
         pg.rows += 1;
         pg.y += ROW_H;
@@ -703,13 +729,18 @@ impl App {
                 self.pl.engine.set_gapless(self.opts.gapless);
             }
         }
-        if let Some(cy) = self.row(ui, pg, "Output device", "Click to switch; falls back to default if it disconnects") {
+        if let Some(cy) = self.row(ui, pg, "Output device", "Falls back to default if it disconnects") {
             let label = if self.opts.output.is_empty() { "Default" } else { &self.opts.output };
             if picker_pill(ui, &self.t, "output-device", right, cy, label) {
-                let mut names = crate::audio::output_names();
-                names.insert(0, String::new());
-                let i = names.iter().position(|n| *n == self.opts.output).map_or(0, |i| i + 1);
-                self.opts.output = names[i % names.len()].clone();
+                self.out_menu = !self.out_menu;
+            }
+            let names = crate::audio::output_names();
+            let mut items = vec![Item::Check(0, "Default", self.opts.output.is_empty())];
+            items.extend(names.iter().enumerate().map(|(i, n)| Item::Check(i + 1, n, *n == self.opts.output)));
+            let pill = Rect::from_min_size(pos2(right - 200., cy - 16.), vec2(200., 32.));
+            if let Some(i) = crate::menu::show(ui.ctx(), &self.t, "output-menu", &mut self.out_menu, pos2(right - 232., pill.max.y + 6.), pill, &items) {
+                self.opts.output = if i == 0 { String::new() } else { names[i - 1].clone() };
+                self.out_menu = false;
                 self.set_output(ui.ctx());
             }
         }
@@ -1097,6 +1128,262 @@ impl App {
         }
     }
 
+    /// Music sources in priority order (drag the grip to reorder), their details when expanded, and the add form.
+    fn sources_tab(&mut self, ui: &mut egui::Ui, pg: &mut Page) {
+        let (t, right, ctx) = (self.t, pg.right(), ui.ctx().clone());
+        let list = match self.sources.list(&ctx) {
+            None => return self.info(ui, pg, "Loading sources…"),
+            Some(Err(e)) => return self.info(ui, pg, &format!("Couldn't load sources: {e}")),
+            Some(Ok(l)) => l,
+        };
+        self.data.status.ensure(&ctx, || crate::backend::get("/auth/status"));
+        let signed_in = match &*self.data.status.lock() {
+            State::Ready(s) if s.youtube.logged_in => format!("Signed in as {}", s.youtube.user.as_ref().map_or("you", |u| u.name.as_str())),
+            State::Ready(_) => "Not signed in".into(),
+            _ => String::new(),
+        };
+        self.sec(ui, pg, "Sources");
+        let (width, can_drag) = (pg.x1 - pg.x0, pg.q.is_empty());
+        let (mut top, mut drop_at) = (0., None);
+        for (i, s) in list.iter().enumerate() {
+            // YouTube's connection detail is the account name, which the signed-in note already says.
+            let mut shown = s.clone();
+            if s.id == "yt" && !signed_in.is_empty() {
+                shown.detail = None;
+            }
+            let mut desc = shown.line(self.sources.checking(&s.id));
+            if s.id == "yt" && s.enabled && !signed_in.is_empty() {
+                desc = format!("{desc} · {signed_in}");
+            }
+            pg.pad = 84.;
+            let cy = self.row(ui, pg, &s.name, &desc);
+            pg.pad = 0.;
+            let Some(cy) = cy else { continue };
+            let row = Rect::from_center_size(pos2((pg.x0 + pg.x1) / 2., cy), vec2(width, ROW_H));
+            if i == 0 {
+                top = row.min.y;
+            }
+            let open = self.sources.open.as_deref() == Some(s.id.as_str());
+            if press(ui, ("src-row", &s.id), row).clicked() {
+                self.sources.confirm = None;
+                self.sources.open = (!open).then(|| s.id.clone());
+                self.sources.edit = crate::sources::Edit { name: s.name.clone(), url: s.url.clone().unwrap_or_default(), user: s.username.clone().unwrap_or_default(), secret: String::new() };
+            }
+            let p = ui.painter();
+            let dim = if s.enabled { t.tx } else { t.tm };
+            let grip = Rect::from_min_size(row.min, vec2(60., ROW_H));
+            let g = ui.interact(grip, ui.scope_id().with(("src-grip", &s.id)), Sense::drag());
+            if can_drag && (g.hovered() || g.dragged()) {
+                ui.ctx().set_cursor_icon(if g.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+            }
+            if can_drag && g.dragged() {
+                self.sources.drag = Some(i);
+                self.sources.open = None;
+            }
+            if can_drag && g.drag_stopped() {
+                drop_at = Some(i);
+            }
+            icon(ui, icon!("grip"), pos2(row.min.x + 26., cy), 16., t.tf);
+            p.text(pos2(row.min.x + 42., cy), Align2::LEFT_CENTER, i + 1, font_w(12., Weight::Semi), t.tm);
+            icon(ui, source_icon(&s.r#type), pos2(row.min.x + 84., cy), 22., dim);
+            if self.sources.drag == Some(i) {
+                p.rect_filled(row, 0., t.s1.gamma_multiply(0.5));
+            }
+            let mut on = s.enabled;
+            if toggle(ui, &t, &format!("src-on-{}", s.id), right, cy, &mut on) {
+                self.sources.patch(&ctx, &s.id, json!({ "enabled": on }), on, |s| s.enabled = on);
+            }
+            self.details_anim(ui, pg, s, open);
+        }
+        if let (Some(from), Some(p)) = (self.sources.drag, ui.input(|i| i.pointer.latest_pos())) {
+            let to = (((p.y - top) / ROW_H).floor().max(0.) as usize).min(list.len() - 1);
+            if let Some(i) = drop_at {
+                self.sources.reorder(&ctx, i, to);
+            } else {
+                let y = top + (to + (to > from) as usize) as f32 * ROW_H;
+                ui.painter().hline(pg.x0..=pg.x1, y, egui::Stroke::new(2., t.ax));
+            }
+        }
+        if drop_at.is_some() || !ui.input(|i| i.pointer.any_down()) {
+            self.sources.drag = None;
+        }
+        self.add_source(ui, pg);
+        self.info(ui, pg, "When a song exists in several sources, the one higher in this list plays.");
+        if let Some(cy) = self.row(ui, pg, "Unavailable items", "Library items from a source that is off or unreachable") {
+            self.opts.hide_off = segmented(ui, &self.t, "hide-off", right, cy, &["Gray out", "Hide"], self.opts.hide_off as usize) == 1;
+        }
+        if let Some(cy) = self.row(ui, pg, "Home layout", "Shelves mixed from every source, or one section per source") {
+            let cur = self.opts.home_layout as usize;
+            let sel = segmented(ui, &self.t, "home-layout", right, cy, &["Mixed shelves", "One section per source"], cur);
+            if sel != cur {
+                self.opts.home_layout = sel as u8;
+                self.data.home.reset();
+            }
+        }
+    }
+
+    /// The expanded source's settings, opened and closed with a slide and fade. Its height is measured while it is drawn and reused the next frame.
+    fn details_anim(&mut self, ui: &mut egui::Ui, pg: &mut Page, s: &crate::sources::Source, open: bool) {
+        let id = ui.scope_id().with(("src-open", &s.id));
+        let k = ui.ctx().calm_bool_ease(id, open, 0.22, ease_out);
+        if k <= 0.001 {
+            return;
+        }
+        let hid = id.with("h");
+        let full = ui.data(|d| d.get_temp::<f32>(hid)).unwrap_or(0.);
+        let y0 = pg.y;
+        let clip = Rect::from_min_max(pos2(pg.x0 - 2., y0), pos2(pg.x1 + 2., y0 + if open && k >= 1. { 10_000. } else { full * k }));
+        ui.scope(|ui| {
+            ui.set_clip_rect(clip.intersect(ui.clip_rect()));
+            ui.set_opacity(k);
+            self.source_details(ui, pg, s);
+        });
+        let used = pg.y - y0;
+        if (used - full).abs() > 0.5 && used > 0. {
+            ui.data_mut(|d| d.insert_temp(hid, used));
+            ui.ctx().request_repaint();
+        }
+        if k < 1. || !open {
+            pg.y = y0 + used * k;
+        }
+    }
+
+    fn source_details(&mut self, ui: &mut egui::Ui, pg: &mut Page, s: &crate::sources::Source) {
+        let (t, right, ctx) = (self.t, pg.right(), ui.ctx().clone());
+        let server = !s.builtin && !s.singleton;
+        let has = |c: &str| s.caps.iter().any(|x| x == c);
+        let mut patch = None;
+        if server {
+            if let Some(cy) = self.row(ui, pg, "Name", "") {
+                if text_field(ui, &t, "src-name", right, cy, &mut self.sources.edit.name, false) && !self.sources.edit.name.trim().is_empty() && self.sources.edit.name.trim() != s.name {
+                    patch = Some(("name", self.sources.edit.name.trim().to_string(), false));
+                }
+            }
+            for (key, title, pw) in [("url", "Server URL", false), ("username", "Username", false), ("secret", "Change password", true)] {
+                let desc = if pw { "Leave empty to keep the current one" } else { "" };
+                let Some(cy) = self.row(ui, pg, title, desc) else { continue };
+                let buf = match key { "url" => &mut self.sources.edit.url, "username" => &mut self.sources.edit.user, _ => &mut self.sources.edit.secret };
+                if text_field(ui, &t, key, right, cy, buf, pw) {
+                    let v = buf.trim().to_string();
+                    let old = if key == "url" { s.url.as_deref() } else { s.username.as_deref() }.unwrap_or_default();
+                    if !v.is_empty() && (pw || v != old) {
+                        patch = Some((key, v, true));
+                        if pw {
+                            buf.clear();
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((key, v, retest)) = patch {
+            self.sources.patch(&ctx, &s.id, json!({ key: v }), retest, |s| if key == "name" { s.name = v.clone() });
+        }
+        if has("home") {
+            if let Some(cy) = self.row(ui, pg, "Show on Home", "Its shelves appear on the Home page") {
+                let mut on = s.home;
+                if toggle(ui, &t, &format!("src-home-{}", s.id), right, cy, &mut on) {
+                    self.sources.patch(&ctx, &s.id, json!({ "home": on }), false, |s| s.home = on);
+                }
+            }
+        }
+        if has("search") {
+            if let Some(cy) = self.row(ui, pg, "Include in search", "Its results appear when you search") {
+                let mut on = s.search;
+                if toggle(ui, &t, &format!("src-search-{}", s.id), right, cy, &mut on) {
+                    self.sources.patch(&ctx, &s.id, json!({ "search": on }), false, |s| s.search = on);
+                }
+            }
+        }
+        if server {
+            if let Some(cy) = self.row(ui, pg, "Scrobble to Last.fm via", "Pick “This server” if it already scrobbles to Last.fm or ListenBrainz, or plays count twice") {
+                let cur = (s.scrobble_via == "server") as usize;
+                let sel = segmented(ui, &t, "src-via", right, cy, &["Serafin", "This server"], cur);
+                if sel != cur {
+                    let via = ["serafin", "server"][sel];
+                    self.sources.patch(&ctx, &s.id, json!({ "scrobbleVia": via }), false, |s| s.scrobble_via = via.into());
+                }
+            }
+        }
+        if !s.builtin {
+            if let Some(cy) = self.row(ui, pg, "Test connection", "Check that Serafin can reach it") {
+                if button(ui, &t, "src-test", right, cy, "Test") {
+                    self.sources.test(&ctx, &s.id);
+                }
+            }
+        }
+        if server {
+            if let Some(cy) = self.row(ui, pg, "Remove source", "Serafin stops using it; the server itself is untouched") {
+                let sure = self.sources.confirm.as_deref() == Some(s.id.as_str());
+                if button(ui, &t, "src-remove", right, cy, if sure { "Click again to remove" } else { "Remove" }) {
+                    if sure {
+                        self.sources.remove(&ctx, &s.id);
+                        (self.sources.open, self.sources.confirm) = (None, None);
+                    } else {
+                        self.sources.confirm = Some(s.id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// The "Add a source" row and, once opened, its form.
+    fn add_source(&mut self, ui: &mut egui::Ui, pg: &mut Page) {
+        let (t, right, ctx) = (self.t, pg.right(), ui.ctx().clone());
+        let open = self.sources.open.as_deref() == Some("+");
+        if self.sources.take_added() {
+            self.sources.form = Default::default();
+            self.sources.open = None;
+            return;
+        }
+        if let Some(cy) = self.row(ui, pg, "Add a source", "Navidrome or Jellyfin. SoundCloud and Bandcamp are built in: just turn them on") {
+            if button(ui, &t, "src-add-open", right, cy, if open { "Cancel" } else { "Add…" }) {
+                self.sources.open = (!open).then(|| "+".to_string());
+                self.sources.confirm = None;
+                self.sources.clear_msg();
+            }
+        }
+        if !open {
+            return;
+        }
+        let kind = self.sources.form.kind;
+        if let Some(cy) = self.row(ui, pg, "Type", "") {
+            let sel = segmented(ui, &t, "src-kind", right, cy, &["Navidrome", "Jellyfin"], kind);
+            if sel != kind {
+                self.sources.form.kind = sel;
+                self.sources.clear_msg();
+            }
+        }
+        let server = true;
+        let fields: &[(&str, &str, bool)] = &[("src-f-url", "Server URL", false), ("src-f-user", "Username", false), ("src-f-pw", "Password", true)];
+        for (key, title, pw) in fields {
+            let Some(cy) = self.row(ui, pg, title, if !server { "Optional" } else { "" }) else { continue };
+            let f = &mut self.sources.form;
+            let buf = match *key { "src-f-url" => &mut f.url, "src-f-user" => &mut f.user, _ => &mut f.secret };
+            text_field(ui, &t, key, right, cy, buf, *pw);
+        }
+        if let Some(cy) = self.row(ui, pg, "Name", "Optional") {
+            text_field(ui, &t, "src-f-name", right, cy, &mut self.sources.form.name, false);
+        }
+        if server {
+            if let Some(cy) = self.row(ui, pg, "Does this server already scrobble?", "Pick “This server” if it scrobbles to Last.fm or ListenBrainz, or plays count twice") {
+                self.sources.form.via = segmented(ui, &t, "src-f-via", right, cy, &["Serafin", "This server"], self.sources.form.via);
+            }
+        }
+        let f = &self.sources.form;
+        let ready = !server || [&f.url, &f.user, &f.secret].iter().all(|v| !v.trim().is_empty());
+        let (busy, msg) = self.sources.form_state();
+        let desc = if busy { "Testing…".to_string() } else { msg.as_ref().map(|m| m.1.clone()).unwrap_or_default() };
+        if let Some(cy) = self.row(ui, pg, "Test connection", &desc) {
+            let add_w = text_w(ui.painter(), "Add", font_w(13., Weight::Semi)) + 32.;
+            if button(ui, &t, "src-f-test", right - add_w - 8., cy, "Test") && ready {
+                self.sources.submit(&ctx, false);
+            }
+            if button(ui, &t, "src-f-add", right, cy, "Add") && ready {
+                self.sources.submit(&ctx, true);
+            }
+        }
+    }
+
     fn accounts(&mut self, ui: &mut egui::Ui, pg: &mut Page) {
         // The sign-in cards are laid out by `accounts_panel` with 16px of inset, so give it a rect 16px wider each side.
         let wide = Rect::from_min_max(pos2(pg.x0 - 16., pg.y), pos2(pg.x1 + 16., pg.y + 300.));
@@ -1117,6 +1404,12 @@ impl App {
         }
         if let Some(cy) = self.row(ui, pg, "Get Serafin button", "Link to the Serafin repository on your activity") {
             toggle(ui, &self.t, "discord-get", pg.right(), cy, &mut self.opts.discord_get);
+        }
+        if let Some(cy) = self.row(ui, pg, "Cover art for server songs", "Finds a public cover on MusicBrainz from the artist and album name (never your server or its address) and shows it on Discord") {
+            toggle(ui, &self.t, "discord-cover", pg.right(), cy, &mut self.opts.discord_cover);
+        }
+        if let Some(cy) = self.row(ui, pg, "Link button for server songs", "Public Last.fm or MusicBrainz link built from the artist and title, shown on Discord instead of the YouTube button") {
+            self.opts.discord_link = segmented(ui, &self.t, "discord-link", pg.right(), cy, &["None", "Last.fm", "MusicBrainz"], (self.opts.discord_link as usize).min(2)) as u8;
         }
         self.sec(ui, pg, "Listening party");
         if let Some(cy) = self.row(ui, pg, "Let people in automatically", "Accept join requests without asking") {

@@ -460,7 +460,7 @@ impl App {
                                     let tx = cover.max.x + 12.;
                                     let (pre, m, post) = split(&it.title, st.base.trim());
                                     rich(&p, pos2(tx, cy - 8.), vr.max.x - 10. - tx, &[(pre, reg.clone(), t.tx), (m, reg.clone(), t.ax), (post, reg, t.tx)]);
-                                    let sub = [Some(type_label(&it.r#type)).filter(|s| !s.is_empty()), it.subtitle.as_deref().filter(|s| !s.is_empty())].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                                    let sub = [Some(type_label(&it.r#type)).filter(|s| !s.is_empty()), Some(it.sub()).filter(|s| !s.is_empty())].into_iter().flatten().collect::<Vec<_>>().join(" · ");
                                     trunc(&p, pos2(tx, cy + 8.), vr.max.x - 10. - tx, &sub, font(12.), t.tm);
                                 }
                                 Kind::Entry(en) => {

@@ -166,8 +166,9 @@ impl Scrobbler {
 
     /// Mirrors a like to Last.fm's loved tracks.
     pub fn love(&self, ctx: &Context, t: &Track, on: bool) {
-        if self.cfg().is_some_and(|c| c.logged_in && c.enabled && c.send_likes) {
-            spawn(ctx, "/lastfm/love", json!({ "artist": t.artists.join(", "), "track": t.title, "album": t.album, "love": on }));
+        let artist = t.artists.join(", ");
+        if crate::data::real_artist(&artist) && self.cfg().is_some_and(|c| c.logged_in && c.enabled && c.send_likes) {
+            spawn(ctx, "/lastfm/love", json!({ "artist": artist, "track": t.title, "album": t.album, "love": on }));
         }
     }
 
@@ -179,7 +180,8 @@ impl Scrobbler {
         }
         let now = Instant::now();
         let dt = self.last.replace(now).map_or(0., |l| (now - l).as_secs_f32().min(2.));
-        let Some((title, artist, album)) = song else {
+        // Last.fm rejects an empty artist, so a song without one is neither announced nor scrobbled.
+        let Some((title, artist, album)) = song.filter(|s| crate::data::real_artist(s.1)) else {
             self.key = Default::default();
             return;
         };

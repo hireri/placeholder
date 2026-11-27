@@ -12,7 +12,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable data class SpotifyCreds(val spDc: String)
 
-@Serializable data class StoredCreds(val youtube: YouTubeCreds? = null, val spotify: SpotifyCreds? = null, val lastfm: LastFmCreds? = null, val lastfmApp: LastFmAppKey? = null)
+@Serializable data class StoredCreds(val youtube: YouTubeCreds? = null, val spotify: SpotifyCreds? = null, val lastfm: LastFmCreds? = null, val lastfmApp: LastFmAppKey? = null, val sources: List<SourceConfig> = emptyList(), val sourceOrder: List<String> = emptyList(), val youtubeEnabled: Boolean = true, val youtubeHome: Boolean = true, val youtubeSearch: Boolean = true)
 
 @Serializable
 data class TrackDto(
@@ -47,6 +47,7 @@ data class StreamDto(
     val useRangeChunks: Boolean,
     /** Track length from the player response; catalogue entries for videos often carry none. */
     val durationSec: Int? = null,
+    /** Bits per second. */
     val bitrate: Int? = null,
     /** Measured loudness in LUFS as upstream normalization computes it (perceptual, else loudnessDb shifted by the AGGRESSIVE target). */
     val loudnessLufs: Double? = null,
@@ -71,9 +72,15 @@ data class ItemDto(
     val video: Boolean = false,
     /** Playlists only: owned by the signed-in user, so it can be deleted rather than just unsaved. */
     val editable: Boolean = false,
+    /** Id of the source it came from (`yt` for YouTube Music). Set by the registry, not by providers. */
+    val source: String? = null,
+    /** Library items whose source is turned off or unreachable are still listed (from the last snapshot) but cannot be opened; `reason` says why. */
+    val unavailable: Boolean = false,
+    val reason: String? = null,
 )
 
-@Serializable data class SectionDto(val title: String, val items: List<ItemDto>)
+/** `shelf` (continue | recent | mixes | discover | played) lets the client place a section regardless of its source; null for YouTube. */
+@Serializable data class SectionDto(val title: String, val items: List<ItemDto>, val shelf: String? = null, val source: String? = null)
 
 /** Search-as-you-type: query completions plus the songs, albums and artists YouTube Music suggests for them. */
 @Serializable data class SuggestDto(val queries: List<String>, val items: List<ItemDto>)

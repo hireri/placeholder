@@ -42,9 +42,14 @@ impl App {
 
     /// Thumbnail from a URL (loaded and cached by egui), over a placeholder fill.
     pub fn thumb(&self, ui: &egui::Ui, url: Option<&str>, rect: Rect, r: f32) {
+        self.thumb_g(ui, url, rect, r, false);
+    }
+
+    /// [`thumb`](Self::thumb), in greyscale when `gray` (an item whose source is off).
+    pub fn thumb_g(&self, ui: &egui::Ui, url: Option<&str>, rect: Rect, r: f32, gray: bool) {
         ui.painter().rect_filled(rect, rad(r), self.t.s3);
         if let Some(u) = url {
-            paint_cover(ui, u, rect, rad(r), Color32::WHITE);
+            if gray { paint_cover_gray(ui, u, rect, rad(r), Color32::WHITE) } else { paint_cover(ui, u, rect, rad(r), Color32::WHITE) }
         }
     }
 
@@ -125,7 +130,8 @@ impl App {
         }
     }
 
-    fn item_card(&mut self, ui: &mut egui::Ui, cell: Rect, it: &Item, queue: &[&Item], key: (usize, usize)) {
+    /// `badge`: the list this card is in mixes sources, so the card names its own.
+    fn item_card(&mut self, ui: &mut egui::Ui, cell: Rect, it: &Item, queue: &[&Item], key: (usize, usize), badge: bool) {
         let t = self.t;
         let r = tonal(ui, &t, ("card", key), cell, 10., None);
         if r.hovered() {
@@ -140,17 +146,26 @@ impl App {
         if self.play_badge(ui, cell, pos2(art.max.x - 10. - 24., art.max.y - 10. - 24.), 48., ("card-play", key)) {
             self.play_item(ui.ctx(), it, queue);
         }
+        let dx = self.source_mark_if(ui, (badge || it.unavailable).then_some(it.src()), it.unavailable, art.min.x, art.max.y + 33., t.tm);
         let p = ui.painter();
-        trunc(p, pos2(art.min.x, art.max.y + 16.), art.width(), &it.title, font_w(13., Weight::Medium), t.tx);
-        let badge = if it.explicit && it.r#type == "song" { explicit_badge(p, pos2(art.min.x, art.max.y + 33.), if r.hovered() { t.s2 } else { t.s1 }, t.tm, 13.) } else { 0. };
-        trunc(p, pos2(art.min.x + badge, art.max.y + 33.), art.width() - badge, it.subtitle.as_deref().unwrap_or(""), font(12.), t.tm);
+        title_trunc(ui, p, pos2(art.min.x, art.max.y + 16.), art.width(), &it.title, font_w(13., Weight::Medium), t.tx, (it.explicit && it.r#type == "song").then_some((14., t.tm)));
+        trunc(p, pos2(art.min.x + dx, art.max.y + 33.), art.width() - dx, it.sub(), font(12.), t.tm);
     }
 
     /// One titled, horizontally scrolling row of cards; arrows and edge fades show when more cards are off-screen.
     /// `more` adds a "Show all" button that opens the shelf as a wrapped page.
-    pub(crate) fn carousel<'a>(&mut self, ui: &mut egui::Ui, (l, w, full): (f32, f32, f32), title: &str, items: impl Iterator<Item = &'a Item>, si: usize, more: bool) {
+    pub(crate) fn carousel<'a>(&mut self, ui: &mut egui::Ui, dims: (f32, f32, f32), title: &str, items: impl Iterator<Item = &'a Item>, si: usize, more: bool) {
+        self.carousel_from(ui, dims, title, None, items, si, more)
+    }
+
+    /// `carousel` whose title is preceded by the logo of the shelf's `src` (when 2+ sources are enabled).
+    #[allow(clippy::too_many_arguments)]
+    fn carousel_from<'a>(&mut self, ui: &mut egui::Ui, (l, w, full): (f32, f32, f32), title: &str, src: Option<&str>, items: impl Iterator<Item = &'a Item>, si: usize, more: bool) {
         let t = self.t;
         let all: Vec<&Item> = items.collect();
+        // A mixed shelf badges its cards; otherwise the shelf names its source once, on its title (detail pages say it in their hero).
+        let badge = src.is_none() && crate::sources::mixed(all.iter().map(|i| i.src()));
+        let one = src.or_else(|| all.first().map(|i| i.src())).filter(|_| !badge && !matches!(self.route, Route::Album | Route::Artist));
         // fixed card width: a narrower window clips cards instead of resizing them
         let cw = 160.;
         let cols = (((w + self.gap()) / (cw + self.gap())) as usize).max(1);
@@ -191,13 +206,17 @@ impl App {
             let r = press(ui, ("show-all", title), b);
             p.text(b.center(), Align2::CENTER_CENTER, "Show all", f, if r.hovered() { t.tx } else { t.tm });
             if r.clicked() {
-                let sub = if self.route == Route::Home { "From YouTube Music" } else { "" };
-                self.shelf = Some((title.to_string(), sub.to_string(), all.iter().map(|i| (*i).clone()).collect()));
+                let sub = match src.or_else(|| all.first().map(|i| i.src())).filter(|_| !badge && self.route == Route::Home) {
+                    Some(id) => format!("From {}", self.sources.name(id)),
+                    None => String::new(),
+                };
+                self.shelf = Some((title.to_string(), sub, all.iter().map(|i| (*i).clone()).collect()));
                 self.open(Route::Shelf, Some(("shelf", title.to_string())));
             }
             rx -= bw + 4.;
         }
-        trunc(&p, pos2(l + 8., cy), (rx - l - 16.).max(0.), title, font_w(17., Weight::Bold), t.tx);
+        let dx = self.source_mark(ui, one, l + 8., cy, t.tm);
+        trunc(&p, pos2(l + 8. + dx, cy), (rx - l - 16. - dx).max(0.), title, font_w(17., Weight::Bold), t.tx);
 
         let (_, row) = ui.allocate_space(vec2(full, cw + 8. + 40.));
         let view = Rect::from_min_size(pos2(l, row.min.y), vec2(w, row.height()));
@@ -220,7 +239,7 @@ impl App {
             for (c, &it) in all.iter().enumerate() {
                 let cell = Rect::from_min_size(pos2(r.min.x + c as f32 * step, r.min.y), vec2(cw, cw + 40.));
                 if cell.intersects(vis) {
-                    self.item_card(ui, cell, it, &all, (si, c));
+                    self.item_card(ui, cell, it, &all, (si, c), badge);
                 }
             }
         });
@@ -242,6 +261,7 @@ impl App {
         let (cols, cw) = grid(w, 160., self.gap());
         let rh = cw + 48.;
         let rows = items.len().div_ceil(cols);
+        let badge = crate::sources::mixed(items.iter().map(|i| i.src()));
         let area = Rect::from_min_max(pos2(card.min.x, top), card.max);
         let mut lui = App::region(ui, area);
         let out = ScrollArea::vertical().id_salt(("wall", salt)).auto_shrink(false).show_viewport(&mut lui, |ui, vp| {
@@ -253,7 +273,7 @@ impl App {
                 for c in 0..cols {
                     let Some(&it) = items.get(r * cols + c) else { break };
                     let cell = Rect::from_min_size(pos2(l + c as f32 * (cw + self.gap()), row.min.y), vec2(cw, cw + 40.));
-                    self.item_card(ui, cell, it, items, (0, r * cols + c));
+                    self.item_card(ui, cell, it, items, (0, r * cols + c), badge);
                 }
             }
             ui.add_space((rows - last) as f32 * rh + 70.);
@@ -290,7 +310,7 @@ impl App {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
             ui.add_space(HERO_H - HERO_MIN);
             for (si, s) in secs.iter().enumerate() {
-                self.carousel(ui, (l, w, area.width()), &s.title, s.items.iter(), si, true);
+                self.carousel_from(ui, (l, w, area.width()), &s.title, s.source.as_deref(), s.items.iter(), si, true);
             }
             ui.add_space(70.);
         });
@@ -321,14 +341,16 @@ impl App {
 
     /// Large portrait card: cover-filled backdrop under a dark wash, small cover + title on top, "With A, B and more" at the bottom.
     /// `label` sits above the card and says why it is shown (the section title); `queue` is the shelf, its first item is the card.
-    fn feature_card(&mut self, ui: &mut egui::Ui, cell: Rect, label: &str, queue: &[&Item], key: usize) {
+    /// `one` is the source the whole shelf comes from, shown beside `label`; without it the shelf mixes sources and the card badges its own.
+    fn feature_card(&mut self, ui: &mut egui::Ui, cell: Rect, label: &str, one: Option<&str>, queue: &[&Item], key: usize) {
         let t = self.t;
         let Some(&it) = queue.first() else { return };
         let names: Vec<&str> = queue.iter().skip(1).take(3).map(|i| i.title.as_str()).collect();
         let with = if names.is_empty() { String::new() } else { format!("With {} and more", names.join(", ")) };
         let r = ui.interact(cell, ui.scope_id().with(("feat", key)), egui::Sense::click());
         let p = ui.painter().clone();
-        trunc(&p, pos2(cell.min.x, cell.min.y - 12.), cell.width(), label, font(12.5), t.tm);
+        let ld = self.source_mark(ui, one, cell.min.x, cell.min.y - 12., t.tm);
+        trunc(&p, pos2(cell.min.x + ld, cell.min.y - 12.), cell.width() - ld, label, font(12.5), t.tm);
         // Grey tints multiply the cover: 145 is the 110-alpha black wash, fading to 31 at the bottom; hover brightens it.
         let g = Color32::from_gray;
         let stops = if r.hovered() { [(0., g(160)), (0.5, g(160)), (1., g(40))] } else { [(0., g(145)), (0.5, g(145)), (1., g(31))] };
@@ -347,7 +369,8 @@ impl App {
         let tw = (cell.max.x - 16. - tx).max(0.);
         trunc(&p, pos2(tx, art.min.y + 20.), tw, &it.title, font_w(19., Weight::Bold), t.tx);
         let kind = match it.r#type.as_str() { "album" => "Album", "playlist" => "Playlist", "artist" => "Artist", _ => "Song" };
-        trunc(&p, pos2(tx, art.min.y + 46.), tw, &[Some(kind), it.subtitle.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" · "), font(12.5), t.tm);
+        let dx = self.source_mark(ui, one.is_none().then_some(it.src()), tx, art.min.y + 46., t.tm);
+        trunc(&p, pos2(tx + dx, art.min.y + 46.), tw - dx, &kind_line(kind, it.sub()), font(12.5), t.tm);
         if !with.is_empty() {
             let g = wrapped(&p, &with, font(12.5), t.tm, cell.width() - 32. - 48., 2);
             p.galley(pos2(cell.min.x + 16., cell.max.y - 16. - g.size().y), g, t.tm);
@@ -396,7 +419,12 @@ impl App {
         }
     }
 
-    /// Greeting, subtitle and chips starting at `y`; returns the y below them. Scrolls with the feed.
+    /// Height of `home_head`: greeting row, "From …" line, then the chips with room around them.
+    fn home_head_h(&self) -> f32 {
+        100. + 32. + if self.opts.compact { 12. } else { 20. }
+    }
+
+    /// Greeting row, the sources line and the chips, starting at `y`; returns the y below them. Scrolls with the feed.
     fn home_head(&mut self, ui: &mut egui::Ui, card: Rect, y: f32, user: Option<&backend::User>) -> f32 {
         let t = self.t;
         let x = card.min.x + 22.;
@@ -412,10 +440,23 @@ impl App {
             }
             None => { trunc(ui.painter(), pos2(x, y + 38.), w, Self::greeting(), f, t.tx); }
         }
-        trunc(ui.painter(), pos2(x, y + 66.), w, "From YouTube Music", font(13.), t.tm);
+        let names = self.sources.enabled_names();
+        let from = if names.is_empty() { "YouTube Music".to_string() } else { names.join(", ") };
+        trunc(ui.painter(), pos2(x, y + 70.), (card.width() - 44.).max(0.), &format!("From {from}"), font(13.), t.tm);
         let labels: Vec<&str> = CHIPS.iter().map(|c| c.0).collect();
-        self.home_chip = self.chips(ui, x, y + 90., &labels, self.home_chip);
-        y + 90. + 32. + if self.opts.compact { 12. } else { 20. }
+        self.home_chip = self.chips(ui, x, y + 100., &labels, self.home_chip);
+        y + self.home_head_h()
+    }
+
+    /// The source's logo just left of a line of subtext, its name on hover. Returns the width taken (0 unless more than one source is enabled).
+    pub fn source_mark(&self, ui: &egui::Ui, src: Option<&str>, x: f32, cy: f32, col: Color32) -> f32 {
+        self.source_mark_if(ui, src, false, x, cy, col)
+    }
+
+    /// `source_mark`, drawn even with a single source enabled when `force` is set (items from a source that is off).
+    pub fn source_mark_if(&self, ui: &egui::Ui, src: Option<&str>, force: bool, x: f32, cy: f32, col: Color32) -> f32 {
+        let Some(src) = src.filter(|_| force || self.sources.multi()) else { return 0. };
+        source_mark_at(ui, &self.t, src, &self.sources.name(src), x, cy, col)
     }
 
     pub fn home_page(&mut self, ui: &mut egui::Ui, card: Rect, top: f32) {
@@ -426,9 +467,17 @@ impl App {
             State::Ready(s) => s.youtube.user.clone().filter(|_| s.youtube.logged_in),
             _ => None,
         };
-        d.home.ensure(ui.ctx(), || backend::get::<Vec<Section>>("/youtube/home").map(|mut v| {
+        // Home refetches when a source changes, and whenever it is older than ten minutes when the page is drawn.
+        if d.home_age() > 600 {
+            d.home.reset();
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(60));
+        let stamp = d.clone();
+        let path = if self.opts.home_layout == 1 { "/mix/home?layout=separate" } else { "/mix/home?layout=mixed" };
+        d.home.ensure(ui.ctx(), move || backend::get::<Vec<Section>>(path).map(|mut v| {
             crate::data::clean_sections(&mut v);
             crate::data::clean_home(&mut v);
+            stamp.home_at.store(crate::data::now_secs(), std::sync::atomic::Ordering::Relaxed);
             v
         }));
         let g = d.home.lock();
@@ -456,7 +505,7 @@ impl App {
         let mut lui = App::region(ui, area);
         let out = ScrollArea::vertical().id_salt(("home", self.home_chip)).auto_shrink(false).show(&mut lui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
-            let (_, hr) = ui.allocate_space(vec2(area.width(), 90. + 32. + if self.opts.compact { 12. } else { 20. }));
+            let (_, hr) = ui.allocate_space(vec2(area.width(), self.home_head_h()));
             self.home_head(ui, card, hr.min.y, user);
             if let Some(s) = quick {
                 let cols = (((w + self.gap()) / 240.) as usize).clamp(2, 4);
@@ -470,7 +519,7 @@ impl App {
             }
             let rest: Vec<&Section> = shelves.collect();
             for (si, s) in rest.iter().take(3).enumerate() {
-                self.carousel(ui, (l, w, area.width()), &s.title, s.items.iter().filter(ok), si, true);
+                self.carousel_from(ui, (l, w, area.width()), &s.title, s.source.as_deref(), s.items.iter().filter(ok), si, true);
             }
             let feats = &rest[rest.len().min(3)..];
             let fcols = (((w + self.gap()) / 300.) as usize).clamp(1, 4);
@@ -481,7 +530,8 @@ impl App {
                 for (c, s) in chunk.iter().enumerate() {
                     let shelf: Vec<&Item> = s.items.iter().filter(ok).collect();
                     let cell = Rect::from_min_size(pos2(l + 8. + c as f32 * (cw + self.gap()), r.min.y + 28.), vec2(cw, ch));
-                    self.feature_card(ui, cell, &s.title, &shelf, row * 4 + c);
+                    let one = s.source.as_deref().or_else(|| shared(shelf.iter().map(|i| i.src())));
+                    self.feature_card(ui, cell, &s.title, one, &shelf, row * 4 + c);
                 }
             }
             ui.add_space(70.);
@@ -514,7 +564,7 @@ impl App {
                     [p.item.subtitle.clone().filter(|_| kind != "artists" || self.opts.show_subs), (!p.tracks.is_empty()).then(|| summary(&p.tracks))].into_iter().flatten().collect::<Vec<_>>().join(" · ")
                 };
                 let first = p.tracks.first();
-                let by = first.filter(|_| album).and_then(|t| t.artists.first()).map(|n| (n.as_str(), first.and_then(|t| t.artist_id.as_deref())));
+                let by = first.filter(|_| album).map(|t| t.artists.first().map_or((crate::data::UNKNOWN_ARTIST, None), |n| (n.as_str(), t.artist_id.as_deref())));
                 // Only YouTube albums and playlists can be saved; the saved state is read off the sidebar's library list.
                 let save = match kind {
                     "albums" | "playlists" => {
@@ -524,6 +574,8 @@ impl App {
                     _ => None,
                 };
                 // The list scrolls under the hero, which shrinks as it does, so the list is drawn first to know the offset.
+                // Rows of a playlist the user can edit get "Remove from this playlist" in their menu.
+                self.pl_ctx = (kind == "playlists" && p.item.editable).then(|| id.to_string());
                 let off = if p.tracks.is_empty() { self.sections(ui, card, &p.sections) } else { self.tracks_table(ui, card, &p.tracks, album.then(|| (by.and_then(|b| b.1).unwrap_or(""), p.sections.as_slice(), note.as_str()))) };
                 // While a Spotify import resolves, only its matched rows can play.
                 let playable: Cow<'_, [Track]> = if kind == "spotify" {
@@ -598,7 +650,9 @@ impl App {
                     self.top_column(ui, r.min + vec2(22., 0.), full - 44., top_album, top_artist);
                 }
                 let (_, hd) = ui.allocate_space(vec2(full, 44.));
-                heading(ui, if side { l + TOP_W + 20. } else { l }, "Songs", hd);
+                let hx = if side { l + TOP_W + 20. } else { l };
+                let dx = self.source_mark(ui, songs.as_ref().ok().and_then(|v| shared(v.iter().map(|t| t.source.as_str()))), hx, hd.center().y + 6., t.tm);
+                heading(ui, hx + dx, "Songs", hd);
                 if side {
                     heading(ui, l, "Top result", hd);
                 }
@@ -630,7 +684,8 @@ impl App {
                     let tracks: Vec<Track> = v.iter().map(Item::track).collect();
                     let n = if all { tracks.len().min(4) } else { tracks.len() };
                     let (_, hd) = ui.allocate_space(vec2(full, 44.));
-                    heading(ui, l, "Videos", hd);
+                    let dx = self.source_mark(ui, shared(tracks.iter().map(|t| t.source.as_str())), l, hd.center().y + 6., t.tm);
+                    heading(ui, l + dx, "Videos", hd);
                     let (tl, tr) = (card.min.x + 16., card.max.x - 16.);
                     let look = Look { cover_w: self.cover_px() * 16. / 9., open: false, album: false };
                     let (_, head) = ui.allocate_space(vec2(full, HEAD));
@@ -652,6 +707,9 @@ impl App {
                     Ok(v) if all => self.carousel(ui, (card.min.x + 14., card.width() - 28., full), title, v.iter(), si, false),
                     Ok(v) => {
                         let items: Vec<&Item> = v.iter().collect();
+                        let (_, hd) = ui.allocate_space(vec2(full, 44.));
+                        let dx = self.source_mark(ui, shared(items.iter().map(|i| i.src())), l, hd.center().y + 6., t.tm);
+                        heading(ui, l + dx, title, hd);
                         self.item_grid(ui, card, &items, si);
                     }
                     Err(m) if chip == kind => msg(ui, m),
@@ -667,12 +725,13 @@ impl App {
     fn item_grid(&mut self, ui: &mut egui::Ui, card: Rect, items: &[&Item], si: usize) {
         let (l, w) = (card.min.x + 14., card.width() - 28.);
         let (cols, cw) = grid(w, 160., self.gap());
+        let badge = crate::sources::mixed(items.iter().map(|i| i.src()));
         for r in 0..items.len().div_ceil(cols) {
             let (_, row) = ui.allocate_space(vec2(card.width(), cw + 48.));
             for c in 0..cols {
                 let Some(&it) = items.get(r * cols + c) else { break };
                 let cell = Rect::from_min_size(pos2(l + c as f32 * (cw + self.gap()), row.min.y), vec2(cw, cw + 40.));
-                self.item_card(ui, cell, it, items, (si, r * cols + c));
+                self.item_card(ui, cell, it, items, (si, r * cols + c), badge);
             }
         }
     }
@@ -707,8 +766,8 @@ impl App {
         let tw = rect.width() - 36. - 56.;
         trunc(&p, pos2(rect.min.x + 18., art.max.y + 26.), tw, &it.title, font_w(24., Weight::Bold), t.tx);
         let kind = match it.r#type.as_str() { "album" => "Album", "playlist" => "Playlist", _ => "Song" };
-        let sub = [Some(kind), it.subtitle.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-        trunc(&p, pos2(rect.min.x + 18., art.max.y + 50.), tw, &sub, font(13.), t.tm);
+        let dx = self.source_mark(ui, Some(it.src()), rect.min.x + 18., art.max.y + 50., t.tm);
+        trunc(&p, pos2(rect.min.x + 18. + dx, art.max.y + 50.), tw - dx, &kind_line(kind, it.sub()), font(13.), t.tm);
         if self.play_badge(ui, rect, pos2(rect.max.x - 18. - 22., rect.max.y - 18. - 22.), 44., "top-play") {
             self.play_item(ui.ctx(), it, &[]);
         }
@@ -730,7 +789,8 @@ impl App {
         let (p, tx) = (ui.painter().clone(), photo.max.x + 12.);
         let tw = rect.max.x - 12. - 40. - 8. - tx;
         trunc(&p, pos2(tx, rect.center().y - 9.), tw, &it.title, font_w(15., Weight::Semi), t.tx);
-        trunc(&p, pos2(tx, rect.center().y + 10.), tw, "Artist", font(12.), t.tm);
+        let dx = self.source_mark(ui, Some(it.src()), tx, rect.center().y + 10., t.tm);
+        trunc(&p, pos2(tx + dx, rect.center().y + 10.), tw - dx, "Artist", font(12.), t.tm);
         if self.play_badge(ui, rect, pos2(rect.max.x - 12. - 20., rect.center().y), 40., "top-artist-play") {
             self.play_item(ui.ctx(), it, &[]);
         }
@@ -813,17 +873,59 @@ impl App {
                 d.account(ui.ctx(), svc, !s.logged_in);
             }
         }
-        self.lastfm_card(ui, Rect::from_min_size(pos2(card.min.x + 16., top + 16. + 2. * 84.), vec2(card.width() - 32., 72.)));
+        self.soundcloud_card(ui, Rect::from_min_size(pos2(card.min.x + 16., top + 16. + 2. * 84.), vec2(card.width() - 32., 72.)));
+        self.lastfm_card(ui, Rect::from_min_size(pos2(card.min.x + 16., top + 16. + 3. * 84.), vec2(card.width() - 32., 72.)));
         if let Some(e) = err {
-            self.note(ui, card, top + 16. + 3. * 84. - 20., &e);
+            self.note(ui, card, top + 16. + 4. * 84. - 20., &e);
         }
-        3. * 84. + 12.
+        4. * 84. + 12.
     }
 
     /// `note` for an offline panel; returns the height used.
     fn note_h(&self, ui: &egui::Ui, card: Rect, top: f32, text: &str) -> f32 {
         self.note(ui, card, top, text);
         44.
+    }
+
+    /// SoundCloud's browser sign-in (its `oauth_token` cookie); turning the source on or off is in Sources.
+    fn soundcloud_card(&mut self, ui: &mut egui::Ui, row: Rect) {
+        let t = self.t;
+        let ctx = ui.ctx().clone();
+        let p = ui.painter().clone();
+        p.rect_filled(row, rad(14.), t.s1);
+        let cy = row.center().y;
+        let src = self.sources.list(&ctx).and_then(|l| l.ok()).and_then(|l| l.into_iter().find(|s| s.r#type == "soundcloud"));
+        let signed = src.as_ref().is_some_and(|s| s.secret_set);
+        let who = src.as_ref().filter(|_| signed).and_then(|s| s.detail.as_deref()?.strip_prefix("Signed in as ")).map(str::to_string);
+        let pic = src.as_ref().filter(|_| signed).and_then(|s| s.avatar_url.clone());
+        if signed {
+            self.avatar(ui, pic.as_deref(), pos2(row.min.x + 36., cy), 20., who.as_deref());
+        } else {
+            p.circle_filled(pos2(row.min.x + 36., cy), 20., t.s2);
+            crate::gfx::icon(ui, icon!("src-soundcloud"), pos2(row.min.x + 36., cy), 22., t.tx);
+        }
+        let (tx, tw) = (row.min.x + 68., row.width() - 220.);
+        trunc(&p, pos2(tx, cy - 9.), tw, "SoundCloud", font_w(14., Weight::Semi), t.tx);
+        let line = match &src {
+            None => "Connecting to the daemon…".to_string(),
+            Some(s) if signed => s.detail.clone().filter(|d| d.starts_with("Signed in")).unwrap_or_else(|| "Signed in".into()),
+            Some(_) => "Not signed in. Sign in to use your likes and library".into(),
+        };
+        trunc(&p, pos2(tx, cy + 10.), tw, &line, font(12.), t.tm);
+        let working = self.sources.signing();
+        let text = if working { "Waiting…" } else if signed { "Sign out" } else { "Sign in" };
+        let bw = text_w(&p, text, font_w(13., Weight::Semi)) + 32.;
+        let b = Rect::from_center_size(pos2(row.max.x - 16. - bw / 2., cy), vec2(bw, 36.));
+        let r = ui.interact(b, ui.scope_id().with("acct-soundcloud"), egui::Sense::click());
+        let primary = !signed;
+        p.rect_filled(b, rad(18.), if primary { if r.hovered() { t.ax.gamma_multiply(0.9) } else { t.ax } } else if r.hovered() { t.s3.lerp_to_gamma(t.tx, 0.1) } else { t.s3 });
+        p.text(b.center(), Align2::CENTER_CENTER, text, font_w(13., Weight::Semi), if primary { t.on_ax } else { t.tx });
+        if r.hovered() && !working {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if r.clicked() && !working && src.is_some() {
+            self.sources.soundcloud_auth(&ctx, !signed);
+        }
     }
 
     /// Last.fm as a third connection beside YouTube Music and Spotify; its scrobbling options sit under the cards.
@@ -867,6 +969,16 @@ impl App {
     }
 }
 
+/// The one source all of `ids` name, if they do not mix.
+fn shared<'a>(ids: impl Iterator<Item = &'a str> + Clone) -> Option<&'a str> {
+    ids.clone().next().filter(|_| !crate::sources::mixed(ids))
+}
+
+/// "Album · Artist", or just the kind when there is nothing after it.
+fn kind_line(kind: &str, sub: &str) -> String {
+    if sub.is_empty() { kind.into() } else { format!("{kind} · {sub}") }
+}
+
 /// "12 songs, 41 min 5 sec" over the tracks' durations.
 fn summary(tracks: &[Track]) -> String {
     let secs: u32 = tracks.iter().filter_map(|t| t.duration_sec).sum();
@@ -901,8 +1013,30 @@ impl App {
             }
         }
         let one = std::slice::from_ref(&track);
-        let by = track.artists.first().map(|n| (n.as_str(), track.artist_id.as_deref()));
+        let by = Some(track.artists.first().map_or((crate::data::UNKNOWN_ARTIST, None), |n| (n.as_str(), track.artist_id.as_deref())));
         let off = self.tracks_table(ui, card, one, Some((track.artist_id.as_deref().unwrap_or(""), &[], "")));
         self.hero(ui, card, false, "Single", &track.title, by, &summary(one), track.thumbnail.as_deref(), one, None, off);
     }
+}
+
+/// The logo for a source id (`yt`/`youtube`, or a configured source's id whose prefix is its type); none for Spotify imports.
+pub fn source_icon(src: &str) -> Option<&'static str> {
+    match src.split('-').next()? {
+        "yt" | "youtube" => Some(icon!("src-youtube")),
+        "spotify" | "" => None,
+        "jellyfin" => Some(icon!("src-jellyfin")),
+        "soundcloud" => Some(icon!("src-soundcloud")),
+        "bandcamp" => Some(icon!("src-bandcamp")),
+        _ => Some(icon!("src-generic")),
+    }
+}
+
+/// Draws `src`'s logo at `x` (left edge) centred on `cy` with `name` as its tooltip; returns the width it takes.
+pub fn source_mark_at(ui: &egui::Ui, t: &crate::theme::Theme, src: &str, name: &str, x: f32, cy: f32, col: Color32) -> f32 {
+    let Some(uri) = source_icon(src) else { return 0. };
+    let c = pos2(x + 6., cy);
+    icon(ui, uri, c, 12., col);
+    let hit = ui.interact(Rect::from_center_size(c, vec2(16., 16.)), ui.scope_id().with(("src-mark", x as i32, cy as i32)), egui::Sense::hover());
+    crate::tip::tip(&hit, t, name, false);
+    18.
 }

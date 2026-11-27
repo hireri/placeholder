@@ -16,7 +16,7 @@ ureq.workspace = true
 serde.workspace = true
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 cpal = "0.18"
-symphonia = { version = "0.6", features = ["mkv", "isomp4", "aac"] }
+symphonia = { version = "0.6", features = ["mkv", "isomp4", "aac", "mp3", "alac"] }
 opus = "0.4"
 souvlaki = { version = "0.9", default-features = false, features = ["use_zbus"] }
 raw-window-handle = "0.6"
@@ -26,6 +26,7 @@ prost = "0.14"
 flate2 = "1"
 libloading = "0.8"
 notify-rust = { version = "4.19.0", default-features = false, features = ["z"] }
+rfd = "0.18.0"
 
 [features]
 default = ["video"]

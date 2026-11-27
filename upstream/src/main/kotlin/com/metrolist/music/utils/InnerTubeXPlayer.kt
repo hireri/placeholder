@@ -88,7 +88,13 @@ object InnerTubeXPlayer {
                     },
                 ) { "InnerTubeX returned no playable stream" }
             check(stream.sabrBootstrap == null) { "SABR is not supported by this playback engine" }
-            Result.success(stream.toPlaybackData())
+            // Serafin's decoder (Symphonia) only handles AAC-LC, but HIGH can pick HE-AAC (mp4a.40.5); AUTO picks Opus.
+            val undecodable = stream.codecs?.let { it.startsWith("mp4a") && it != "mp4a.40.2" } == true
+            if (undecodable && audioQuality != AudioQuality.AUTO) {
+                playerResponseForPlayback(videoId, playlistId, AudioQuality.AUTO, connectivityManager, contentHints, allowBoundedRange)
+            } else {
+                Result.success(stream.toPlaybackData())
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (error: StreamResolveException) {
