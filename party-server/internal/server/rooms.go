@@ -633,6 +633,8 @@ func (s *Server) handleApproveJoin(c *Client, payload []byte) {
 	sendMessageToClients(s.logger, clientsToNotify, MsgTypeUserJoined, UserJoinedPayload{
 		UserID: joiningID, Username: joiningUsername, AvatarURL: joiningClient.avatarURL(),
 	})
+	// After this handler releases syncMu, which expiring a session needs.
+	go s.dropStaleSessions(room, joiningID, joiningUsername)
 
 	s.logger.Info("User approved to join room",
 		zap.String("username", joiningUsername),

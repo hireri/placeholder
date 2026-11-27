@@ -1048,6 +1048,8 @@ impl App {
             return;
         }
         let name = self.user_name().unwrap_or_else(|| "Serafin listener".into());
+        // Until the account has loaded, the name and picture would be the fallbacks, and the room would take us for someone else.
+        let account_loading = matches!(&*self.data.status.lock(), crate::data::State::Idle | crate::data::State::Loading);
         let my_pic = self.my_avatar();
         let mut act: Option<Box<dyn FnOnce(&mut App)>> = None;
         egui::Area::new(Id::unique("party-pop")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
@@ -1083,7 +1085,7 @@ impl App {
                     y += gh + 12.;
                     let connecting = self.party.active();
                     let start = Rect::from_min_size(pos2(l, y), vec2(w, 36.));
-                    if btn(ui, &t, "start", start, if connecting { "Cancel" } else { "Start a party" }, !connecting) {
+                    if btn(ui, &t, "start", start, if connecting { "Cancel" } else if account_loading { "Loading your account…" } else { "Start a party" }, !connecting && !account_loading) && !(account_loading && !connecting) {
                         act = Some(if connecting { Box::new(|a: &mut App| a.party.leave()) } else { let (n, c, av) = (name.clone(), ctx.clone(), my_pic.clone()); Box::new(move |a: &mut App| a.party.create(&c, &n, &av)) });
                     }
                     y += 36. + 12.;
@@ -1098,7 +1100,7 @@ impl App {
                     let te = ui.put(edit, egui::TextEdit::singleline(&mut self.party_code).id(fid).frame(egui::Frame::NONE).font(font(13.)).align(Align2::LEFT_CENTER)
                         .hint_text(egui::RichText::new("Enter a party code").color(t.tm)).desired_width(edit.width()));
                     let enter = te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    if (btn(ui, &t, "join", Rect::from_min_size(pos2(field.max.x + 6., y), vec2(jw, 36.)), "Join", false) || enter) && !self.party_code.trim().is_empty() {
+                    if (btn(ui, &t, "join", Rect::from_min_size(pos2(field.max.x + 6., y), vec2(jw, 36.)), "Join", false) || enter) && !self.party_code.trim().is_empty() && !account_loading {
                         let (n, code, c, av) = (name.clone(), self.party_code.clone(), ctx.clone(), my_pic.clone());
                         act = Some(Box::new(move |a: &mut App| a.party.join(&c, &code, &n, &av)));
                     }
@@ -1284,5 +1286,78 @@ mod tests {
         guest.out.send(encode("leave_room", None)).unwrap();
         assert_eq!(pb::User::decode(&wait(&host, "user_left")[..]).unwrap().username, "guest");
         host.out.send(encode("leave_room", None)).unwrap();
+    }
+
+    /// A scripted listener for trying the app against a live room: creates a party, lets everyone in, starts a song when
+    /// the first person joins, then seeks, pauses, resumes, queues a song and skips, and logs what others do.
+    /// `cargo test -p serafin host_party -- --ignored --nocapture` (SERAFIN_PARTY_SERVER overrides the server)
+    #[test]
+    #[ignore = "hosts a live room for 15 minutes"]
+    fn host_party() {
+        let h = connect(encode("create_room", Some(&pb::Name { username: "Claude (test bot)".into(), avatar_url: String::new() })));
+        let room = pb::Session::decode(&wait(&h, "room_created")[..]).unwrap();
+        println!("PARTY CODE: {}", room.room_code);
+        let song = |id: &str, title: &str, artist: &str, secs: i64| pb::TrackInfo { id: id.into(), title: title.into(), artist: artist.into(), duration: secs * 1000, thumbnail: format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"), ..Default::default() };
+        let (a, b, c) = (song("dQw4w9WgXcQ", "Never Gonna Give You Up", "Rick Astley", 213), song("fJ9rUzIMcZQ", "Bohemian Rhapsody", "Queen", 354), song("kJQP7kiw5Fk", "Despacito", "Luis Fonsi", 229));
+        let t0 = Instant::now();
+        let log = |m: String| println!("[{:5.1}s] {m}", t0.elapsed().as_secs_f32());
+        let send = |action: &str, track: &str, pos: i64, info: Option<pb::TrackInfo>, queue: Vec<pb::TrackInfo>| {
+            let captured = h.clock.lock().unwrap().now().unwrap_or(0);
+            h.out.send(encode("playback_action", Some(&pb::PlaybackAction { action: action.into(), track_id: track.into(), position: pos, track_info: info, queue, replace_queue: action == "change_track", volume: 1., captured_at_server_time: captured, ..Default::default() }))).unwrap();
+        };
+        let mut cur = a.id.clone();
+        let (mut started, mut step, mut beat) = (false, 0, Instant::now());
+        while t0.elapsed() < Duration::from_secs(900) {
+            if let Ok(In::Msg(k, body)) = h.inbox.recv_timeout(Duration::from_millis(200)) {
+                match k.as_str() {
+                    "join_request" => {
+                        let u = pb::User::decode(&body[..]).unwrap();
+                        log(format!("join request from {} — approving", u.username));
+                        h.out.send(encode("approve_join", Some(&pb::Id { id: u.user_id, reason: String::new() }))).unwrap();
+                    }
+                    "sync_playback" => {
+                        let p = pb::PlaybackAction::decode(&body[..]).unwrap();
+                        let who = if p.origin_user_id == room.user_id { "bot" } else if p.origin_user_id.is_empty() { "server" } else { "someone" };
+                        log(format!("{who}: {} track={} pos={}ms queue={:?}", p.action, p.track_id, p.position, p.queue.iter().map(|t| t.title.as_str()).collect::<Vec<_>>()));
+                        if p.action == "change_track" {
+                            cur = p.track_id.clone();
+                        }
+                    }
+                    "member_sync" => {
+                        let m = pb::MemberSync::decode(&body[..]).unwrap();
+                        log(format!("member_sync: in_sync={} drift={}ms", m.in_sync, m.drift_ms));
+                    }
+                    "user_joined" | "user_left" | "user_disconnected" | "user_reconnected" => {
+                        let u = pb::User::decode(&body[..]).unwrap();
+                        log(format!("{k}: {} avatar={:?}", u.username, u.avatar_url));
+                    }
+                    _ => log(k.clone()),
+                }
+                if k == "user_joined" && !started {
+                    started = true;
+                    send("change_track", &a.id, 0, Some(a.clone()), vec![b.clone()]);
+                    log(format!("starting {}", a.title));
+                    (beat, step) = (Instant::now(), 0);
+                }
+            }
+            if !started {
+                continue;
+            }
+            // Positions are only approximate: the bot has no audio and just says where the song should be.
+            let at = beat.elapsed().as_secs();
+            let script = [(30, "seek"), (50, "pause"), (60, "play"), (80, "queue"), (100, "skip")];
+            if let Some(&(_, what)) = script.get(step).filter(|(s, _)| at >= *s) {
+                step += 1;
+                match what {
+                    "seek" => send("seek", &cur, 120_000, None, vec![]),
+                    "pause" => send("pause", &cur, 140_000, None, vec![]),
+                    "play" => send("play", &cur, 140_000, None, vec![]),
+                    "queue" => send("queue_add", "", 0, Some(c.clone()), vec![]),
+                    _ => send("skip_next", &cur, 0, None, vec![]),
+                }
+                log(format!("bot sent {what}"));
+            }
+        }
+        h.out.send(encode("leave_room", None)).unwrap();
     }
 }

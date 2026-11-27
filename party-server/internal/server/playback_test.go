@@ -759,3 +759,20 @@ func TestSanitizeAvatarURL(t *testing.T) {
 		}
 	}
 }
+
+func TestJoinDropsOfflineEntryWithSameName(t *testing.T) {
+	server, _, _, room := playbackTestRoom()
+	old := &Session{UserID: "old", Username: "Guest", RoomCode: room.Code}
+	room.DisconnectedUsers = map[string]*Session{"old": old, "other": {UserID: "other", Username: "Someone"}}
+	room.State.Users = []UserInfo{{UserID: "old", Username: "Guest"}, {UserID: "other", Username: "Someone"}, {UserID: "guest", Username: "Guest"}}
+	server.sessions["token"] = old
+
+	server.dropStaleSessions(room, "guest", "Guest")
+
+	if _, ok := room.DisconnectedUsers["old"]; ok || server.sessions["token"] != nil {
+		t.Fatal("the stale entry was kept")
+	}
+	if _, ok := room.DisconnectedUsers["other"]; !ok || len(room.State.Users) != 2 {
+		t.Fatalf("someone else's entry was touched: %#v", room.State.Users)
+	}
+}

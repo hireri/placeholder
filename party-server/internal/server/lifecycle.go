@@ -1,6 +1,7 @@
 package server
 
 import (
+	"slices"
 	"time"
 
 	"go.uber.org/zap"
@@ -53,6 +54,32 @@ func (s *Server) cleanupExpiredSessionsOnce(now time.Time) {
 			continue
 		}
 		s.expireSession(room, session, now.After(minRetentionTime))
+	}
+}
+
+// dropStaleSessions removes the offline entries a member left behind under the same name, which is what
+// closing the app and joining again looks like: a new identity, with the old one waiting out its grace period.
+func (s *Server) dropStaleSessions(room *Room, userID, username string) {
+	room.mu.RLock()
+	var stale []*Session
+	for id, session := range room.DisconnectedUsers {
+		if session != nil && id != userID && session.Username == username {
+			stale = append(stale, session)
+		}
+	}
+	room.mu.RUnlock()
+	if len(stale) == 0 {
+		return
+	}
+	s.mu.Lock()
+	for token, session := range s.sessions {
+		if slices.Contains(stale, session) {
+			delete(s.sessions, token)
+		}
+	}
+	s.mu.Unlock()
+	for _, session := range stale {
+		s.expireSession(room, session, false)
 	}
 }
 
