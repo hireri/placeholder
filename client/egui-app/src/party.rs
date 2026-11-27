@@ -15,14 +15,23 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tungstenite::stream::MaybeTlsStream;
 
-const SERVER: &str = "wss://metroserverx.meowery.eu/ws";
-/// Same share link Metrolist uses, so a code copied here opens in its app too.
+/// The party server: Serafin's own fork of metroserver (desktop/party-server), where every listener controls playback.
+/// SERAFIN_PARTY_SERVER overrides it for a local or test server.
+const SERVER: &str = "wss://party.aveline.fish/ws";
+
+fn server() -> String {
+    std::env::var("SERAFIN_PARTY_SERVER").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| SERVER.into())
+}
+/// Same share link format as Metrolist.
 pub const LINK: &str = "https://metrolist.cc/listen?code=";
-const PING_EVERY: Duration = Duration::from_secs(25);
-/// The host repeats PLAY this often while playing, so guests that drifted or paused locally fall back in line.
-const HEARTBEAT: Duration = Duration::from_secs(8);
-/// A playing guest only seeks when this far off; smaller drift is left alone (upstream also nudges playback speed).
+/// Pings carry our playhead, so the server can tell the room when we drift out of step.
+const PING_EVERY: Duration = Duration::from_secs(5);
+/// A playing listener only seeks when this far off; smaller drift is left alone.
 const HARD_SYNC_MS: i64 = 2000;
+/// How often a playing listener compares itself with the room.
+const DRIFT_CHECK: Duration = Duration::from_secs(1);
+/// Upcoming songs shared with the room.
+const QUEUE_MAX: usize = 50;
 
 /// Wire types (listentogether.proto in Metrolist); only the fields we read or write.
 mod pb {
@@ -66,6 +75,8 @@ mod pb {
         pub is_host: bool,
         #[prost(bool, tag = "4")]
         pub is_connected: bool,
+        #[prost(string, tag = "5")]
+        pub avatar_url: String,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -95,12 +106,16 @@ mod pb {
         pub room_code: String,
         #[prost(string, tag = "2")]
         pub username: String,
+        #[prost(string, tag = "3")]
+        pub avatar_url: String,
     }
 
     #[derive(Clone, PartialEq, Message)]
     pub struct Name {
         #[prost(string, tag = "1")]
         pub username: String,
+        #[prost(string, tag = "2")]
+        pub avatar_url: String,
     }
 
     /// Any payload that is one id plus an optional reason: approve/reject join, kick, buffer_ready/complete,
@@ -137,6 +152,12 @@ mod pb {
         pub revision: u64,
         #[prost(int64, tag = "11")]
         pub captured_at_server_time: i64,
+        /// change_track: replace the upcoming queue even when it is empty.
+        #[prost(bool, tag = "12")]
+        pub replace_queue: bool,
+        /// Who caused a broadcast; our own come back too and are already applied.
+        #[prost(string, tag = "13")]
+        pub origin_user_id: String,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -145,6 +166,25 @@ mod pb {
         pub client_time: i64,
         #[prost(uint64, tag = "2")]
         pub sequence: u64,
+        #[prost(bool, tag = "3")]
+        pub has_position: bool,
+        #[prost(string, tag = "4")]
+        pub track_id: String,
+        #[prost(int64, tag = "5")]
+        pub position: i64,
+        #[prost(int64, tag = "6")]
+        pub position_captured_at_server_time: i64,
+    }
+
+    /// A listener fell out of step with the room, or got back in.
+    #[derive(Clone, PartialEq, Message)]
+    pub struct MemberSync {
+        #[prost(string, tag = "1")]
+        pub user_id: String,
+        #[prost(bool, tag = "2")]
+        pub in_sync: bool,
+        #[prost(int64, tag = "3")]
+        pub drift_ms: i64,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -182,13 +222,15 @@ mod pb {
         pub is_host: bool,
     }
 
-    /// join_request, user_joined/left/reconnected/disconnected, host_changed: (user id, name).
+    /// join_request, user_joined/left/reconnected/disconnected, host_changed: (user id, name); user_joined adds a picture.
     #[derive(Clone, PartialEq, Message)]
     pub struct User {
         #[prost(string, tag = "1")]
         pub user_id: String,
         #[prost(string, tag = "2")]
         pub username: String,
+        #[prost(string, tag = "3")]
+        pub avatar_url: String,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -211,24 +253,6 @@ mod pb {
         pub last_update: i64,
         #[prost(message, repeated, tag = "5")]
         pub queue: Vec<TrackInfo>,
-    }
-
-    #[derive(Clone, PartialEq, Message)]
-    pub struct Suggestion {
-        #[prost(string, tag = "1")]
-        pub suggestion_id: String,
-        #[prost(string, tag = "2")]
-        pub from_user_id: String,
-        #[prost(string, tag = "3")]
-        pub from_username: String,
-        #[prost(message, optional, tag = "4")]
-        pub track_info: Option<TrackInfo>,
-    }
-
-    #[derive(Clone, PartialEq, Message)]
-    pub struct SuggestTrack {
-        #[prost(message, optional, tag = "1")]
-        pub track_info: Option<TrackInfo>,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -270,6 +294,13 @@ mod pb {
 fn mono_ms() -> i64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_millis() as i64 + 1
+}
+
+/// Our playhead as the UI last saw it, sent with each ping.
+#[derive(Clone, Default)]
+struct Report {
+    track: String,
+    pos_ms: i64,
 }
 
 /// Offset from our monotonic clock to the server's, smoothed over pongs (upstream `ServerClock`).
@@ -332,10 +363,10 @@ enum In {
 }
 
 /// The socket thread: connects, resumes a session after a drop, pings, and forwards every message.
-fn worker(ctx: Context, out: Receiver<Vec<u8>>, inbox: Sender<In>, clock: Arc<Mutex<Clock>>, token: Arc<Mutex<String>>) {
+fn worker(ctx: Context, out: Receiver<Vec<u8>>, inbox: Sender<In>, clock: Arc<Mutex<Clock>>, token: Arc<Mutex<String>>, report: Arc<Mutex<Report>>) {
     let mut attempt = 0u32;
     loop {
-        let (mut ws, _) = match tungstenite::connect(SERVER) {
+        let (mut ws, _) = match tungstenite::connect(server()) {
             Ok(c) => c,
             Err(e) => {
                 attempt += 1;
@@ -383,7 +414,10 @@ fn worker(ctx: Context, out: Receiver<Vec<u8>>, inbox: Sender<In>, clock: Arc<Mu
             }
             if Instant::now() >= next_ping {
                 seq += 1;
-                let _ = ws.send(tungstenite::Message::Binary(encode("ping", Some(&pb::Ping { client_time: mono_ms(), sequence: seq })).into()));
+                let r = report.lock().unwrap().clone();
+                let at = clock.lock().unwrap().now().unwrap_or(0);
+                let ping = pb::Ping { client_time: mono_ms(), sequence: seq, has_position: !r.track.is_empty() && at > 0, track_id: r.track, position: r.pos_ms, position_captured_at_server_time: at };
+                let _ = ws.send(tungstenite::Message::Binary(encode("ping", Some(&ping)).into()));
                 next_ping = Instant::now() + if seq < 3 { Duration::from_millis(250) } else { PING_EVERY };
             }
             match ws.read() {
@@ -420,26 +454,23 @@ fn gunzip(b: &[u8]) -> Option<Vec<u8>> {
 pub struct Member {
     pub id: String,
     pub name: String,
+    pub avatar: String,
     pub host: bool,
     pub connected: bool,
-}
-
-pub struct Suggestion {
-    pub id: String,
-    pub from: String,
-    pub track: pb::TrackInfo,
 }
 
 pub struct Room {
     pub code: String,
     pub me: String,
+    /// Keeps the room: approves joins and removes listeners. Everyone controls playback.
     pub host_id: String,
     pub members: Vec<Member>,
     /// Join requests waiting on the host: (user id, name).
     pub requests: Vec<(String, String)>,
-    pub suggestions: Vec<Suggestion>,
     /// Listeners still loading the current song.
     pub waiting: Vec<String>,
+    /// Listeners the server says are out of step: (user id, milliseconds ahead, negative when behind).
+    pub drifting: Vec<(String, i64)>,
 }
 
 impl Room {
@@ -449,18 +480,27 @@ impl Room {
 
     fn from_state(code: String, me: String, s: Option<&pb::RoomState>) -> Room {
         let (host_id, members) = s.map_or_else(Default::default, |s| {
-            (s.host_id.clone(), s.users.iter().map(|u| Member { id: u.user_id.clone(), name: u.username.clone(), host: u.is_host, connected: u.is_connected }).collect())
+            (s.host_id.clone(), s.users.iter().map(|u| Member { id: u.user_id.clone(), name: u.username.clone(), avatar: u.avatar_url.clone(), host: u.is_host, connected: u.is_connected }).collect())
         });
-        Room { code, me, host_id, members, requests: vec![], suggestions: vec![], waiting: vec![] }
+        Room { code, me, host_id, members, requests: vec![], waiting: vec![], drifting: vec![] }
     }
 }
 
-/// Where the room says playback should be, for a guest to reach once its stream loads.
+/// Where the room says playback should be, for us to reach once the stream loads.
 struct Target {
     id: String,
     playing: bool,
     pos: i64,
     at: i64,
+}
+
+/// What the room last heard from us (or what we last took from it): changes to the player beyond this are ours to announce.
+#[derive(Clone, Default, PartialEq)]
+struct Sent {
+    vid: String,
+    playing: bool,
+    seeks: u32,
+    queue: Vec<String>,
 }
 
 #[derive(Default)]
@@ -469,18 +509,19 @@ pub struct Party {
     inbox: Option<Receiver<In>>,
     clock: Arc<Mutex<Clock>>,
     token: Arc<Mutex<String>>,
+    report: Arc<Mutex<Report>>,
     pub room: Option<Room>,
     /// "Connecting…", "Waiting for the host to let you in", a lost connection or a refusal; shown in the popover.
     pub status: Option<String>,
-    /// Host setting: suggestions go straight into the queue.
-    pub auto_add: bool,
-    /// Host: what was last announced, to notice the player changing.
-    sent: Option<(String, bool, u32)>,
-    beat: Option<Instant>,
-    /// Guest: the room's playback, applied once the song is loaded.
+    sent: Option<Sent>,
+    /// The room's playback, applied once the song is loaded and re-checked while playing.
     target: Option<Target>,
+    fresh: bool,
+    checked: Option<Instant>,
     ready_sent: String,
-    /// Guest: the song whose full details (cover, album, artist links) were looked up.
+    /// Listeners shown stacked on the titlebar button, including ones still shrinking away: (id, name, picture).
+    faces: Vec<(String, String, String)>,
+    /// The song whose full details (cover, album, artist links) were looked up.
     filled: String,
 }
 
@@ -489,30 +530,26 @@ impl Party {
         self.out.is_some()
     }
 
-    pub fn is_guest(&self) -> bool {
-        self.room.as_ref().is_some_and(|r| !r.is_host())
-    }
-
     fn start(&mut self, ctx: &Context, first: Vec<u8>) {
         self.leave();
         let (out_tx, out_rx) = channel();
         let (in_tx, in_rx) = channel();
         let _ = out_tx.send(first);
-        (self.clock, self.token) = Default::default();
-        let (ctx, clock, token) = (ctx.clone(), self.clock.clone(), self.token.clone());
-        std::thread::spawn(move || worker(ctx, out_rx, in_tx, clock, token));
+        (self.clock, self.token, self.report) = Default::default();
+        let (ctx, clock, token, report) = (ctx.clone(), self.clock.clone(), self.token.clone(), self.report.clone());
+        std::thread::spawn(move || worker(ctx, out_rx, in_tx, clock, token, report));
         (self.out, self.inbox, self.status) = (Some(out_tx), Some(in_rx), Some("Connecting…".into()));
     }
 
-    pub fn create(&mut self, ctx: &Context, name: &str) {
-        self.start(ctx, encode("create_room", Some(&pb::Name { username: name.into() })));
+    pub fn create(&mut self, ctx: &Context, name: &str, avatar: &str) {
+        self.start(ctx, encode("create_room", Some(&pb::Name { username: name.into(), avatar_url: avatar.into() })));
     }
 
     /// Takes a bare code or a pasted share link.
-    pub fn join(&mut self, ctx: &Context, code: &str, name: &str) {
+    pub fn join(&mut self, ctx: &Context, code: &str, name: &str, avatar: &str) {
         let code = code.trim().rsplit("code=").next().unwrap_or("").trim().to_uppercase();
         if !code.is_empty() {
-            self.start(ctx, encode("join_room", Some(&pb::Join { room_code: code, username: name.into() })));
+            self.start(ctx, encode("join_room", Some(&pb::Join { room_code: code, username: name.into(), avatar_url: avatar.into() })));
         }
     }
 
@@ -521,7 +558,7 @@ impl Party {
             self.send("leave_room", None);
         }
         // Dropping the sender ends the worker once it has flushed what is queued.
-        *self = Party { auto_add: self.auto_add, ..Default::default() };
+        *self = Party::default();
     }
 
     fn send(&self, kind: &str, payload: Option<&dyn MessageBytes>) {
@@ -541,30 +578,15 @@ impl Party {
         }
     }
 
-    pub fn answer_suggestion(&mut self, id: &str, yes: bool) {
-        self.id(if yes { "approve_suggestion" } else { "reject_suggestion" }, id);
-        if let Some(r) = &mut self.room {
-            r.suggestions.retain(|s| s.id != id);
-        }
-    }
-
     pub fn kick(&self, user: &str) {
         self.id("kick_user", user);
-    }
-
-    pub fn suggest(&self, t: &Track) {
-        if t.source == "youtube" && !t.id.is_empty() {
-            self.send("suggest_track", Some(&pb::SuggestTrack { track_info: Some(pb::track(t, &t.id)) }));
-            crate::toast::info("Suggested to the party");
-        } else {
-            crate::toast::info("Only YouTube Music songs can be suggested");
-        }
     }
 
     fn action(&self, action: &str, vid: &str, pos_s: f32, info: Option<pb::TrackInfo>, queue: Vec<pb::TrackInfo>) {
         let pos = (pos_s.max(0.) * 1000.) as i64;
         let captured = if matches!(action, "play" | "pause" | "seek") { self.clock.lock().unwrap().now().unwrap_or(0) } else { 0 };
-        self.send("playback_action", Some(&pb::PlaybackAction { action: action.into(), track_id: vid.into(), position: pos, track_info: info, queue, volume: 1., captured_at_server_time: captured, ..Default::default() }));
+        let replace_queue = action == "change_track";
+        self.send("playback_action", Some(&pb::PlaybackAction { action: action.into(), track_id: vid.into(), position: pos, track_info: info, queue, volume: 1., captured_at_server_time: captured, replace_queue, ..Default::default() }));
     }
 }
 
@@ -595,12 +617,37 @@ impl App {
                 }
             }
         }
-        let Some(room) = &self.party.room else { return };
-        if room.is_host() {
-            self.party_host();
-        } else {
-            self.party_guest(ctx);
+        if self.party.room.is_none() {
+            return;
         }
+        // ponytail: radio songs would differ per listener and each would announce its own; no endless mode in a party.
+        self.pl.endless = false;
+        self.party_follow_tick(ctx);
+        self.party_announce();
+        let (track, pos_ms) = match self.pl.song() {
+            Some(s) if self.pl.loaded() => (s.vid().to_string(), (self.pl.pos * 1000.) as i64),
+            _ => Default::default(),
+        };
+        *self.party.report.lock().unwrap() = Report { track, pos_ms };
+    }
+
+    fn my_avatar(&self) -> String {
+        self.youtube_user().and_then(|u| u.0).unwrap_or_default()
+    }
+
+    /// The player as the room would see it.
+    fn local_sent(&self) -> Sent {
+        Sent {
+            vid: self.pl.song().map(|s| s.vid().to_string()).unwrap_or_default(),
+            playing: self.pl.playing,
+            seeks: self.pl.seeks,
+            queue: self.shared_upcoming().iter().map(|t| t.id.clone()).collect(),
+        }
+    }
+
+    /// The songs after the current one that can be shared (YouTube Music ones).
+    fn shared_upcoming(&self) -> Vec<Track> {
+        (1..=QUEUE_MAX).map_while(|i| self.pl.upcoming(i)).filter(|t| t.source == "youtube").collect()
     }
 
     fn party_msg(&mut self, ctx: &Context, kind: &str, b: &[u8]) {
@@ -612,17 +659,16 @@ impl App {
                 let name = self.user_name().unwrap_or_else(|| "You".into());
                 let mut room = Room::from_state(s.room_code, s.user_id.clone(), None);
                 room.host_id = s.user_id.clone();
-                room.members.push(Member { id: s.user_id, name, host: true, connected: true });
-                (self.party.room, self.party.status, self.party.sent) = (Some(room), None, None);
+                room.members.push(Member { id: s.user_id, name, avatar: self.my_avatar(), host: true, connected: true });
+                // An empty baseline, so whatever is playing is announced to the room.
+                (self.party.room, self.party.status, self.party.sent) = (Some(room), None, Some(Sent::default()));
             }
             "join_approved" => {
                 let s = pb::Session::decode(b).unwrap_or_default();
                 *self.party.token.lock().unwrap() = s.session_token;
                 self.party.room = Some(Room::from_state(s.room_code, s.user_id, s.state.as_ref()));
                 self.party.status = None;
-                if let Some(st) = s.state {
-                    self.party_follow(ctx, st.current_track, st.queue, st.is_playing, st.position, st.last_update);
-                }
+                self.party_join_state(ctx, s.state);
             }
             "reconnected" => {
                 let s = pb::Reconnected::decode(b).unwrap_or_default();
@@ -630,15 +676,13 @@ impl App {
                 let keep = self.party.room.take();
                 let mut room = Room::from_state(s.room_code, me, s.state.as_ref());
                 if let Some(old) = keep {
-                    (room.requests, room.suggestions) = (old.requests, old.suggestions);
+                    room.requests = old.requests;
                 }
                 if s.is_host {
                     room.host_id = room.me.clone();
                 }
-                (self.party.room, self.party.status, self.party.sent) = (Some(room), None, None);
-                if let Some(st) = s.state.filter(|_| !s.is_host) {
-                    self.party_follow(ctx, st.current_track, st.queue, st.is_playing, st.position, st.last_update);
-                }
+                (self.party.room, self.party.status) = (Some(room), None);
+                self.party_join_state(ctx, s.state);
             }
             "join_request" => {
                 let u = user();
@@ -660,7 +704,7 @@ impl App {
                 room.requests.retain(|q| q.0 != u.user_id);
                 match room.members.iter_mut().find(|m| m.id == u.user_id) {
                     Some(m) => m.connected = true,
-                    None => room.members.push(Member { id: u.user_id, name: u.username, host: false, connected: true }),
+                    None => room.members.push(Member { id: u.user_id, name: u.username, avatar: u.avatar_url, host: false, connected: true }),
                 }
             }
             "user_left" | "user_disconnected" => {
@@ -668,6 +712,8 @@ impl App {
                 let Some(room) = &mut self.party.room else { return };
                 if kind == "user_left" {
                     room.members.retain(|m| m.id != u.user_id);
+                    room.waiting.retain(|w| *w != u.user_id);
+                    room.drifting.retain(|d| d.0 != u.user_id);
                 } else if let Some(m) = room.members.iter_mut().find(|m| m.id == u.user_id) {
                     m.connected = false;
                 }
@@ -679,7 +725,6 @@ impl App {
                 for m in &mut room.members {
                     m.host = m.id == u.user_id;
                 }
-                (self.party.sent, self.party.target) = (None, None);
                 if room.is_host() {
                     crate::toast::info("You are now the party host");
                 }
@@ -694,22 +739,18 @@ impl App {
                     room.waiting.clear();
                 }
             }
-            "suggestion_received" => {
-                let s = pb::Suggestion::decode(b).unwrap_or_default();
-                let Some(track) = s.track_info else { return };
-                if self.party.auto_add {
-                    return self.party.answer_suggestion(&s.suggestion_id, true);
+            "member_sync" => {
+                let m = pb::MemberSync::decode(b).unwrap_or_default();
+                if let Some(room) = &mut self.party.room {
+                    room.drifting.retain(|d| d.0 != m.user_id);
+                    if !m.in_sync {
+                        room.drifting.push((m.user_id, m.drift_ms));
+                    }
                 }
-                let Some(room) = &mut self.party.room else { return };
-                crate::toast::info(format!("{} suggested {}", s.from_username, track.title));
-                room.suggestions.push(Suggestion { id: s.suggestion_id, from: s.from_username, track });
             }
-            "suggestion_rejected" => crate::toast::info("The host passed on your suggestion"),
             "sync_state" => {
                 let s = pb::SyncState::decode(b).unwrap_or_default();
-                if self.party.is_guest() {
-                    self.party_follow(ctx, s.current_track, s.queue, s.is_playing, s.position, s.last_update);
-                }
+                self.party_follow(ctx, s.current_track, s.queue, s.is_playing, s.position, s.last_update);
             }
             "sync_playback" => {
                 let a = pb::PlaybackAction::decode(b).unwrap_or_default();
@@ -721,6 +762,8 @@ impl App {
                     *self.party.token.lock().unwrap() = String::new();
                     self.party.leave();
                     self.party.status = Some(if e.code == "not_in_room" { "You're no longer in the party" } else { "The party has ended" }.into());
+                } else if e.code == "stale_track" || e.code == "stale_action" {
+                    // Someone changed the song a moment before us; their change reaches us next.
                 } else {
                     let msg = if e.message.is_empty() { e.code } else { e.message };
                     if self.party.room.is_none() {
@@ -734,23 +777,25 @@ impl App {
         }
     }
 
-    /// A playback action from the host. The host only takes queue additions (approved suggestions) from these.
-    fn party_action(&mut self, ctx: &Context, a: pb::PlaybackAction) {
-        let host = self.party.room.as_ref().is_some_and(Room::is_host);
-        if a.action == "queue_add" {
-            if let (true, Some(t)) = (host, a.track_info.as_ref()) {
-                self.pl.enqueue(ctx, &[pb::to_track(t)], a.insert_next);
-            }
-            return;
+    /// Joining or resuming: take the room's song if it has one, else keep what is playing without announcing it.
+    fn party_join_state(&mut self, ctx: &Context, st: Option<pb::RoomState>) {
+        match st.filter(|s| s.current_track.is_some()) {
+            Some(st) => self.party_follow(ctx, st.current_track, st.queue, st.is_playing, st.position, st.last_update),
+            None => self.party.sent = Some(self.local_sent()),
         }
-        if host {
+    }
+
+    /// A playback action from another listener (ours come back too, and are already in the player).
+    fn party_action(&mut self, ctx: &Context, a: pb::PlaybackAction) {
+        if self.party.room.as_ref().is_some_and(|r| r.me == a.origin_user_id) {
             return;
         }
         let at = if a.server_time > 0 { a.server_time } else { a.captured_at_server_time };
         match a.action.as_str() {
-            // A host re-announces its song after a reconnect or host change; a guest already on it keeps playing.
+            "queue_add" | "queue_remove" | "queue_clear" | "sync_queue" => self.party_set_queue(&a.queue),
+            // Everyone's player moves on at the end of a song, so the same change arrives from several; the first one counts.
             "change_track" if a.track_info.as_ref().map(|t| t.id.as_str()) == self.pl.song().map(|s| s.vid()) => {}
-            "change_track" => self.party_follow(ctx, a.track_info, a.queue, false, 0, 0),
+            "change_track" => self.party_follow(ctx, a.track_info, a.queue, true, 0, at),
             "play" | "pause" | "seek" => {
                 let cur = self.pl.song().map(|s| s.vid().to_string()).unwrap_or_default();
                 let playing = match a.action.as_str() {
@@ -760,13 +805,28 @@ impl App {
                 };
                 let id = if a.track_id.is_empty() { cur.clone() } else { a.track_id.clone() };
                 if id != cur {
-                    // A PLAY for a song we don't have (we joined mid-change, or missed it): ask for the full state.
+                    // An action for a song we don't have (we joined mid-change, or missed it): ask for the full state.
                     self.party.send("request_sync", None);
                     return;
                 }
-                self.party.target = Some(Target { id, playing, pos: a.position, at });
+                (self.party.target, self.party.fresh) = (Some(Target { id, playing, pos: a.position, at }), true);
             }
             _ => {}
+        }
+    }
+
+    /// Replaces the songs after the current one with the room's.
+    fn party_set_queue(&mut self, queue: &[pb::TrackInfo]) {
+        if self.pl.song().is_none() {
+            return;
+        }
+        let ids: Vec<String> = queue.iter().map(|t| t.id.clone()).collect();
+        if self.shared_upcoming().iter().map(|t| &t.id).ne(ids.iter()) {
+            let tracks: Vec<Track> = queue.iter().map(pb::to_track).collect();
+            self.pl.set_upcoming(&tracks);
+        }
+        if let Some(s) = &mut self.party.sent {
+            s.queue = ids;
         }
     }
 
@@ -779,24 +839,27 @@ impl App {
             self.pl.playing = false;
             self.party.ready_sent.clear();
         }
-        self.party.target = Some(Target { id: t.id, playing, pos, at });
+        self.party.sent = Some(Sent { vid: t.id.clone(), playing: self.pl.playing, seeks: self.pl.seeks, queue: vec![] });
+        self.party_set_queue(&queue);
+        (self.party.target, self.party.fresh) = (Some(Target { id: t.id, playing, pos, at }), true);
     }
 
-    fn party_guest(&mut self, ctx: &Context) {
+    fn party_follow_tick(&mut self, ctx: &Context) {
         let Some(vid) = self.pl.song().map(|s| s.vid().to_string()) else { return };
         // The room only carries title, artist and a thumbnail; the rest comes from looking the song up, as a normal play has it.
         if self.party.filled != vid {
             match &*self.data.song_info(ctx, &vid).lock() {
                 crate::data::State::Ready(t) => self.pl.fill_current(t),
                 crate::data::State::Failed(_) => {}
-                _ => return self.party_guest_sync(ctx, vid),
+                _ => return self.party_apply(ctx, vid),
             }
             self.party.filled = vid.clone();
         }
-        self.party_guest_sync(ctx, vid)
+        self.party_apply(ctx, vid)
     }
 
-    fn party_guest_sync(&mut self, ctx: &Context, vid: String) {
+    /// Brings the player to where the room is: exactly on a pause, jump or new song, and only past `HARD_SYNC_MS` of drift while playing.
+    fn party_apply(&mut self, ctx: &Context, vid: String) {
         if !self.pl.loaded() {
             return;
         }
@@ -804,60 +867,67 @@ impl App {
             self.party.id("buffer_ready", &vid);
             self.party.ready_sent = vid.clone();
         }
-        let Some(t) = self.party.target.take() else { return };
-        if t.id != vid {
+        let party = &mut self.party;
+        let Some(t) = party.target.as_ref().filter(|t| t.id == vid) else { return };
+        let steady = t.playing && self.pl.playing;
+        if !(party.fresh || (steady && party.checked.is_none_or(|c| c.elapsed() >= DRIFT_CHECK))) {
             return;
         }
-        let want = self.party.clock.lock().unwrap().position_at(t.pos, t.at, t.playing);
+        (party.fresh, party.checked) = (false, Some(Instant::now()));
+        let want = party.clock.lock().unwrap().position_at(t.pos, t.at, t.playing);
         let have = (self.pl.pos * 1000.) as i64;
-        // While playing, small drift is left alone; a pause or a jump lines up exactly.
-        if !(t.playing && self.pl.playing) || (want - have).abs() > HARD_SYNC_MS {
+        let playing = t.playing;
+        if !steady || (want - have).abs() > HARD_SYNC_MS {
             self.pl.seek(want as f32 / 1000.);
         }
-        if t.playing != self.pl.playing {
+        if playing != self.pl.playing {
             self.pl.toggle(ctx);
+        }
+        // What the room told us is not ours to announce back.
+        if let Some(s) = &mut party.sent {
+            (s.playing, s.seeks) = (self.pl.playing, self.pl.seeks);
         }
     }
 
-    /// Announces the host's song, play state and seeks as they change, plus a PLAY heartbeat while playing.
-    fn party_host(&mut self) {
-        let Some(s) = self.pl.song() else { return };
-        // A Spotify song has no YouTube id until it is matched; guests could not play it before then.
-        let vid = s.vid().to_string();
-        if vid.is_empty() {
+    /// Tells the room what changed in our player: a new song (with the queue), play or pause, a seek, or the queue.
+    fn party_announce(&mut self) {
+        let Some(song) = self.pl.song() else { return };
+        // A Spotify song has no YouTube id until it is matched; the others could not play it before then.
+        if song.vid().is_empty() {
             return;
         }
-        // Playing only counts once the stream runs: a PLAY sent while it loads would put guests ahead by the load time.
-        let (playing, seeks, pos) = (self.pl.playing && self.pl.loaded(), self.pl.seeks, self.pl.pos);
-        let party = &mut self.party;
-        let (last_vid, last_playing, last_seeks) = party.sent.clone().unwrap_or_default();
-        if last_vid != vid {
-            let queue: Vec<pb::TrackInfo> = (1..=50).map_while(|i| self.pl.upcoming(i)).filter(|t| t.source == "youtube").map(|t| pb::track(&t, &t.id)).collect();
-            party.action("change_track", &vid, 0., Some(pb::track(&s.track(), &vid)), queue);
-            if playing {
-                party.action("play", &vid, pos, None, vec![]);
-            }
-            party.beat = Some(Instant::now());
-        } else if playing != last_playing {
-            party.action(if playing { "play" } else { "pause" }, &vid, pos, None, vec![]);
-            party.beat = Some(Instant::now());
-        } else if seeks != last_seeks {
-            party.action("seek", &vid, pos, None, vec![]);
-        } else if playing && party.beat.is_none_or(|b| b.elapsed() >= HEARTBEAT) {
-            party.action("play", &vid, pos, None, vec![]);
-            party.beat = Some(Instant::now());
+        let now = self.local_sent();
+        let Some(last) = self.party.sent.clone() else { return self.party.sent = Some(now) };
+        if now == last {
+            return;
         }
-        party.sent = Some((vid, playing, seeks));
+        let (vid, pos) = (now.vid.clone(), self.pl.pos);
+        let party = &self.party;
+        if now.vid != last.vid {
+            let info = pb::track(&song.track(), &vid);
+            let queue = self.shared_upcoming().iter().map(|t| pb::track(t, &t.id)).collect();
+            party.action("change_track", &vid, 0., Some(info), queue);
+            // The server starts a new song playing.
+            if !now.playing {
+                party.action("pause", &vid, pos, None, vec![]);
+            }
+        } else {
+            if now.playing != last.playing {
+                party.action(if now.playing { "play" } else { "pause" }, &vid, pos, None, vec![]);
+            }
+            if now.seeks != last.seeks {
+                party.action("seek", &vid, pos, None, vec![]);
+            }
+            if now.queue != last.queue {
+                let queue = self.shared_upcoming().iter().map(|t| pb::track(t, &t.id)).collect();
+                party.action("sync_queue", "", 0., None, queue);
+            }
+        }
+        self.party.sent = Some(now);
     }
 }
 
 const POP_W: f32 = 320.;
-
-fn initials(name: &str) -> String {
-    let mut w = name.split_whitespace().filter_map(|w| w.chars().next());
-    let s: String = [w.next(), w.next()].into_iter().flatten().collect();
-    if s.is_empty() { "?".into() } else { s.to_uppercase() }
-}
 
 /// Small caps label over a section, as in the mockup.
 fn label(p: &egui::Painter, t: &crate::theme::Theme, at: egui::Pos2, w: f32, text: &str) {
@@ -875,12 +945,70 @@ fn btn(ui: &egui::Ui, t: &crate::theme::Theme, key: &str, r: Rect, text: &str, s
 
 
 impl App {
-    /// Titlebar button beside the account pill; filled while a party is live.
-    pub fn party_button(&mut self, ui: &mut egui::Ui, c: egui::Pos2) {
-        let t = self.t;
+    /// Titlebar button beside the account pill: the party icon, or while a party is live the listeners' pictures stacked
+    /// (they grow in as people join and shrink out as they leave). `right` is its right edge; returns its width.
+    pub fn party_button(&mut self, ui: &mut egui::Ui, right: f32, cy: f32) -> f32 {
+        const D: f32 = 22.;
+        const STEP: f32 = 15.;
+        const SHOWN: usize = 3;
+        let (t, ctx) = (self.t, ui.ctx().clone());
         let open = self.party_open.is_some();
-        let resp = icon_button(ui, &t, "party-btn", c, 32., if self.party.room.is_some() { icon!("partyf") } else { icon!("party") }, 16., if open { t.tx } else { t.tm });
-        self.party_btn = Rect::from_center_size(c, vec2(32., 32.));
+        let me_pic = self.my_avatar();
+        // Everyone in the room, then those still fading out.
+        let live: Vec<(String, String, String)> = self.party.room.as_ref().map_or(vec![], |r| {
+            r.members.iter().filter(|m| m.connected).map(|m| (m.id.clone(), m.name.clone(), if m.avatar.is_empty() && m.id == r.me { me_pic.clone() } else { m.avatar.clone() })).collect()
+        });
+        for (id, name, av) in &live {
+            match self.party.faces.iter_mut().find(|f| f.0 == *id) {
+                Some(f) => (f.1, f.2) = (name.clone(), av.clone()),
+                None => self.party.faces.push((id.clone(), name.clone(), av.clone())),
+            }
+        }
+        let motion = !reduced_motion();
+        let ks: Vec<f32> = self.party.faces.iter().map(|f| {
+            let on = if live.iter().any(|l| l.0 == f.0) { 1. } else { 0. };
+            if motion { ctx.animate_value_with_time(Id::unique("party-face").with(&f.0), on, 0.28) } else { on }
+        }).collect();
+        let keep: Vec<bool> = self.party.faces.iter().zip(&ks).map(|(f, k)| *k > 0.001 || live.iter().any(|l| l.0 == f.0)).collect();
+        let mut it = keep.iter();
+        self.party.faces.retain(|_| *it.next().unwrap());
+        let faces: Vec<(usize, f32)> = ks.into_iter().zip(&keep).filter(|(_, k)| **k).map(|(v, _)| v).enumerate().collect();
+
+        let extra = live.len().saturating_sub(SHOWN);
+        let shown: Vec<&(usize, f32)> = faces.iter().take(SHOWN).collect();
+        let stack = if shown.is_empty() { 0. } else { D + STEP * (shown.iter().map(|f| f.1).sum::<f32>() - 1.).max(0.) };
+        let chip = if extra > 0 { STEP } else { 0. };
+        let w = if self.party.room.is_some() { (stack + chip + 14.).max(32.) } else { 32. };
+        let rect = Rect::from_min_max(pos2(right - w, cy - 16.), pos2(right, cy + 16.));
+        self.party_btn = rect;
+        let resp = press(ui, "party-btn", rect);
+        if open || resp.hovered() {
+            ui.painter().rect_filled(rect, rad(16.), if open { t.s3 } else { t.s2 });
+        }
+        if self.party.room.is_none() {
+            icon(ui, icon!("party"), rect.center(), 16., if open { t.tx } else { t.tm });
+        } else {
+            let mut x = rect.center().x - (stack + chip) / 2. + D / 2.;
+            let mut last = x;
+            for (i, k) in shown.iter().map(|f| (f.0, f.1)) {
+                last = x;
+                let f = &self.party.faces[i];
+                let c = pos2(x, cy);
+                let r = D / 2. * (0.55 + 0.45 * k);
+                ui.scope(|ui| {
+                    ui.set_opacity(k.clamp(0., 1.));
+                    ui.painter().circle_filled(c, r + 1.5, t.s0);
+                    self.avatar(ui, Some(f.2.as_str()).filter(|u| !u.is_empty()), c, r, Some(&f.1));
+                });
+                x += STEP * k;
+            }
+            if extra > 0 {
+                let c = pos2(last + STEP + 2., cy);
+                ui.painter().circle_filled(c, D / 2. + 1.5, t.s0);
+                ui.painter().circle_filled(c, D / 2., t.s3);
+                ui.painter().text(c, Align2::CENTER_CENTER, format!("+{extra}"), font_w(10., Weight::Semi), t.tx);
+            }
+        }
         let clicked = resp.clicked();
         crate::tip::Tip::tip(resp, &t, "Listening party");
         if clicked {
@@ -891,6 +1019,7 @@ impl App {
                 self.party_open = Some(ui.input(|i| i.time));
             }
         }
+        w
     }
 
     /// The party popover under its button: start or join when not in one; code, listeners, requests and settings when in one.
@@ -919,7 +1048,7 @@ impl App {
             return;
         }
         let name = self.user_name().unwrap_or_else(|| "Serafin listener".into());
-        let my_pic = self.youtube_user().and_then(|u| u.0);
+        let my_pic = self.my_avatar();
         let mut act: Option<Box<dyn FnOnce(&mut App)>> = None;
         egui::Area::new(Id::unique("party-pop")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
             ui.set_opacity(if h > 0. { k } else { 0. });
@@ -948,14 +1077,14 @@ impl App {
 
             match &self.party.room {
                 None => {
-                    let g = p.layout("Listen in sync with friends. Everyone hears the same song at the same moment.".into(), font(13.), t.tm, w);
+                    let g = p.layout("Listen in sync with friends. Everyone hears the same song at the same moment, and everyone is in control.".into(), font(13.), t.tm, w);
                     let gh = g.size().y;
                     p.galley(pos2(l, y), g, t.tm);
                     y += gh + 12.;
                     let connecting = self.party.active();
                     let start = Rect::from_min_size(pos2(l, y), vec2(w, 36.));
                     if btn(ui, &t, "start", start, if connecting { "Cancel" } else { "Start a party" }, !connecting) {
-                        act = Some(if connecting { Box::new(|a: &mut App| a.party.leave()) } else { let (n, c) = (name.clone(), ctx.clone()); Box::new(move |a: &mut App| a.party.create(&c, &n)) });
+                        act = Some(if connecting { Box::new(|a: &mut App| a.party.leave()) } else { let (n, c, av) = (name.clone(), ctx.clone(), my_pic.clone()); Box::new(move |a: &mut App| a.party.create(&c, &n, &av)) });
                     }
                     y += 36. + 12.;
                     let jw = text_w(&p, "Join", font_w(13., Weight::Semi)) + 28.;
@@ -970,8 +1099,8 @@ impl App {
                         .hint_text(egui::RichText::new("Enter a party code").color(t.tm)).desired_width(edit.width()));
                     let enter = te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     if (btn(ui, &t, "join", Rect::from_min_size(pos2(field.max.x + 6., y), vec2(jw, 36.)), "Join", false) || enter) && !self.party_code.trim().is_empty() {
-                        let (n, code, c) = (name.clone(), self.party_code.clone(), ctx.clone());
-                        act = Some(Box::new(move |a: &mut App| a.party.join(&c, &code, &n)));
+                        let (n, code, c, av) = (name.clone(), self.party_code.clone(), ctx.clone(), my_pic.clone());
+                        act = Some(Box::new(move |a: &mut App| a.party.join(&c, &code, &n, &av)));
                     }
                     y += 36.;
                 }
@@ -994,21 +1123,25 @@ impl App {
                     for m in &room.members {
                         let cy = y + 22.;
                         let you = m.id == room.me;
-                        // The protocol carries no pictures, so only yours is known; everyone else gets their initials.
-                        p.circle_filled(pos2(l + 16., cy), 16., t.axc);
-                        p.text(pos2(l + 16., cy), Align2::CENTER_CENTER, initials(&m.name), font_w(11., Weight::Semi), t.tx);
-                        if let Some(u) = my_pic.as_deref().filter(|_| you) {
-                            paint_cover(ui, u, Rect::from_center_size(pos2(l + 16., cy), vec2(32., 32.)), rad(16.), egui::Color32::WHITE);
-                        }
+                        let pic = Some(if m.avatar.is_empty() && you { my_pic.as_str() } else { m.avatar.as_str() }).filter(|u| !u.is_empty());
+                        self.avatar(ui, pic, pos2(l + 16., cy), 16., Some(&m.name));
                         let kick = host && !you;
-                        let state = if !m.connected { "Offline" } else if room.waiting.contains(&m.id) { "Syncing…" } else { "Synced" };
-                        let sw = text_w(&p, state, font(12.));
+                        let state = if !m.connected {
+                            "Offline".to_string()
+                        } else if room.waiting.contains(&m.id) {
+                            "Syncing…".to_string()
+                        } else if let Some((_, ms)) = room.drifting.iter().find(|d| d.0 == m.id) {
+                            format!("Out of sync ({:+.1}s)", *ms as f32 / 1000.)
+                        } else {
+                            "Synced".to_string()
+                        };
+                        let sw = text_w(&p, &state, font(12.));
                         // Every row keeps the trailing icon slot (host's crown, a guest's remove), so the states line up.
                         let right = l + w - 34.;
                         let nw = right - sw - 10. - (l + 42.);
                         trunc(&p, pos2(l + 42., cy - 8.), nw, &if you { format!("{} (you)", m.name) } else { m.name.clone() }, font_w(13., Weight::Semi), t.tx);
                         trunc(&p, pos2(l + 42., cy + 9.), nw, if m.id == room.host_id { "Host" } else { "Guest" }, font(11.5), t.tm);
-                        p.text(pos2(right, cy), Align2::RIGHT_CENTER, state, font(12.), t.tm);
+                        p.text(pos2(right, cy), Align2::RIGHT_CENTER, &state, font(12.), if room.drifting.iter().any(|d| d.0 == m.id) { t.ax } else { t.tm });
                         if m.id == room.host_id {
                             icon(ui, icon!("crown"), pos2(l + w - 14., cy), 15., t.ax);
                         } else if kick && icon_button(ui, &t, ("party-kick", &m.id), pos2(l + w - 14., cy), 28., icon!("x"), 14., t.tm).clicked() {
@@ -1018,64 +1151,38 @@ impl App {
                         y += 44.;
                     }
 
-                    // Host only: join requests (initials) and suggestions (the song's cover), each a card with accept / decline.
-                    let rows: Vec<(String, String, String, Option<String>, bool)> = if host {
-                        room.requests.iter().map(|(id, n)| (id.clone(), n.clone(), "Wants to join".into(), None, true))
-                            .chain(room.suggestions.iter().map(|s| (s.id.clone(), s.track.title.clone(), format!("Suggested by {}", s.from), Some(s.track.thumbnail.clone()), false)))
-                            .collect()
-                    } else {
-                        vec![]
-                    };
+                    // Host only: join requests, each a card with accept / decline.
+                    let rows: Vec<(String, String)> = if host { room.requests.clone() } else { vec![] };
                     if !rows.is_empty() {
                         y += 8.;
                         label(&p, &t, pos2(l, y + 6.), w, "Requests");
                         y += 14.;
                     }
-                    for (i, (id, title, sub, cover, join)) in rows.into_iter().enumerate() {
+                    for (i, (id, title)) in rows.into_iter().enumerate() {
                         let card = Rect::from_min_size(pos2(l, y + 2.), vec2(w, 56.));
                         p.rect_filled(card, rad(12.), t.s1);
                         let cy = card.center().y;
-                        let pic = pos2(card.min.x + 10. + 16., cy);
-                        match cover.filter(|u| !u.is_empty()) {
-                            Some(u) => self.thumb(ui, Some(&u), Rect::from_center_size(pic, vec2(32., 32.)), 6.),
-                            None => {
-                                p.circle_filled(pic, 16., t.axc);
-                                p.text(pic, Align2::CENTER_CENTER, initials(&title), font_w(11., Weight::Semi), t.tx);
-                            }
-                        }
-                        let yes_label = if join { "Accept" } else { "Add" };
-                        let yw = text_w(&p, yes_label, font_w(12.5, Weight::Semi)) + 24.;
+                        self.avatar(ui, None, pos2(card.min.x + 10. + 16., cy), 16., Some(&title));
+                        let yw = text_w(&p, "Accept", font_w(12.5, Weight::Semi)) + 24.;
                         let yes = Rect::from_min_size(pos2(card.max.x - 10. - yw, cy - 14.), vec2(yw, 28.));
                         let no_c = pos2(yes.min.x - 6. - 14., cy);
                         let tx = card.min.x + 10. + 32. + 10.;
                         let nw = no_c.x - 14. - 8. - tx;
                         trunc(&p, pos2(tx, cy - 8.), nw, &title, font_w(13., Weight::Semi), t.tx);
-                        trunc(&p, pos2(tx, cy + 9.), nw, &sub, font(11.5), t.tm);
+                        trunc(&p, pos2(tx, cy + 9.), nw, "Wants to join", font(11.5), t.tm);
                         let no_hit = press(ui, ("party-no", i), Rect::from_center_size(no_c, vec2(28., 28.)));
                         p.circle_filled(no_c, 14., if no_hit.hovered() { t.s2 } else { t.s3 });
                         icon(ui, icon!("x"), no_c, 13., t.tm);
                         let yes_hit = press(ui, ("party-yes", i), yes);
                         p.rect_filled(yes, rad(14.), if yes_hit.hovered() { t.tx.gamma_multiply(0.88) } else { t.tx });
-                        p.text(yes.center(), Align2::CENTER_CENTER, yes_label, font_w(12.5, Weight::Semi), t.s0);
+                        p.text(yes.center(), Align2::CENTER_CENTER, "Accept", font_w(12.5, Weight::Semi), t.s0);
                         if let Some(ok) = [(yes_hit.clicked(), true), (no_hit.clicked(), false)].into_iter().find(|c| c.0).map(|c| c.1) {
                             let id = id.clone();
-                            act = Some(Box::new(move |a: &mut App| if join { a.party.answer_join(&id, ok) } else { a.party.answer_suggestion(&id, ok) }));
+                            act = Some(Box::new(move |a: &mut App| a.party.answer_join(&id, ok)));
                         }
                         y += 56. + 6.;
                     }
 
-                    if host {
-                        y += 8.;
-                        label(&p, &t, pos2(l, y + 6.), w, "Guests can");
-                        y += 14.;
-                        let cy = y + 20.;
-                        trunc(&p, pos2(l, cy), w - 56., "Add to the queue", font_w(13., Weight::Semi), t.tx);
-                        let mut on = self.party.auto_add;
-                        if crate::settings::toggle(ui, &t, "party-auto", l + w, cy, &mut on) {
-                            act = Some(Box::new(move |a: &mut App| a.party.auto_add = on));
-                        }
-                        y += 40.;
-                    }
                     y += 12.;
                     if btn(ui, &t, "end", Rect::from_min_size(pos2(l, y), vec2(w, 36.)), if host { "End party" } else { "Leave party" }, false) {
                         act = Some(Box::new(|a: &mut App| a.party.leave()));
@@ -1111,7 +1218,7 @@ mod tests {
         out.send(first).unwrap();
         let clock = Arc::new(Mutex::new(Clock::default()));
         let c = clock.clone();
-        std::thread::spawn(move || worker(Context::default(), out_rx, in_tx, c, Default::default()));
+        std::thread::spawn(move || worker(Context::default(), out_rx, in_tx, c, Default::default(), Default::default()));
         Conn { out, inbox, clock }
     }
 
@@ -1139,181 +1246,43 @@ mod tests {
         assert_eq!(c.position_at(1000, at, false), 1000);
     }
 
-    /// Joins the room in PARTY_CODE as a guest and prints what the host sends for 5 minutes:
-    /// `PARTY_CODE=ABC123 cargo test -p serafin listen_to_party -- --ignored --nocapture`
+    /// Two listeners in one room on a local server (`cd desktop/party-server && PORT=8099 go run ./cmd/metroserver`):
+    /// `SERAFIN_PARTY_SERVER=ws://127.0.0.1:8099/ws cargo test -p serafin shared_control -- --ignored --nocapture`
     #[test]
-    #[ignore = "joins a live room; needs PARTY_CODE"]
-    fn listen_to_party() {
-        let code = std::env::var("PARTY_CODE").expect("PARTY_CODE");
-        let g = connect(encode("join_room", Some(&pb::Join { room_code: code.trim().to_uppercase(), username: "Serafin test guest".into() })));
-        let end = Instant::now() + Duration::from_secs(300);
-        while let Some(left) = end.checked_duration_since(Instant::now()) {
-            let Ok(In::Msg(k, b)) = g.inbox.recv_timeout(left) else { continue };
-            match k.as_str() {
-                "sync_playback" => {
-                    let a = pb::PlaybackAction::decode(&b[..]).unwrap();
-                    println!("{k}: {} track={} pos={}ms server_time={} info={:?} queue={}", a.action, a.track_id, a.position, a.server_time, a.track_info.map(|t| t.title), a.queue.len());
-                }
-                "join_approved" => {
-                    // A suggestion, so the host sees that card too.
-                    g.out.send(encode("suggest_track", Some(&pb::SuggestTrack { track_info: Some(pb::TrackInfo { id: "fJ9rUzIMcZQ".into(), title: "Bohemian Rhapsody".into(), artist: "Queen".into(), duration: 354_000, thumbnail: "https://i.ytimg.com/vi/fJ9rUzIMcZQ/hqdefault.jpg".into(), ..Default::default() }) }))).unwrap();
-                    let s = pb::Session::decode(&b[..]).unwrap().state.unwrap_or_default();
-                    println!("{k}: host={} users={:?} track={:?} playing={} pos={}ms", s.host_id, s.users.iter().map(|u| &u.username).collect::<Vec<_>>(), s.current_track.map(|t| t.title), s.is_playing, s.position);
-                }
-                _ => println!("{k}"),
-            }
-        }
-    }
-
-    /// Hosts a scripted room for 10 minutes: prints the code, lets everyone in, approves suggestions, and drives playback
-    /// (song A from 0, a seek, a pause and resume, then song B). `cargo test -p serafin host_party -- --ignored --nocapture`
-    #[test]
-    #[ignore = "hosts a live room for 10 minutes"]
-    fn host_party() {
-        let h = connect(encode("create_room", Some(&pb::Name { username: "Serafin test host".into() })));
-        let room = pb::Session::decode(&wait(&h, "room_created")[..]).unwrap();
-        println!("PARTY CODE: {}", room.room_code);
-        let songs = [
-            pb::TrackInfo { id: "dQw4w9WgXcQ".into(), title: "Never Gonna Give You Up".into(), artist: "Rick Astley".into(), duration: 213_000, ..Default::default() },
-            pb::TrackInfo { id: "fJ9rUzIMcZQ".into(), title: "Bohemian Rhapsody".into(), artist: "Queen".into(), duration: 354_000, ..Default::default() },
-        ];
-        let t0 = Instant::now();
-        let log = |m: String| println!("[{:5.1}s] {m}", t0.elapsed().as_secs_f32());
-        let send = |action: &str, track: &pb::TrackInfo, pos: i64, info: bool| {
-            let captured = h.clock.lock().unwrap().now().unwrap_or(0);
-            h.out.send(encode("playback_action", Some(&pb::PlaybackAction { action: action.into(), track_id: track.id.clone(), position: pos, track_info: info.then(|| track.clone()), volume: 1., captured_at_server_time: captured, ..Default::default() }))).unwrap();
-        };
-        // (song, position it was at when `since` was taken, playing)
-        let (mut cur, mut base, mut since, mut playing) = (0usize, 0i64, Instant::now(), true);
-        let pos = |base: i64, since: Instant, playing: bool| if playing { base + since.elapsed().as_millis() as i64 } else { base };
-        // Waits for someone to join before the song starts, so the guest sees it from the top.
-        let mut started = false;
-        let (mut beat, mut step) = (Instant::now(), 0);
-        while t0.elapsed() < Duration::from_secs(600) {
-            if let Ok(In::Msg(k, b)) = h.inbox.recv_timeout(Duration::from_millis(200)) {
-                match k.as_str() {
-                    "join_request" => {
-                        let u = pb::User::decode(&b[..]).unwrap();
-                        log(format!("join request from {} — approving", u.username));
-                        h.out.send(encode("approve_join", Some(&pb::Id { id: u.user_id, reason: String::new() }))).unwrap();
-                    }
-                    "suggestion_received" => {
-                        let s = pb::Suggestion::decode(&b[..]).unwrap();
-                        log(format!("suggestion from {}: {:?} — approving", s.from_username, s.track_info.map(|t| t.title)));
-                        h.out.send(encode("approve_suggestion", Some(&pb::Id { id: s.suggestion_id, reason: String::new() }))).unwrap();
-                    }
-                    "sync_playback" => {
-                        let a = pb::PlaybackAction::decode(&b[..]).unwrap();
-                        log(format!("{k}: {} {:?}", a.action, a.track_info.map(|t| t.title)));
-                    }
-                    "buffer_wait" => log(format!("buffer_wait: {:?}", pb::BufferWait::decode(&b[..]).unwrap().waiting_for)),
-                    "user_joined" | "user_left" | "user_disconnected" | "user_reconnected" => log(format!("{k}: {}", pb::User::decode(&b[..]).unwrap().username)),
-                    _ => log(k.clone()),
-                }
-                if k == "user_joined" && !started {
-                    started = true;
-                    (base, since, playing) = (0, Instant::now(), true);
-                    send("change_track", &songs[cur], 0, true);
-                    send("play", &songs[cur], 0, false);
-                    log(format!("playing {} from 0:00", songs[cur].title));
-                    (beat, step) = (Instant::now(), 0);
-                }
-            }
-            if !started {
-                continue;
-            }
-            let at = beat.elapsed().as_secs();
-            let script = [(40, "seek"), (60, "pause"), (70, "play"), (95, "next")];
-            if let Some(&(_, what)) = script.get(step).filter(|(s, _)| at >= *s) {
-                step += 1;
-                match what {
-                    "seek" => {
-                        (base, since) = (90_000, Instant::now());
-                        send("seek", &songs[cur], base, false);
-                        log("seek to 1:30".into());
-                    }
-                    "pause" => {
-                        (base, playing) = (pos(base, since, playing), false);
-                        send("pause", &songs[cur], base, false);
-                        log(format!("pause at {}s", base / 1000));
-                    }
-                    "play" => {
-                        (since, playing) = (Instant::now(), true);
-                        send("play", &songs[cur], base, false);
-                        log(format!("resume at {}s", base / 1000));
-                    }
-                    _ => {
-                        cur = 1;
-                        (base, since, playing) = (0, Instant::now(), true);
-                        send("change_track", &songs[cur], 0, true);
-                        send("play", &songs[cur], 0, false);
-                        log(format!("next song: {}", songs[cur].title));
-                    }
-                }
-            }
-            // Heartbeat, as the app does.
-            if playing && since.elapsed().as_millis() % 8000 < 200 && since.elapsed() > Duration::from_secs(1) {
-                send("play", &songs[cur], pos(base, since, playing), false);
-            }
-        }
-        h.out.send(encode("leave_room", None)).unwrap();
-    }
-
-    #[test]
-    #[ignore = "talks to Metrolist's party server; run with --ignored"]
-    fn live_room_round_trip() {
-        let host = connect(encode("create_room", Some(&pb::Name { username: "serafin-test-host".into() })));
+    #[ignore = "needs the party server running locally"]
+    fn shared_control() {
+        let avatar = "https://yt3.ggpht.com/host=s88";
+        let host = connect(encode("create_room", Some(&pb::Name { username: "host".into(), avatar_url: avatar.into() })));
         let created = pb::Session::decode(&wait(&host, "room_created")[..]).unwrap();
-        assert!(!created.room_code.is_empty() && !created.session_token.is_empty());
-
-        let guest = connect(encode("join_room", Some(&pb::Join { room_code: created.room_code.clone(), username: "serafin-test-guest".into() })));
+        let guest = connect(encode("join_room", Some(&pb::Join { room_code: created.room_code.clone(), username: "guest".into(), avatar_url: "https://evil.example/a".into() })));
         let req = pb::User::decode(&wait(&host, "join_request")[..]).unwrap();
-        assert_eq!(req.username, "serafin-test-guest");
         host.out.send(encode("approve_join", Some(&pb::Id { id: req.user_id.clone(), reason: String::new() }))).unwrap();
-        let joined = pb::Session::decode(&wait(&guest, "join_approved")[..]).unwrap();
-        assert_eq!(joined.room_code, created.room_code);
-        let state = joined.state.unwrap();
-        assert_eq!(state.host_id, created.user_id);
-        assert_eq!(state.users.len(), 2);
+        let state = pb::Session::decode(&wait(&guest, "join_approved")[..]).unwrap().state.unwrap();
+        assert_eq!(state.users.iter().find(|u| u.is_host).unwrap().avatar_url, avatar, "the host's picture reaches the guest");
+        assert_eq!(state.users.iter().find(|u| !u.is_host).unwrap().avatar_url, "", "pictures off Google's hosts are dropped");
 
-        let track = pb::TrackInfo { id: "dQw4w9WgXcQ".into(), title: "Never Gonna Give You Up".into(), artist: "Rick Astley".into(), duration: 213_000, ..Default::default() };
-        let act = |action: &str, pos: i64, info: Option<pb::TrackInfo>| {
-            let captured = host.clock.lock().unwrap().now().unwrap_or(0);
-            encode("playback_action", Some(&pb::PlaybackAction { action: action.into(), track_id: track.id.clone(), position: pos, track_info: info, volume: 1., captured_at_server_time: captured, ..Default::default() }))
+        let song = |id: &str| pb::TrackInfo { id: id.into(), title: id.into(), artist: "a".into(), duration: 200_000, ..Default::default() };
+        let act = |c: &Conn, action: &str, track: &str, info: Option<pb::TrackInfo>, queue: Vec<pb::TrackInfo>| {
+            let captured = c.clock.lock().unwrap().now().unwrap_or(0);
+            c.out.send(encode("playback_action", Some(&pb::PlaybackAction { action: action.into(), track_id: track.into(), track_info: info, queue, replace_queue: true, volume: 1., captured_at_server_time: captured, ..Default::default() }))).unwrap();
         };
-        host.out.send(act("change_track", 0, Some(track.clone()))).unwrap();
-        let change = pb::PlaybackAction::decode(&wait(&guest, "sync_playback")[..]).unwrap();
-        assert_eq!(change.action, "change_track");
-        assert_eq!(change.track_info.unwrap().id, track.id);
-
-        guest.out.send(encode("buffer_ready", Some(&pb::Id { id: track.id.clone(), reason: String::new() }))).unwrap();
-        host.out.send(act("play", 12_000, None)).unwrap();
-        let play = loop {
-            let a = pb::PlaybackAction::decode(&wait(&guest, "sync_playback")[..]).unwrap();
-            if a.action == "play" {
+        let next = |c: &Conn, action: &str| loop {
+            let a = pb::PlaybackAction::decode(&wait(c, "sync_playback")[..]).unwrap();
+            if a.action == action {
                 break a;
             }
         };
-        // The server moves the position on from the host's capture time to its own `server_time`.
-        assert!((12_000..12_500).contains(&play.position), "position {}", play.position);
-        assert!(play.server_time > 0, "play carries the server time it is valid at");
-        assert!(guest.clock.lock().unwrap().now().is_some(), "pongs set the guest's clock");
-
-        guest.out.send(encode("suggest_track", Some(&pb::SuggestTrack { track_info: Some(pb::TrackInfo { id: "fJ9rUzIMcZQ".into(), title: "Bohemian Rhapsody".into(), artist: "Queen".into(), duration: 354_000, ..Default::default() }) }))).unwrap();
-        let sug = pb::Suggestion::decode(&wait(&host, "suggestion_received")[..]).unwrap();
-        assert_eq!(sug.from_username, "serafin-test-guest");
-        assert_eq!(sug.track_info.unwrap().id, "fJ9rUzIMcZQ");
-        host.out.send(encode("approve_suggestion", Some(&pb::Id { id: sug.suggestion_id, reason: String::new() }))).unwrap();
-        let add = loop {
-            let a = pb::PlaybackAction::decode(&wait(&host, "sync_playback")[..]).unwrap();
-            if a.action == "queue_add" {
-                break a;
-            }
-        };
-        assert_eq!(add.track_info.unwrap().id, "fJ9rUzIMcZQ");
-
-        host.out.send(encode("kick_user", Some(&pb::Id { id: req.user_id, reason: String::new() }))).unwrap();
-        wait(&guest, "kicked");
+        // The guest starts a song, and the host (who did nothing) pauses it.
+        act(&guest, "change_track", "", Some(song("one")), vec![song("two")]);
+        let change = next(&host, "change_track");
+        assert_eq!((change.track_info.unwrap().id, change.queue.len(), change.origin_user_id), ("one".into(), 1, state.users.iter().find(|u| !u.is_host).unwrap().user_id.clone()));
+        act(&host, "pause", "one", None, vec![]);
+        assert_eq!(next(&guest, "pause").track_id, "one");
+        // The guest edits the queue.
+        act(&guest, "queue_add", "", Some(song("three")), vec![]);
+        assert_eq!(next(&host, "queue_add").queue.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["two", "three"]);
+        guest.out.send(encode("leave_room", None)).unwrap();
+        assert_eq!(pb::User::decode(&wait(&host, "user_left")[..]).unwrap().username, "guest");
         host.out.send(encode("leave_room", None)).unwrap();
     }
 }

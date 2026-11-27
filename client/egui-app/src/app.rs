@@ -401,8 +401,8 @@ impl App {
             p.circle_filled(c, 6.5, t.ax);
             icon(ui, icon!("lock"), c, 9., t.on_ax);
         }
-        self.party_button(ui, pos2(me.min.x - 6. - 16., cy));
-        self.island(ui, me.min.x - 6. - 32. - 4., cy);
+        let party_w = self.party_button(ui, me.min.x - 6., cy);
+        self.island(ui, me.min.x - 6. - party_w - 4., cy);
 
         // Middle: a search pill centred on the window whatever the clusters beside it do. It only opens the palette.
         let w = (tb.width() - 640.).clamp(140., 300.);

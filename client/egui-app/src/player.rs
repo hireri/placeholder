@@ -275,6 +275,15 @@ impl Player {
         }
     }
 
+    /// Replaces every song after the current one (a party's shared queue).
+    pub fn set_upcoming(&mut self, tracks: &[Track]) {
+        if !self.queue.is_empty() {
+            self.queue.truncate(self.cur + 1);
+            self.queue.extend(tracks.iter().map(song_of));
+            self.qgen += 1;
+        }
+    }
+
     /// Drops every song after the current one.
     pub fn clear_upcoming(&mut self) {
         self.queue.truncate(self.cur + 1);

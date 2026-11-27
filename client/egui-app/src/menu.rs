@@ -141,7 +141,6 @@ const SAVE: usize = 8;
 const REMOVE: usize = 9;
 const LINK: usize = 10;
 const DELETE: usize = 11;
-const SUGGEST: usize = 12;
 
 fn track_link(t: &Track) -> String {
     if t.source == "spotify" { format!("https://open.spotify.com/track/{}", t.id) } else { format!("https://music.youtube.com/watch?v={}", t.id) }
@@ -179,9 +178,6 @@ impl App {
         match &target {
             Target::Track(tr) => {
                 items.extend([Item::Action(PLAY, "Play", Some(icon!("mplay"))), Item::Action(NEXT, "Play next", Some(icon!("mnext"))), Item::Action(QUEUE, "Add to queue", Some(icon!("que")))]);
-                if self.party.is_guest() {
-                    items.push(Item::Action(SUGGEST, "Suggest to the party", Some(icon!("party"))));
-                }
                 items.extend([Item::Divider, Item::Action(SONG, "Open", Some(icon!("mnote")))]);
                 if tr.artist_id.is_some() {
                     items.push(Item::Action(ARTIST, "Go to artist", Some(icon!("martist"))));
@@ -243,7 +239,6 @@ impl App {
                 }
                 SONG => self.open_song(tr),
                 ARTIST => self.open_artist(tr.artist_id.as_deref().unwrap_or_default()),
-                SUGGEST => self.party.suggest(&tr),
                 _ => {
                     ctx.copy_text(track_link(&tr));
                     crate::toast::info("Link copied");
