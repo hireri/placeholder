@@ -373,6 +373,11 @@ impl Sources {
         self.lock().list.as_ref().and_then(|l| l.as_ref().ok()).is_some_and(|l| l.iter().any(|s| s.id == id && s.enabled && s.caps.iter().any(|c| c == cap)))
     }
 
+    /// Ids of the enabled sources that can do `cap`.
+    pub fn with_cap(&self, cap: &str) -> Vec<String> {
+        self.lock().list.as_ref().and_then(|l| l.as_ref().ok()).map(|l| l.iter().filter(|s| s.enabled && s.caps.iter().any(|c| c == cap)).map(|s| s.id.clone()).collect()).unwrap_or_default()
+    }
+
     /// The source scrobbles to Last.fm itself, so Serafin must not send the same play again.
     pub fn server_scrobbles(&self, src: &str) -> bool {
         let id = if src == "youtube" { "yt" } else { src };

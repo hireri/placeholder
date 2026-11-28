@@ -1118,6 +1118,8 @@ impl App {
         if clicked {
             if open {
                 self.party_open = None;
+            } else if self.sp.group.is_some() {
+                crate::toast::info("Leave your SyncPlay group to start a listening party");
             } else {
                 (self.palette, self.ctx_menu, self.lib_menu, self.vol_open, self.me_menu) = (None, None, false, false, None);
                 self.party_open = Some(ui.input(|i| i.time));

@@ -100,14 +100,16 @@ object Sources {
             })
         }
         // Only a changed connection invalidates the live client and its last test.
-        if (req.url != null || req.username != null || req.secret != null) { live.remove(id); results.remove(id) }
+        if (req.url != null || req.username != null || req.secret != null) { drop(id) }
     }
+
+    private fun drop(id: String) { (live.remove(id) as? JellyfinSource)?.shutdown(); results.remove(id) }
 
     fun remove(id: String) {
         require(id != "yt") { "YouTube Music cannot be removed, only disabled" }
         require(configs().firstOrNull { it.id == id }?.type?.let(::isSingleton) != true) { "This source is built in and can only be turned off" }
         store.update { it.copy(sources = it.sources.filter { s -> s.id != id }, sourceOrder = it.sourceOrder - id) }
-        live.remove(id); results.remove(id)
+        drop(id)
         Mix.forget(id)
     }
 

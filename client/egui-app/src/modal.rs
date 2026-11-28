@@ -111,6 +111,20 @@ impl Card<'_> {
         self.y += 36. + 12.;
     }
 
+    /// A 44px row: name over a quieter line, and an optional button at the right. True when the button was clicked.
+    pub fn row(&mut self, key: &str, name: &str, sub: &str, action: Option<&str>) -> bool {
+        let (t, y) = (self.t, self.y);
+        let bw = action.map_or(0., |a| text_w(&self.p, a, font_w(12.5, Weight::Semi)) + 24.);
+        let tw = self.w - bw - 8.;
+        trunc(&self.p, pos2(self.l, y + if sub.is_empty() { 22. } else { 14. }), tw, name, font_w(13., Weight::Semi), t.tx);
+        if !sub.is_empty() {
+            trunc(&self.p, pos2(self.l, y + 31.), tw, sub, font(11.5), t.tm);
+        }
+        let hit = action.is_some_and(|a| btn(self.ui, t, key, Rect::from_min_size(pos2(self.l + self.w - bw, y + 9.), vec2(bw, 26.)), a, true));
+        self.y += 44.;
+        hit
+    }
+
     /// Right-aligned Cancel and confirm buttons. Returns `Some(true)` to confirm, `Some(false)` to cancel.
     pub fn actions(&mut self, confirm: &str, kind: Kind, enabled: bool) -> Option<bool> {
         let (t, mut out) = (self.t, None);

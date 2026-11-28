@@ -26,6 +26,7 @@ mod party;
 mod player;
 mod settings;
 mod sources;
+mod syncplay;
 mod stats;
 mod theme;
 mod tip;

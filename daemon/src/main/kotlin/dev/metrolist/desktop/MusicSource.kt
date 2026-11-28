@@ -4,7 +4,7 @@ import kotlinx.serialization.Serializable
 
 enum class Kind { CATALOG, LIBRARY }
 
-enum class Cap { SEARCH, HOME, LIBRARY, LIKE, PLAYLIST_WRITE, RADIO, VIDEO, HISTORY, SCROBBLE, IMAGE }
+enum class Cap { SEARCH, HOME, LIBRARY, LIKE, PLAYLIST_WRITE, RADIO, VIDEO, HISTORY, SCROBBLE, IMAGE, SYNCPLAY }
 
 /** Persisted in credentials.json. `secret` is the password or token, never sent back to the client. */
 @Serializable

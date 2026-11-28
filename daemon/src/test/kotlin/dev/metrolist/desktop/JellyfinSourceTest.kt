@@ -29,6 +29,7 @@ class JellyfinSourceTest {
                 } else x.reply(401, "")
                 rejectNext && x.requestHeaders.getFirst("X-Emby-Token") == "tok1" -> { rejectNext = false; x.reply(401, "") }
                 path == "/Items" && x.requestURI.query.contains("Audio") -> x.reply(200, ITEMS)
+                path == "/Items" && x.requestURI.query.contains("Ids=") -> x.reply(200, """{"Items":[$SONG2,$SONG]}""")
                 path == "/Items/s1" -> x.reply(200, SONG)
                 path == "/UserItems/Resume" || path == "/Items/Latest" -> x.reply(200, if (path == "/Items/Latest") "[]" else ITEMS)
                 path == "/Items/s1/InstantMix" -> x.reply(200, ITEMS)
@@ -83,11 +84,18 @@ class JellyfinSourceTest {
         val src = source()
         val shelves = src.home().mapNotNull { it.shelf }
         assertEquals(listOf("continue", "played", "mixes"), shelves)
-        src.reportPlay("s1", true)
+        src.reportPlay("s1", "stop", 0.0)
         assertTrue(seen.any { it.startsWith("POST /Sessions/Playing/Stopped") })
     }
 
+    @Test fun tracksByIdsKeepsRequestedOrderAndSkipsUnknown() = runBlocking {
+        val r = source().tracksByIds(listOf("jellyfin-t:s1", "jellyfin-t:nope", "jellyfin-t:s2"))
+        assertEquals(listOf("s1", "s2"), r.map { it.id })
+        assertEquals(1, seen.count { it.startsWith("GET /Items?") && it.contains("Ids=s1%2Cnope%2Cs2") })
+    }
+
     private companion object {
+        const val SONG2 = """{"Id":"s2","Name":"Two","Type":"Audio","Artists":["Artist"]}"""
         const val SONG = """{"Id":"s1","Name":"Hey","Type":"Audio","Artists":["Artist"],"ArtistItems":[{"Id":"ar1","Name":"Artist"}],"Album":"Alb","AlbumId":"a1","RunTimeTicks":2150000000,"ImageTags":{"Primary":"x"},"NormalizationGain":-8.0,"MediaSources":[{"Container":"flac","Bitrate":900000}]}"""
         const val ITEMS = """{"Items":[$SONG]}"""
     }

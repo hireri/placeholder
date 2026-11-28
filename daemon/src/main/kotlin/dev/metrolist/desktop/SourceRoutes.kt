@@ -11,7 +11,9 @@ import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.put
+import io.ktor.server.routing.RoutingContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 @Serializable private data class SourceError(val error: String)
 @Serializable private data class TokenReq(val token: String)
@@ -80,6 +82,21 @@ fun Route.sourceRoutes() {
     get("/source/{src}/home") { val s = call.parameters["src"]!!; call.respond(Sources.use(s).home().map { it.ns(s) }) }
     get("/source/{src}/library/{kind}") { val s = call.parameters["src"]!!; call.respond(Sources.use(s).library(call.parameters["kind"]!!).map { it.ns(s) }) }
 
+    get("/music/syncplay/{src}/groups") { call.respond(syncPlay().groups()) }
+    post("/music/syncplay/{src}/new") { call.respond(SyncCreatedDto(syncPlay().create(call.request.queryParameters["name"]?.trim().orEmpty().ifEmpty { "Serafin" }))) }
+    post("/music/syncplay/{src}/join/{groupId}") { syncPlay().join(call.parameters["groupId"]!!); call.respond(JsonObject(emptyMap())) }
+    post("/music/syncplay/{src}/leave") { syncPlay().leave(); call.respond(JsonObject(emptyMap())) }
+    post("/music/syncplay/{src}/cmd") { syncPlay().command(call.receive<SyncCmdReq>()); call.respond(JsonObject(emptyMap())) }
+    get("/music/syncplay/{src}/tracks") {
+        val s = call.parameters["src"]!!
+        val ids = call.request.queryParameters["ids"].orEmpty().split(',').filter { it.isNotBlank() }
+        call.respond((Sources.use(s) as? JellyfinSource ?: unsupported()).tracksByIds(ids).map { it.ns(s) })
+    }
+    get("/music/syncplay/{src}/events") {
+        val q = call.request.queryParameters
+        call.respond(syncPlay().events(q["after"]?.toLongOrNull() ?: 0, q["wait"]?.toLongOrNull() ?: 25))
+    }
+
     get("/hls/{key}") { Hls.serve(call, call.parameters["key"]!!) }
     // Only YouTube can look a song up by id; the others know songs through their albums and playlists.
     get("/music/song/{id}") { val (s, id) = Sources.parse(call.parameters["id"]!!); Sources.use(s); if (s != "yt") unsupported(); call.respond(Services.song(id)) }
@@ -135,6 +152,9 @@ fun Route.sourceRoutes() {
     post("/music/like/{id}") { val (s, id) = Sources.parse(call.parameters["id"]!!); Sources.use(s).like(id, call.request.queryParameters["on"] == "true"); call.respond(HttpStatusCode.NoContent) }
     post("/music/played/{id}") { val (s, id) = Sources.parse(call.parameters["id"]!!); val q = call.request.queryParameters; Sources.use(s).reportPlay(id, q["state"] ?: if (q["finished"] == "true") "finish" else "stop", q["pos"]?.toDoubleOrNull() ?: 0.0); call.respond(HttpStatusCode.NoContent) }
 }
+
+private fun RoutingContext.syncPlay() =
+    (Sources.use(call.parameters["src"]!!) as? JellyfinSource)?.syncPlay ?: unsupported()
 
 private const val MAX_IMAGE = 10_000_000
 

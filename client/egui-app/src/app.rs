@@ -166,6 +166,7 @@ pub struct App {
     pub sources: crate::sources::Sources,
     history: crate::history::History,
     pub party: crate::party::Party,
+    pub sp: crate::syncplay::SyncPlay,
     /// Listening party popover: when it opened, the titlebar button it hangs from, and the code typed to join.
     pub(crate) party_open: Option<f64>,
     pub(crate) party_btn: Rect,
@@ -363,6 +364,7 @@ impl App {
             sources: Default::default(),
             history: Default::default(),
             party: Default::default(),
+            sp: Default::default(),
             party_open: None,
             party_btn: Rect::NOTHING,
             party_code: String::new(),
@@ -473,7 +475,8 @@ impl App {
             p.circle_filled(c, 6.5, t.ax);
             icon(ui, icon!("lock"), c, 9., t.on_ax);
         }
-        let party_w = self.party_button(ui, me.min.x - 6., cy);
+        let sp_w = self.syncplay_button(ui, me.min.x - 6., cy);
+        let party_w = self.party_button(ui, me.min.x - 6. - sp_w, cy) + sp_w;
         self.island(ui, me.min.x - 6. - party_w - 4., cy);
 
         // Middle: a search pill centred on the window whatever the clusters beside it do. It only opens the palette.
@@ -1075,6 +1078,7 @@ impl App {
     /// Mirrors the current song to the OS controls and applies their commands. Runs every frame, also while the sidebar is collapsed.
     fn sync_media(&mut self, ctx: &Context) {
         self.party_tick(ctx);
+        self.syncplay_tick(ctx);
         let mut cmds = crate::tray::take_cmds();
         if let Some(t) = &mut self.private {
             if self.pl.playing {
@@ -1294,6 +1298,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.sp.close();
         crate::backend::stop();
     }
 
@@ -1394,6 +1399,7 @@ impl eframe::App for App {
         self.context_menu(&ctx);
         self.me_dropdown(&ctx);
         self.party_popover(&ctx);
+        self.syncplay_modal(&ctx);
         self.palette(&ctx);
         self.delete_modal(&ctx);
         self.playlist_picker(&ctx);

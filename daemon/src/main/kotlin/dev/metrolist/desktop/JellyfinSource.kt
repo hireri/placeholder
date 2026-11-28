@@ -34,7 +34,7 @@ import java.util.concurrent.CancellationException
 
 class JellyfinSource(override val config: SourceConfig) : MusicSource {
     override val kind = Kind.LIBRARY
-    override val caps = setOf(Cap.SEARCH, Cap.HOME, Cap.LIBRARY, Cap.LIKE, Cap.RADIO, Cap.SCROBBLE, Cap.PLAYLIST_WRITE, Cap.IMAGE)
+    override val caps = setOf(Cap.SEARCH, Cap.HOME, Cap.LIBRARY, Cap.LIKE, Cap.RADIO, Cap.SCROBBLE, Cap.PLAYLIST_WRITE, Cap.IMAGE, Cap.SYNCPLAY)
 
     private class Failure(message: String) : Exception(message)
 
@@ -43,6 +43,22 @@ class JellyfinSource(override val config: SourceConfig) : MusicSource {
     private val authMutex = Mutex()
     @Volatile private var token: String? = null
     @Volatile private var userId: String? = null
+
+    private val syncPlayLazy = lazy {
+        SyncPlay(config.id, base, deviceId, { authenticate(false, null); token!! }, { stale -> authenticate(true, stale); token!! }) { m, p, b -> call(m, p, body = b) }
+    }
+    val syncPlay by syncPlayLazy
+
+    /** Stops the SyncPlay session if one was ever created; called when this instance is dropped. */
+    fun shutdown() { if (syncPlayLazy.isInitialized()) syncPlay.shutdown() }
+
+    /** Tracks for `<src>:`-prefixed ids in one call, in the order asked; unknown ids are skipped. */
+    suspend fun tracksByIds(ids: List<String>): List<TrackDto> {
+        val raw = ids.take(MAX_IDS).map { it.removePrefix("${config.id}:") }
+        // Batches keep the URL under Kestrel's default 8 KB request line.
+        val byId = raw.chunked(100).flatMap { tracks(list("/Items", mapOf("userId" to uid(), "Ids" to it.joinToString(",")))) }.associateBy { it.id }
+        return raw.mapNotNull { byId[it] }
+    }
 
     private fun authHeader(tok: String? = null) =
         "MediaBrowser Client=\"Serafin\", Device=\"Desktop\", DeviceId=\"$deviceId\", Version=\"1\"" + (tok?.let { ", Token=\"$it\"" } ?: "")
@@ -318,7 +334,8 @@ class JellyfinSource(override val config: SourceConfig) : MusicSource {
         }
     }
 
-    private companion object {
+    internal companion object {
+        private const val MAX_IDS = 500
         const val TICKS_PER_SEC = 10_000_000L
         val json = Json { ignoreUnknownKeys = true }
         val http = HttpClient(OkHttp) {
