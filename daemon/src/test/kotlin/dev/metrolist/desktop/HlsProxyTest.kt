@@ -38,4 +38,12 @@ class HlsProxyTest {
         } finally { server.stop(0) }
         Unit
     }
+
+    @Test
+    fun copyRangeStreamsExactlyTheRange() {
+        val f = java.io.File.createTempFile("hls", ".bin").apply { writeBytes(ByteArray(200_000) { it.toByte() }); deleteOnExit() }
+        val out = java.io.ByteArrayOutputStream()
+        Hls.copyRange(f, 70_000, 100_000, out)
+        assertContentEquals(f.readBytes().copyOfRange(70_000, 170_000), out.toByteArray())
+    }
 }

@@ -7,7 +7,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
-import io.ktor.server.response.respondBytes
+import io.ktor.server.response.respondOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -66,13 +66,23 @@ object Hls {
             call.response.header(HttpHeaders.ContentRange, "bytes */$total")
             return call.respond(HttpStatusCode.RequestedRangeNotSatisfiable)
         }
-        val bytes = withContext(Dispatchers.IO) {
-            RandomAccessFile(file, "r").use { f -> ByteArray((end - start + 1).toInt()).also { f.seek(start); f.readFully(it) } }
-        }
         call.response.header(HttpHeaders.AcceptRanges, "bytes")
-        if (m == null) return call.respondBytes(bytes, ContentType("audio", "mp4"))
-        call.response.header(HttpHeaders.ContentRange, "bytes $start-$end/$total")
-        call.respondBytes(bytes, ContentType("audio", "mp4"), HttpStatusCode.PartialContent)
+        if (m != null) call.response.header(HttpHeaders.ContentRange, "bytes $start-$end/$total")
+        val status = if (m == null) HttpStatusCode.OK else HttpStatusCode.PartialContent
+        // Streamed from the file: an open-ended range of an hour-long mix would otherwise sit in the heap whole.
+        call.respondOutputStream(ContentType("audio", "mp4"), status, end - start + 1) { copyRange(file, start, end - start + 1, this) }
+    }
+
+    internal fun copyRange(file: File, start: Long, length: Long, out: java.io.OutputStream) = RandomAccessFile(file, "r").use { f ->
+        f.seek(start)
+        val buf = ByteArray(64 * 1024)
+        var left = length
+        while (left > 0) {
+            val n = f.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
+            if (n < 0) break
+            out.write(buf, 0, n)
+            left -= n
+        }
     }
 
     internal suspend fun assemble(playlistUrl: String): File = withContext(Dispatchers.IO) {
