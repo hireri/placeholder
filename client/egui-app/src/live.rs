@@ -896,6 +896,10 @@ impl App {
         let cy = row.center().y;
         let src = self.sources.list(&ctx).and_then(|l| l.ok()).and_then(|l| l.into_iter().find(|s| s.r#type == "soundcloud"));
         let signed = src.as_ref().is_some_and(|s| s.secret_set);
+        // The name and picture come from a connection test, which the daemon forgets on restart and on sign-in.
+        if let Some(s) = src.as_ref().filter(|s| signed && s.status == "unchecked" && !self.sources.checking(&s.id)) {
+            self.sources.test(&ctx, &s.id);
+        }
         let who = src.as_ref().filter(|_| signed).and_then(|s| s.detail.as_deref()?.strip_prefix("Signed in as ")).map(str::to_string);
         let pic = src.as_ref().filter(|_| signed).and_then(|s| s.avatar_url.clone());
         if signed {
