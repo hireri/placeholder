@@ -61,7 +61,13 @@ jobs:
         run: |
           [ "$RUNNER_OS" = Linux ] && sudo apt-get install -y cmake libgl-dev
           git clone --depth 1 --branch v4.1.4 --recurse-submodules --shallow-submodules https://github.com/projectM-visualizer/projectm.git pm-src
-          cmake -S pm-src -B pm-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DENABLE_PLAYLIST=OFF -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
+          extra=()
+          if [ "$RUNNER_OS" = Windows ]; then
+            # projectM needs GLEW; the static triplet links it in, so no extra DLL ships.
+            "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install glew:x64-windows-static-md
+            extra=(-DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md)
+          fi
+          cmake -S pm-src -B pm-build "${extra[@]}" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DENABLE_PLAYLIST=OFF -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
           cmake --build pm-build --config Release --parallel
           mkdir -p dist
           if [ "$RUNNER_OS" = Windows ]; then
