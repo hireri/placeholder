@@ -1,8 +1,14 @@
-//! Login popup: opens the service's own sign-in page in a wry webview, waits until the session
-//! exists, then hands the credentials straight to the daemon (they never pass through the UI).
+//! Sign-in helper: credentials go straight to the daemon (they never pass through the UI). YouTube and SoundCloud open the
+//! service's own page in a wry webview; Spotify opens the user's browser instead (see `spotify.rs`).
 //! Usage: serafin-login <youtube|spotify|soundcloud>   env: METROLIST_URL, METROLIST_TOKEN, METROLIST_DATA
+//! Also, for the daemon: serafin-login spotify-token   env: SPOTIFY_LOGIN
+//! Also, for the app: serafin-login spotify-play   env: METROLIST_DATA (see `spotify_play.rs`)
 //! Also, for the daemon: serafin-login soundcloud-like <on|off> <user id> <track id>   env: SC_TOKEN, SC_CLIENT_ID, METROLIST_DATA
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod spotify;
+mod spotify_connect;
+mod spotify_play;
 
 use std::path::PathBuf;
 use tao::{
@@ -17,7 +23,6 @@ use wry::WebViewBuilderExtUnix;
 use wry::{PageLoadEvent, WebContext, WebViewBuilder};
 
 const YT_START: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F";
-const SP_START: &str = "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F";
 const SC_START: &str = "https://soundcloud.com/signin";
 const YT_JS: &str = "JSON.stringify({v:(window.ytcfg&&ytcfg.get('VISITOR_DATA'))||null,d:(window.ytcfg&&ytcfg.get('DATASYNC_ID'))||null,l:(window.ytcfg&&ytcfg.get('LOGGED_IN'))||false})";
 
@@ -153,9 +158,14 @@ fn main() {
         eprintln!("usage: serafin-login soundcloud-like <on|off> <user id> <track id>");
         std::process::exit(2);
     }
+    match service.as_str() {
+        "spotify" => spotify::sign_in(),
+        "spotify-token" => spotify::token(),
+        "spotify-play" => spotify_play::serve(),
+        _ => {}
+    }
     let (start, host) = match service.as_str() {
         "youtube" => (YT_START, "https://music.youtube.com"),
-        "spotify" => (SP_START, "https://open.spotify.com"),
         "soundcloud" => (SC_START, "https://soundcloud.com"),
         _ => {
             eprintln!("usage: serafin-login <youtube|spotify|soundcloud>");
@@ -166,7 +176,7 @@ fn main() {
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
     let proxy = event_loop.create_proxy();
     let window = WindowBuilder::new()
-        .with_title(match service.as_str() { "youtube" => "Sign in to YouTube Music", "soundcloud" => "Sign in to SoundCloud", _ => "Sign in to Spotify" })
+        .with_title(if service == "youtube" { "Sign in to YouTube Music" } else { "Sign in to SoundCloud" })
         .with_inner_size(tao::dpi::LogicalSize::new(480.0, 720.0))
         .with_resizable(false)
         .build(&event_loop)
@@ -213,11 +223,6 @@ fn main() {
                             Ok(()) => { ok = true; *flow = ControlFlow::Exit }
                             Err(e) => eprintln!("daemon rejected credentials: {e}"),
                         }
-                    }
-                } else if let Some(c) = webview.cookies_for_url(host).unwrap_or_default().iter().find(|c| c.name() == "sp_dc") {
-                    match post("/auth/spotify", serde_json::json!({ "spDc": c.value() })) {
-                        Ok(()) => { ok = true; *flow = ControlFlow::Exit }
-                        Err(e) => eprintln!("daemon rejected credentials: {e}"),
                     }
                 }
             }

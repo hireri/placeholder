@@ -23,7 +23,6 @@ import kotlinx.coroutines.flow.Flow
 import java.text.Normalizer
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
-import com.music.bitchord.data.spotify.SpotifyLibrary
 import kotlinx.coroutines.CancellationException
 import kotlin.math.abs
 
@@ -65,7 +64,7 @@ object Services {
                 break
             }
             val hits = result.getOrDefault(emptyList())
-            val best = hits.mapNotNull { s -> matchScore(s, title, artist, durationSec, album)?.let { s to it } }.maxByOrNull { it.second }
+            val best = hits.mapNotNull { s -> matchScore(s.title, s.artists.map { it.name }, s.duration, s.album?.name, title, artist, durationSec, album)?.let { s to it } }.maxByOrNull { it.second }
             if (best != null) {
                 val track = best.first.toDto()
                 matchCache.put(key, track)
@@ -78,7 +77,8 @@ object Services {
     }
 
     private fun matchKey(id: String?, title: String, artist: String, durationSec: Int?, album: String?): String {
-        if (!id.isNullOrBlank()) return "spotify:$id"
+        // The source's ids arrive as `spotify:<id>`, the import page's bare: both are the same track.
+        if (!id.isNullOrBlank()) return "spotify:${id.removePrefix("spotify:")}"
         return "meta:${normalized(title)}|${normalized(artist)}|${durationSec ?: ""}|${normalized(album.orEmpty())}"
     }
 
@@ -163,16 +163,21 @@ object Services {
             .filter { it.isNotEmpty() }
             .toSet()
 
-    private fun matchScore(hit: SongItem, title: String, artist: String, durationSec: Int?, album: String?): Int? {
+    /** The best of `hits` that is the same edit of a party's song, for a listener YouTube cannot play it to. */
+    fun pickCopy(hits: List<TrackDto>, title: String, artist: String, durationSec: Int?): TrackDto? =
+        hits.filter { durationSec == null || it.durationSec == null || abs(durationSec - it.durationSec) <= 5 }
+            .mapNotNull { h -> matchScore(h.title, h.artists, h.durationSec, h.album, title, artist, durationSec, null)?.let { h to it } }
+            .maxByOrNull { it.second }?.first
+
+    private fun matchScore(hitTitle: String, hitArtists: List<String>, hitDuration: Int?, hitAlbum: String?, title: String, artist: String, durationSec: Int?, album: String?): Int? {
         val want = titleCore(title, artist)
-        val got = titleCore(hit.title, artist)
+        val got = titleCore(hitTitle, artist)
         if (want.isBlank() || got.isBlank()) return null
         val exact = want == got
         val contained = want.length > 3 && got.length > 3 && (want.contains(got) || got.contains(want))
         if (!exact && !contained) return null
-        if (versions(title) != versions(hit.title)) return null
-        val shared = artistNames(artist).any { a -> artistNames(hit.artists.joinToString { it.name }).any { it == a } }
-        val hitDuration = hit.duration
+        if (versions(title) != versions(hitTitle)) return null
+        val shared = artistNames(artist).any { a -> artistNames(hitArtists.joinToString()).any { it == a } }
         val drift = if (durationSec != null && hitDuration != null) abs(durationSec - hitDuration) else null
         if (drift != null && drift > 30) return null
         if (!shared && !(exact && drift != null && drift <= 2)) return null
@@ -184,7 +189,6 @@ object Services {
             drift <= 10 -> 15
             else -> 5
         }
-        val hitAlbum = hit.album?.name
         if (!album.isNullOrBlank() && hitAlbum != null && normalized(hitAlbum) == normalized(album)) score += 10
         return score
     }
@@ -202,12 +206,9 @@ object Services {
         YouTube.playlist(id).getOrThrow().songs.map { it.toDto() }
 
     suspend fun spotifyPlaylists(): List<PlaylistDto> =
-        SpotifyLibrary.playlists().map { PlaylistDto(it.id, it.name, it.owner, it.imageUrl, "spotify") }
+        SpotifySource.playlists().map { PlaylistDto(it.id, it.title, it.subtitle, it.thumbnail, "spotify") }
 
-    suspend fun spotifyTracks(id: String): List<TrackDto> =
-        SpotifyLibrary.tracks(id).map {
-            TrackDto(it.id, it.title, it.artist.split(", ").filter(String::isNotBlank), it.album, it.durationMs.takeIf { it > 0 }?.div(1000), it.imageUrl, "spotify")
-        }
+    suspend fun spotifyTracks(id: String): List<TrackDto> = SpotifySource.tracks(id)
 
     /** The stream URL plus the headers the player must send with it (upstream InnerTubeXPlayer, unmodified). */
     suspend fun stream(videoId: String): StreamDto {
@@ -404,13 +405,22 @@ object Services {
 
     suspend fun playlist(id: String): PageDto {
         val p = YouTube.playlist(id).completed().getOrThrow()
-        return PageDto(p.playlist.toItem()!!, tracks = p.songs.map { it.toDto() })
+        val item = p.playlist.toItem()!!.copy(artistId = p.playlist.author?.id, author = p.playlist.author?.name, authorAvatar = p.playlist.authorAvatarUrl)
+        return PageDto(item, tracks = p.songs.map { it.toDto() })
     }
 
     suspend fun artist(id: String): PageDto {
         val p = YouTube.artist(id).getOrThrow()
+        val item = p.artist.toItem()!!
+        // The header picture is wide: it is the page's banner, and the circle gets the channel's square avatar, or failing
+        // that a square crop of the same picture.
+        val avatar = (p.artist.channelId ?: id.takeIf { it.startsWith("UC") })?.let { ChannelAvatar.of(it) }
         return PageDto(
-            p.artist.toItem()!!.copy(subtitle = p.subscriberCountText),
+            item.copy(
+                subtitle = p.subscriberCountText,
+                thumbnail = avatar ?: item.thumbnail?.replace(Regex("=w\\d+-h\\d+"), "=w1200-h1200"),
+                banner = item.thumbnail?.takeIf(::isWide),
+            ),
             description = p.description,
             channelId = p.artist.channelId,
             subscribed = p.isSubscribed,
@@ -418,6 +428,9 @@ object Services {
             sections = p.sections.map { s -> SectionDto(s.title, s.items.mapNotNull { it.toItem() }) }.filter { it.items.isNotEmpty() },
         )
     }
+
+    private fun isWide(url: String) =
+        Regex("=w(\\d+)-h(\\d+)").find(url)?.destructured?.let { (w, h) -> w.toInt() > h.toInt() } == true
 
     private fun SongItem.toDto() = TrackDto(id, title, artists.map { it.name }, album?.name, duration, thumbnail, "youtube", artists.firstOrNull()?.id, album?.id, explicit, isVideoSong)
 }

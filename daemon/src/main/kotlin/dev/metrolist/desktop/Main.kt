@@ -64,7 +64,7 @@ fun main() {
 
     runBlocking {
         val stored = creds.load()
-        SpotifyAuth.setCookie(stored.spotify?.spDc)
+        SpotifyAuth.set(stored.spotify?.login)
         runCatching { YouTubeAuth.apply(stored.youtube) }
         runCatching { Settings.apply() }
         LastFm.init()
@@ -122,12 +122,15 @@ fun main() {
             }
             post("/auth/spotify") {
                 val c = call.receive<SpotifyCreds>()
+                // An out-of-date helper posts a body without a login; accepting it would report a sign-in that never happened.
+                val login = requireNotNull(c.login) { "serafin-login is out of date" }
                 creds.update { it.copy(spotify = c) }
-                SpotifyAuth.setCookie(c.spDc)
+                SpotifyAuth.set(login)
+                Sources.patch("spotify", SourceReq(enabled = true))
                 call.respond(SpotifyAuth.status())
             }
             delete("/auth/youtube") { creds.update { it.copy(youtube = null) }; YouTubeAuth.apply(null); call.respond(ServiceStatus(false)) }
-            delete("/auth/spotify") { creds.update { it.copy(spotify = null) }; SpotifyAuth.setCookie(null); call.respond(ServiceStatus(false)) }
+            delete("/auth/spotify") { creds.update { it.copy(spotify = null) }; SpotifyAuth.set(null); call.respond(ServiceStatus(false)) }
 
             get("/youtube/search") { call.respond(Services.search(call.q("q") ?: "")) }
             get("/youtube/match") {

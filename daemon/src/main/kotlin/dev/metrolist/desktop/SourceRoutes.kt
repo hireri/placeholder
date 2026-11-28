@@ -74,6 +74,14 @@ fun Route.sourceRoutes() {
         call.respond(CoverArt.lookup(q["artist"].orEmpty(), q["album"].orEmpty(), q["title"].orEmpty()))
     }
     get("/mix/search") { call.respond(Mix.songs(call.request.queryParameters["q"] ?: "")) }
+    get("/mix/match") {
+        val q = call.request.queryParameters
+        val title = q["title"].orEmpty()
+        val artist = q["artist"].orEmpty()
+        // YouTube is what failed; Spotify can only stand in when the client plays it directly.
+        val hits = Mix.songs("$title ${artist.substringBefore(",")}").filter { it.source != "yt" && it.source != "youtube" && (it.source != "spotify" || q["spotify"] == "true") }
+        call.respond(listOfNotNull(Services.pickCopy(hits, title, artist, q["duration"]?.toIntOrNull())))
+    }
     get("/mix/search/items") { call.respond(Mix.search(call.request.queryParameters["q"] ?: "", call.request.queryParameters["type"] ?: "song")) }
     get("/mix/suggest") { call.respond(Mix.suggest(call.request.queryParameters["q"] ?: "")) }
     get("/mix/library/{kind}") { call.respond(Mix.library(call.parameters["kind"]!!)) }

@@ -143,8 +143,8 @@ impl App {
         let p = ui.painter().clone();
         let shelf = self.sel.as_ref().map(|s| s.1.clone()).unwrap_or_default();
         let (title, sub) = match r {
-            Route::Home => ("Home", "From YouTube Music"),
-            Route::Shelf => (shelf.as_str(), self.shelf.as_ref().filter(|s| s.0 == shelf).map_or("From YouTube Music", |s| s.1.as_str())),
+            Route::Home => ("Home", ""),
+            Route::Shelf => (shelf.as_str(), self.shelf.as_ref().filter(|s| s.0 == shelf).map_or("", |s| s.1.as_str())),
             Route::Downloads => ("Downloads", "Songs saved on this device"),
             Route::Local => ("Local Music", ""),
             Route::Album => ("Album", ""),
@@ -274,6 +274,9 @@ impl App {
                     title: title.into(),
                     thumbnail: cover_url.map(String::from),
                     source: loaded.as_ref().and_then(|i| i.source.clone()),
+                    banner: loaded.as_ref().and_then(|i| i.banner.clone()),
+                    author: loaded.as_ref().and_then(|i| i.author.clone()),
+                    author_avatar: loaded.as_ref().and_then(|i| i.author_avatar.clone()),
                     editable: loaded.is_some_and(|i| i.editable),
                     ..Default::default()
                 })
@@ -284,9 +287,16 @@ impl App {
         if let (true, Some(it), Some(pos)) = (wash_hit.secondary_clicked(), &page_item, wash_hit.interact_pointer_pos()) {
             self.ctx_menu = Some((pos, Target::Item(it.clone())));
         }
-        let wash_tex = self.g.wash(ui.ctx(), &t, cover_url);
+        let banner = page_item.as_ref().filter(|_| self.route == Route::Artist && self.opts.artist_banner).and_then(|i| i.banner.as_deref());
+        // The header takes its tint from whatever fills it. Over a banner the gradient is a veil, then fades into the page.
+        let wash_tex = self.g.wash(ui.ctx(), &t, banner.or(cover_url));
+        if let Some(url) = banner {
+            ui.painter().rect_filled(wash, rad(18.), t.s1);
+            paint_cover(ui, url, wash, rad(18.), Color32::WHITE);
+        }
         if self.opts.tint {
-            egui::Image::new(sized(wash_tex, 1.)).fit_to_exact_size(wash.size()).corner_radius(rad(18.)).paint_at(ui, wash);
+            let veil = Color32::WHITE.gamma_multiply(if banner.is_some() { 0.5 } else { 1. });
+            egui::Image::new(sized(wash_tex, 1.)).fit_to_exact_size(wash.size()).corner_radius(rad(18.)).tint(veil).paint_at(ui, wash);
             if self.opts.viz_ambient {
                 // The header glow, drawn again on top as added light that swells with the music.
                 let lv = crate::viz::levels(ui.ctx(), &self.pl.engine);
@@ -299,8 +309,11 @@ impl App {
                     }
                 }
             }
-        } else {
+        } else if banner.is_none() {
             ui.painter().rect_filled(wash, rad(18.), t.s2);
+        }
+        if banner.is_some() {
+            fade_down(ui.painter(), wash, t.s1);
         }
         // The layout swaps once the page has scrolled past a point, as a quick crossfade (never both at once,
         // so the layers' widgets never share an id or overlap); the wash itself still shrinks with the scroll.
@@ -344,8 +357,25 @@ impl App {
         let acts_w = play_w + labels.iter().map(|l| text_w(&p, l, font(13.)) + 32.).sum::<f32>() + if page_item.is_some() { 43. } else { 0. };
         let ay = card.min.y + lerp(HERO_H - 43., (HERO_MIN - 35.) / 2.);
         let ax = lerp(card.min.x + 22., card.max.x - 22. - acts_w);
-        shadow(&p, art, ar, 6, 22, 71);
-        self.thumb_l(ui, cover_url, art, ar, false, page_item.as_ref().is_some_and(|i| i.r#type == "playlist" && crate::live::is_liked_list(&i.id)));
+        let liked = page_item.as_ref().is_some_and(|i| i.r#type == "playlist" && crate::live::is_liked_list(&i.id));
+        // While the picture is enlarged it has left its slot; the viewer flies back to wherever the slot is now.
+        match self.viewer.as_mut().filter(|v| Some(v.url.as_str()) == cover_url) {
+            Some(v) => (v.from, v.radius) = (art, ar),
+            None => {
+                shadow(&p, art, ar, 6, 22, 71);
+                self.thumb_l(ui, cover_url, art, ar, false, liked);
+            }
+        }
+        if let Some(url) = cover_url.filter(|u| matches!(self.route, Route::Album | Route::Artist) && cover_aspect(ui.ctx(), u, art.size()).is_some()) {
+            let hit = press(ui, "hero-art", art);
+            if hit.clicked() {
+                self.open_viewer(ui.ctx(), url, title, art, ar);
+            }
+            // Right-click keeps opening the page's menu, as on the rest of the header.
+            if let (true, Some(it), Some(pos)) = (hit.secondary_clicked(), page_item, hit.interact_pointer_pos()) {
+                self.ctx_menu = Some((pos, Target::Item(it.clone())));
+            }
+        }
 
         // Meta block, bottom-aligned with the art: kicker, big title, then "Artist · details" with the artist a link.
         let mx = art.max.x + 22.;
@@ -358,9 +388,18 @@ impl App {
         let mut x = mx + self.source_mark(ui, one, mx, by_y, t.tm);
         if let Some(n) = name {
             let nf = font_w(14., Weight::Semi);
+            // A playlist brings its author's picture; an album artist's comes off their own page. Their initial stands in meanwhile.
+            let ax0 = x;
+            let own = page_item.as_ref().and_then(|i| i.author_avatar.clone());
+            if own.is_some() || aid.is_some() || page_item.as_ref().is_some_and(|i| i.author.is_some()) {
+                let pic = own.or_else(|| self.data.detail(ui.ctx(), "artists", aid?).ready().and_then(|d| d.item.thumbnail.clone()));
+                self.avatar(ui, pic.as_deref(), pos2(x + 10., by_y), 10., Some(n));
+                x += 27.;
+            }
             let r = trunc(&p, pos2(x, by_y), mw, n, nf.clone(), t.tx);
             if let Some(id) = aid {
-                let hit = ui.interact(r.expand2(vec2(2., 4.)), ui.scope_id().with("hero-artist"), egui::Sense::click());
+                let link = Rect::from_min_max(pos2(ax0, r.min.y), r.max);
+                let hit = ui.interact(link.expand2(vec2(2., 4.)), ui.scope_id().with("hero-artist"), egui::Sense::click());
                 if hit.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     p.line_segment([r.left_bottom() + vec2(0., 1.), r.right_bottom() + vec2(0., 1.)], (1., t.tx));
@@ -466,11 +505,11 @@ impl App {
             self.table_head(ui, head.min.y + 14., tl, tr, look, Some(&mut sort));
             // Rows are virtualized by hand (not `show_rows`) so the footer can follow the last one.
             let (first, last) = ((((vp.min.y - base).max(0.) / rh) as usize).min(n), ((((vp.max.y - base).max(0.) / rh).ceil() as usize) + 1).min(n));
-            if let Some(("spotify", id)) = self.sel.as_ref().map(|s| (s.0, s.1.as_str())) {
+            if let Some((kind, id)) = self.sel.as_ref().map(|s| (s.0, s.1.as_str())).filter(|(kind, id)| *kind == "spotify" || id.starts_with("spotify:")) {
                 let pad = 16;
                 let start = first.saturating_sub(pad);
                 let end = (last + pad).min(n);
-                self.data.want_spotify(ui.ctx(), id, start..end);
+                self.data.want_spotify(ui.ctx(), kind, id, start..end);
             }
             ui.add_space(first as f32 * rh);
             let acts = self.track_rows(ui, "table", tracks, first..last, (tl, tr), rh, look);
@@ -543,6 +582,15 @@ impl App {
         self.cover_row_h() - COVER_PAD
     }
 
+    /// Starts loading what is liked, once, so the stars know.
+    pub fn load_likes(&mut self, ctx: &egui::Context) {
+        self.data.detail(ctx, "playlists", "LM");
+        let ids: Vec<String> = self.sources.list(ctx).and_then(|l| l.ok()).unwrap_or_default().into_iter().filter(|s| s.enabled && s.secret_set && matches!(s.r#type.as_str(), "soundcloud" | "jellyfin" | "navidrome")).map(|s| s.id).collect();
+        if !ids.is_empty() {
+            self.data.load_source_likes(ctx, ids);
+        }
+    }
+
     pub fn track_rows(&mut self, ui: &mut egui::Ui, sid: &'static str, tracks: &[Track], range: std::ops::Range<usize>, (tl, tr): (f32, f32), rh: f32, look: Look) -> Acts {
         let t = self.t;
         let cols = columns(tl, tr - tl, look.num(), look.album);
@@ -551,11 +599,6 @@ impl App {
         let mut spinning = false;
         // A playlist or album from one source says so once, in its header; rows only say it when the list mixes sources.
         let mixed = crate::sources::mixed(tracks.iter().map(|t| t.source.as_str()));
-        self.data.detail(ui.ctx(), "playlists", "LM"); // starts loading Liked songs so the stars know what is liked
-        let sc: Vec<String> = self.sources.list(ui.ctx()).and_then(|l| l.ok()).unwrap_or_default().into_iter().filter(|s| s.enabled && s.secret_set && s.r#type == "soundcloud").map(|s| s.id).collect();
-        if !sc.is_empty() {
-            self.data.load_source_likes(ui.ctx(), sc);
-        }
         for ix in range {
             let (_, r) = ui.allocate_space(vec2(tr - tl + 12., rh));
             let row = Rect::from_min_max(pos2(tl, r.min.y), pos2(tr, r.max.y));
@@ -711,7 +754,9 @@ impl App {
         let (mut open, mut sub) = (false, None);
         if let Some(a) = &ready {
             let skip: Vec<&str> = tracks.iter().filter_map(|t| t.album_id.as_deref()).collect();
-            let more: Vec<&Item> = a.sections.iter().flat_map(|s| &s.items).filter(|i| i.r#type == "album" && !skip.contains(&i.id.as_str())).collect();
+            // "Appears on" is other artists' releases, and a popular release is listed again under its kind.
+            let mut seen: std::collections::HashSet<&str> = skip.into_iter().collect();
+            let more: Vec<&Item> = a.sections.iter().filter(|s| !s.title.eq_ignore_ascii_case("Appears on")).flat_map(|s| &s.items).filter(|i| i.r#type == "album" && seen.insert(i.id.as_str())).collect();
             let by = tracks.first().and_then(|t| t.artists.first()).map_or(a.item.title.as_str(), String::as_str);
             if !more.is_empty() {
                 self.carousel(ui, dims, &format!("More by {by}"), more.into_iter(), si, true);

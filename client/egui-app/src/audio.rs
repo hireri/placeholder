@@ -341,12 +341,22 @@ impl Codec {
     }
 }
 
-/// Everything owned by one decode thread: the demuxer, the codec and the current track position.
+impl StreamInfo {
+    /// A track the Spotify helper decodes (see `spotify.rs`); there is no URL to fetch.
+    pub fn spotify(id: &str, duration_sec: Option<u32>) -> StreamInfo {
+        StreamInfo { url: format!("spotify:{}", id.trim_start_matches("spotify:")), headers: HashMap::new(), mime_type: "audio/vorbis".into(), expires_in_seconds: 0, client: "spotify".into(), require_bounded_range: false, range_chunk_size_bytes: 0, use_range_chunks: false, duration_sec, bitrate: Some(320_000), loudness_lufs: None }
+    }
+}
+
+enum Source {
+    Demux { reader: Box<dyn FormatReader>, track_id: u32, time_base: Option<TimeBase>, codec: Codec },
+    /// PCM from the Spotify helper. Connected on first use, so a seek is just a new connection from `from` seconds.
+    Spotify { id: String, from: f32, conn: Option<std::io::BufReader<std::net::TcpStream>> },
+}
+
+/// Everything owned by one decode thread: where samples come from and the current track position.
 struct Session {
-    reader: Box<dyn FormatReader>,
-    track_id: u32,
-    time_base: Option<TimeBase>,
-    codec: Codec,
+    source: Source,
     tmp: Vec<f32>,
     resample: Option<Resample>,
     duration: Option<f32>,
@@ -357,6 +367,11 @@ struct Session {
 
 impl Session {
     fn open(info: &StreamInfo) -> Result<Session, String> {
+        if let Some(id) = info.url.strip_prefix("spotify:") {
+            let source = Source::Spotify { id: id.to_string(), from: 0., conn: None };
+            let duration = info.duration_sec.map(|s| s as f32);
+            return Ok(Session { source, tmp: Vec::new(), resample: None, duration, cache: (Arc::default(), 1), lufs: None });
+        }
         let src = HttpSource::open(info).map_err(|e| e.to_string())?;
         let cache = (src.f.cache.clone(), src.f.chunk);
         let mss = MediaSourceStream::new(Box::new(src), MediaSourceStreamOptions::default());
@@ -386,56 +401,89 @@ impl Session {
             let d = get_codecs().make_audio_decoder(params, &AudioDecoderOptions::default()).map_err(|e| e.to_string())?;
             Codec::Sym(d)
         };
-        Ok(Session { reader, track_id, time_base, codec, tmp: Vec::new(), resample: None, duration, cache, lufs: info.loudness_lufs })
+        Ok(Session { source: Source::Demux { reader, track_id, time_base, codec }, tmp: Vec::new(), resample: None, duration, cache, lufs: info.loudness_lufs })
     }
 
-    /// Seeks the demuxer and decoder and rebases the ring to the actual landing time.
+    /// Opens the Spotify stream if this is one and it is not open yet.
+    fn connect(&mut self, shared: &Shared) -> Result<(), String> {
+        if let Source::Spotify { id, from, conn: conn @ None } = &mut self.source {
+            // librespot normalises to -14 LUFS; the pregain moves that to the chosen target.
+            let gain = shared.normalize.load(Relaxed).then(|| (shared.target.load(Relaxed) - TARGET_LUFS as i32) as f32);
+            *conn = Some(crate::spotify::open(id, *from, gain)?);
+        }
+        Ok(())
+    }
+
+    /// Seeks the source and rebases the ring to the actual landing time.
     /// Returns the ring epoch the decode thread should use from now on.
     fn seek(&mut self, shared: &Shared, secs: f32) -> Result<u64, String> {
-        let time = Time::try_from_secs_f64(secs as f64).ok_or("invalid seek position")?;
-        let to = SeekTo::Time { time, track_id: Some(self.track_id) };
-        let landed = self.reader.seek(SeekMode::Accurate, to).map_err(|e| e.to_string())?;
-        match &mut self.codec {
-            Codec::Opus(d) => {
-                let _ = d.reset_state();
+        let base = match &mut self.source {
+            Source::Spotify { from, conn, .. } => {
+                (*from, *conn) = (secs, None);
+                secs as f64
             }
-            Codec::Sym(d) => d.reset(),
-        }
+            Source::Demux { reader, track_id, time_base, codec } => {
+                let time = Time::try_from_secs_f64(secs as f64).ok_or("invalid seek position")?;
+                let to = SeekTo::Time { time, track_id: Some(*track_id) };
+                let landed = reader.seek(SeekMode::Accurate, to).map_err(|e| e.to_string())?;
+                match codec {
+                    Codec::Opus(d) => {
+                        let _ = d.reset_state();
+                    }
+                    Codec::Sym(d) => d.reset(),
+                }
+                match time_base {
+                    Some(tb) => tb.calc_time_saturating(landed.actual_ts).as_secs_f64(),
+                    None => secs as f64,
+                }
+            }
+        };
         if let Some(rs) = self.resample.as_mut() {
             rs.reset();
         }
-        let base = match self.time_base {
-            Some(tb) => tb.calc_time_saturating(landed.actual_ts).as_secs_f64(),
-            None => secs as f64,
-        };
         Ok(shared.ring.lock().unwrap().rebase(base))
     }
 
-    /// Reads and decodes packets until one yields samples into `pending`. Ok(false) at end of stream.
+    /// Reads and decodes until there are samples in `pending`. Ok(false) at end of stream.
     fn decode_next(&mut self, shared: &Shared, pending: &mut Vec<f32>) -> Result<bool, String> {
-        loop {
-            let Some(packet) = self.reader.next_packet().map_err(|e| e.to_string())? else {
-                return Ok(false);
-            };
-            if packet.track_id != self.track_id {
-                continue;
-            }
-            let Ok((rate, ch)) = self.codec.decode(&packet, &mut self.tmp) else {
-                continue;
-            };
-            let rs = self
-                .resample
-                .get_or_insert_with(|| Resample::new(rate, shared.out_rate, shared.out_ch));
-            let from = pending.len();
-            rs.process(&self.tmp, ch, pending);
-            if shared.normalize.load(Relaxed) {
-                let gain = normalize_gain(self.lufs, shared.target.load(Relaxed) as f32);
-                if gain != 1. {
-                    pending[from..].iter_mut().for_each(|v| *v *= gain);
+        self.connect(shared)?;
+        let (rate, ch) = match &mut self.source {
+            Source::Spotify { conn, .. } => {
+                // 50 ms of 44.1 kHz stereo f32.
+                let mut bytes = Vec::with_capacity(2205 * 8);
+                let conn = conn.as_mut().ok_or("Spotify stream closed")?;
+                conn.take(2205 * 8).read_to_end(&mut bytes).map_err(|e| format!("Spotify stream: {e}"))?;
+                if bytes.len() < 8 {
+                    return Ok(false);
                 }
+                self.tmp.clear();
+                self.tmp.extend(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+                (44_100, 2)
             }
-            return Ok(true);
+            Source::Demux { reader, track_id, codec, .. } => loop {
+                let Some(packet) = reader.next_packet().map_err(|e| e.to_string())? else {
+                    return Ok(false);
+                };
+                if packet.track_id != *track_id {
+                    continue;
+                }
+                if let Ok(format) = codec.decode(&packet, &mut self.tmp) {
+                    break format;
+                }
+            },
+        };
+        let rs = self
+            .resample
+            .get_or_insert_with(|| Resample::new(rate, shared.out_rate, shared.out_ch));
+        let from = pending.len();
+        rs.process(&self.tmp, ch, pending);
+        if shared.normalize.load(Relaxed) {
+            let gain = normalize_gain(self.lufs, shared.target.load(Relaxed) as f32);
+            if gain != 1. {
+                pending[from..].iter_mut().for_each(|v| *v *= gain);
+            }
         }
+        Ok(true)
     }
 }
 
@@ -570,7 +618,9 @@ impl Shared {
             return None;
         }
         let info = self.next.lock().unwrap().take()?;
-        let next = Session::open(&info).ok()?;
+        let mut next = Session::open(&info).ok()?;
+        // Now, so a track that cannot play is never chained into.
+        next.connect(self).ok()?;
         let mut r = self.ring.lock().unwrap();
         if r.epoch != epoch {
             // A seek came in while the stream opened; the old track is still the one playing, so keep this for its real end.
@@ -1120,6 +1170,30 @@ mod tests {
         assert_eq!(chunk_range(0, mib, Some(100)), (0, 99));
         assert_eq!(chunk_range(mib - 1, mib, Some(5 * mib)), (0, mib - 1));
         assert_eq!(chunk_range(4_500_000, mib, Some(4_600_000)), (4 * mib, 4_599_999));
+    }
+
+    /// Live and muted: saved Spotify login + network + sound device. Needs the helper beside the test binary:
+    /// (`cargo test --no-run` prints where): `cargo test -p serafin live_spotify -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_spotify() {
+        let sleep = |s| std::thread::sleep(std::time::Duration::from_secs(s));
+        let info = super::StreamInfo::spotify("4PTG3Z6ehGkBFwjybzWkR8", Some(213));
+        let e = super::Engine::new(|| {});
+        e.set_volume(0.);
+        e.load(info.clone(), 0.);
+        sleep(6);
+        let a = e.position();
+        e.seek(200.);
+        e.queue_next(info);
+        sleep(6);
+        let b = e.position();
+        sleep(12);
+        let c = e.position();
+        let events = e.poll_events();
+        crate::spotify::stop();
+        println!("after 6s {a:.1}, after seek {b:.1}, after the end {c:.1}, events {events:?}");
+        assert!(a > 2. && b > 202. && c < 30. && matches!(events[..], [super::Event::Advanced]));
     }
 
     /// Live: daemon + network + sound device. `cargo test -p serafin live_playback -- --ignored --nocapture`

@@ -10,7 +10,9 @@ import kotlinx.serialization.Serializable
 
 @Serializable data class YouTubeCreds(val cookie: String, val visitorData: String? = null, val dataSyncId: String? = null)
 
-@Serializable data class SpotifyCreds(val spDc: String)
+/** `login` is null for credentials saved by the old cookie sign-in: that user signs in again. */
+/** `spDc` is always written, empty: releases from before [login] require it and set the whole file aside without it. */
+@Serializable data class SpotifyCreds(val login: SpotifyLogin? = null, val spDc: String = "")
 
 @Serializable data class StoredCreds(val youtube: YouTubeCreds? = null, val spotify: SpotifyCreds? = null, val lastfm: LastFmCreds? = null, val lastfmApp: LastFmAppKey? = null, val sources: List<SourceConfig> = emptyList(), val sourceOrder: List<String> = emptyList(), val youtubeEnabled: Boolean = true, val youtubeHome: Boolean = true, val youtubeSearch: Boolean = true)
 
@@ -72,6 +74,9 @@ data class ItemDto(
     val albumId: String? = null,
     val explicit: Boolean = false,
     val video: Boolean = false,
+    /** Playlist pages only: who made it, and their picture. `artistId` is their channel. */
+    val author: String? = null,
+    val authorAvatar: String? = null,
     /** Playlists only: owned by the signed-in user, so it can be deleted rather than just unsaved. */
     val editable: Boolean = false,
     /** Id of the source it came from (`yt` for YouTube Music). Set by the registry, not by providers. */
@@ -79,6 +84,8 @@ data class ItemDto(
     /** Library items whose source is turned off or unreachable are still listed (from the last snapshot) but cannot be opened; `reason` says why. */
     val unavailable: Boolean = false,
     val reason: String? = null,
+    /** Artist pages only: a wide picture to sit behind the header. */
+    val banner: String? = null,
 )
 
 /** `shelf` (continue | recent | mixes | discover | played) lets the client place a section regardless of its source; null for YouTube. */

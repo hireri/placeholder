@@ -13,7 +13,7 @@ use crate::data::{Data, Item, State, Track};
 use std::sync::Arc;
 use crate::media::{Cmd, Media};
 use crate::player::Player;
-use crate::settings::Opts;
+use crate::settings::{Colours, Opts};
 use crate::theme::Theme;
 use eframe::egui::{self, lerp, Color32, pos2, vec2, Context, Id, Key, Modifiers, PointerButton, Rect, Ui, UiBuilder};
 use serde::{Deserialize, Serialize};
@@ -88,7 +88,9 @@ pub struct App {
     pub t: Theme,
     /// Theme blend in flight: from, to, start time. `t` is drawn from it every frame.
     theme_anim: (Theme, Theme, f64),
-    /// `theme.toml`, loaded while the custom theme option is on.
+    /// Tone of the last cover that resolved (inner `None`: grey or unreadable); `None` while the queue has no cover.
+    art_tone: Option<Option<(f32, f32)>>,
+    /// `theme.toml`, loaded while custom colours are on.
     custom: Option<crate::theme::Custom>,
     /// Modified time of `theme.toml` when `custom` was last read.
     custom_seen: Option<std::time::SystemTime>,
@@ -102,6 +104,8 @@ pub struct App {
     pub fwd: Vec<Loc>,
     pub lib_sort: LibSort,
     pub lib_view: LibView,
+    /// Playlist ids whose pin state was flipped from the default; read through `is_pinned`.
+    pub pin_flipped: Vec<String>,
     /// Open width of the library and the view currently drawn (lags `lib_view` during the cross-fade).
     pub lib_w: f32,
     pub lib_shown: LibView,
@@ -130,6 +134,8 @@ pub struct App {
     pub ctx_menu: Option<(egui::Pos2, crate::menu::Target)>,
     /// Button that opened `ctx_menu`: presses on it toggle the menu instead of counting as "outside".
     pub ctx_keep: egui::Rect,
+    /// The enlarged cover or artist picture, if one is open.
+    pub viewer: Option<crate::viewer::Viewer>,
     /// Command palette (Ctrl K) while open. Drawn by `App::palette`.
     pub palette: Option<crate::palette::State>,
     /// Last searches run from the palette, newest first (max 5). Kept between runs.
@@ -180,6 +186,7 @@ pub struct App {
     pub(crate) me: (String, String),
     /// Private session: Discord, YouTube history and Last.fm are paused. Never saved; the time is the last playback.
     pub private: Option<std::time::Instant>,
+    pub connect: crate::connect::Connect,
     pub sleep: crate::sleep::Sleep,
     /// The volume is currently lowered by the sleep fade.
     faded: bool,
@@ -215,6 +222,7 @@ struct Prefs {
     volume: f32,
     opts: Opts,
     recents: Vec<String>,
+    pin_flipped: Vec<String>,
     /// Player modes, kept only while `opts.remember_modes` is on.
     shuffle: bool,
     repeat: u8,
@@ -230,7 +238,7 @@ struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, opts: Opts::default(), recents: Vec::new(), shuffle: false, repeat: 0, guest: String::new(), me: Default::default(), queue: Vec::new(), queue_cur: 0, queue_pos: 0. }
+        Prefs { lib_open: true, player_open: true, lib_w: LIB_OPEN, player_w: PLAYER_W, lib_sort: LibSort::Recents, lib_view: LibView::List, view: PlayerView::Art, volume: 0.7, opts: Opts::default(), recents: Vec::new(), pin_flipped: Vec::new(), shuffle: false, repeat: 0, guest: String::new(), me: Default::default(), queue: Vec::new(), queue_cur: 0, queue_pos: 0. }
     }
 }
 
@@ -279,6 +287,7 @@ impl App {
         pl.endless = prefs.opts.endless;
         pl.no_dupes = prefs.opts.no_dupes;
         pl.skip_on_error = prefs.opts.skip_on_error;
+        crate::spotify::set_direct(prefs.opts.spotify_direct);
         if prefs.opts.restore_queue {
             pl.restore(&prefs.queue, prefs.queue_cur, prefs.queue_pos);
         }
@@ -310,7 +319,8 @@ impl App {
         App {
             t,
             theme_anim: (t, t, 0.),
-            custom: prefs.opts.custom.then(crate::theme::load_custom).flatten(),
+            art_tone: None,
+            custom: (prefs.opts.colours == Colours::Custom).then(crate::theme::load_custom).flatten(),
             custom_seen: crate::theme::mtime(),
             g: Gfx::new(),
             lib_open: prefs.lib_open,
@@ -322,6 +332,7 @@ impl App {
             fwd: Vec::new(),
             lib_sort: prefs.lib_sort,
             lib_view: prefs.lib_view,
+            pin_flipped: prefs.pin_flipped,
             lib_w: prefs.lib_w,
             lib_shown: if prefs.lib_open { prefs.lib_view } else { LibView::List },
             lib_menu: false,
@@ -341,6 +352,7 @@ impl App {
             peek: None,
             ctx_menu: None,
             ctx_keep: egui::Rect::NOTHING,
+            viewer: None,
             palette: None,
             recents: prefs.recents,
             me_menu: None,
@@ -375,6 +387,7 @@ impl App {
             me: prefs.me.clone(),
             guest: Some(prefs.guest).filter(|g| !g.is_empty()).unwrap_or_else(|| format!("Guest {:04}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos()) % 10_000)),
             private: None,
+            connect: Default::default(),
             sleep: Default::default(),
             faded: false,
             seek_run: (0., f64::NEG_INFINITY, 0),
@@ -479,8 +492,7 @@ impl App {
             p.circle_filled(c, 6.5, t.ax);
             icon(ui, icon!("lock"), c, 9., t.on_ax);
         }
-        let sp_w = self.syncplay_button(ui, me.min.x - 6., cy);
-        let party_w = self.party_button(ui, me.min.x - 6. - sp_w, cy) + sp_w;
+        let party_w = self.party_button(ui, me.min.x - 6., cy);
         self.island(ui, me.min.x - 6. - party_w - 4., cy);
 
         // Middle: a search pill centred on the window whatever the clusters beside it do. It only opens the palette.
@@ -584,8 +596,8 @@ impl App {
         let clicked = resp.clicked();
         resp.tip(&t, match st {
             IslState::Idle => "Notifications",
-            IslState::Import => "Importing from Spotify",
-            IslState::Done => "Spotify import complete",
+            IslState::Import => "Matching Spotify songs",
+            IslState::Done => "Spotify songs matched",
         });
         if clicked {
             match st {
@@ -843,7 +855,7 @@ impl App {
     }
 
     pub fn reload_custom(&mut self) {
-        self.custom = self.opts.custom.then(crate::theme::load_custom).flatten();
+        self.custom = (self.opts.colours == Colours::Custom).then(crate::theme::load_custom).flatten();
         self.custom_seen = crate::theme::mtime();
     }
 
@@ -853,7 +865,7 @@ impl App {
     }
 
     /// Sends the user's volume to the engine, lowered by the sleep fade.
-    fn push_volume(&self) {
+    pub fn push_volume(&self) {
         self.pl.engine.set_volume(self.volume * self.fade());
     }
 
@@ -967,6 +979,7 @@ impl App {
         self.started = false;
         // Open popups carry times from the old window's clock, so they would be "open" yet never drawn.
         (self.me_menu, self.party_open, self.ctx_menu, self.palette, self.lib_menu, self.vol_open) = (None, None, None, None, false, false);
+        self.viewer = None;
         self.pl.reset_clock();
         self.theme_anim.2 = f64::NEG_INFINITY;
     }
@@ -1075,6 +1088,8 @@ impl App {
             }
             self.data.mirror_like(t, on);
         }
+        self.load_likes(ctx);
+        self.pl.liked = self.pl.like_track().is_some_and(|t| self.data.is_liked(&t));
         self.resolve_play(ctx);
         self.sync_media(ctx);
     }
@@ -1083,6 +1098,7 @@ impl App {
     fn sync_media(&mut self, ctx: &Context) {
         self.party_tick(ctx);
         self.syncplay_tick(ctx);
+        self.connect_tick(ctx);
         let mut cmds = crate::tray::take_cmds();
         if let Some(t) = &mut self.private {
             if self.pl.playing {
@@ -1159,18 +1175,21 @@ impl App {
         }
     }
 
-    /// The theme the app settles on in light or dark: the cover's tone or the accent preset, then theme.toml, then Pure black.
+    /// The theme the app settles on in light or dark: the chosen colour source alone, then Pure black.
     pub(crate) fn theme_for(&self, dark: bool) -> Theme {
-        let cover = self.pl.song().and_then(|s| s.thumbnail.as_deref()).filter(|_| self.opts.auto_theme);
-        let base = match cover.map(|u| self.g.tone(u)) {
-            None => Theme::preset(self.opts.accent, dark),
-            // Until the cover's tone arrives keep the theme the last song left; a grey or unreadable cover goes neutral.
-            Some(None) if self.theme_anim.1.dark == dark => return self.theme_anim.1,
-            Some(Some(Some(tone))) => Theme::tinted(tone, dark).accent_of(Theme::preset(self.opts.accent, dark)),
-            Some(_) => Theme::idle(dark).accent_of(Theme::preset(self.opts.accent, dark)),
+        let accent = || Theme::preset(self.opts.accent, dark);
+        let t = match self.opts.colours {
+            Colours::Accent => accent(),
+            Colours::Artwork => match self.art_tone {
+                Some(Some(tone)) => Theme::tinted(tone, dark),
+                Some(None) => Theme::idle(dark),
+                None => accent(),
+            },
+            Colours::Custom => {
+                let base = Theme::idle(dark);
+                self.custom.as_ref().map_or(base, |c| base.custom(c))
+            }
         };
-        // Artwork theming wins while a cover is driving it; the custom colours apply otherwise.
-        let t = self.custom.as_ref().filter(|_| cover.is_none()).map_or(base, |c| base.custom(c));
         if dark && self.opts.pure_black { t.pure_black() } else { t }
     }
 
@@ -1182,8 +1201,13 @@ impl App {
         for u in [cur.clone(), self.pl.next_song().and_then(|s| s.thumbnail.clone())].into_iter().flatten() {
             self.g.fetch(ctx, &u);
         }
+        // Until a new cover's tone arrives, the last cover's stays.
+        match cur.as_deref() {
+            None => self.art_tone = None,
+            Some(u) => self.art_tone = self.g.tone(u).or(self.art_tone),
+        }
         // Pick up edits to theme.toml while it is on.
-        if self.opts.custom {
+        if self.opts.colours == Colours::Custom {
             if crate::theme::mtime() != self.custom_seen {
                 self.reload_custom();
             }
@@ -1299,7 +1323,7 @@ impl eframe::App for App {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let (queue, queue_cur) = if self.opts.restore_queue { self.pl.snapshot() } else { Default::default() };
-        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, opts: self.opts.clone(), recents: self.recents.clone(), shuffle: self.opts.remember_modes && self.pl.shuffle, repeat: if self.opts.remember_modes { self.pl.repeat } else { 0 }, guest: self.guest.clone(), me: self.me.clone(), queue, queue_cur, queue_pos: self.pl.pos };
+        let p = Prefs { lib_open: self.lib_open, player_open: self.player_open, lib_w: self.lib_w, player_w: self.player_w, lib_sort: self.lib_sort, lib_view: self.lib_view, view: self.view, volume: self.volume, opts: self.opts.clone(), recents: self.recents.clone(), pin_flipped: self.pin_flipped.clone(), shuffle: self.opts.remember_modes && self.pl.shuffle, repeat: if self.opts.remember_modes { self.pl.repeat } else { 0 }, guest: self.guest.clone(), me: self.me.clone(), queue, queue_cur, queue_pos: self.pl.pos };
         eframe::set_value(storage, PREFS, &p);
     }
 
@@ -1402,10 +1426,10 @@ impl eframe::App for App {
         }
         // Mini player: 64 tall plus 14 margin; lift toasts clear of it while it's showing.
         crate::toast::show(&ctx, &self.t, (1. - pl_t) * 82.);
+        self.image_viewer(&ctx);
         self.context_menu(&ctx);
         self.me_dropdown(&ctx);
         self.party_popover(&ctx);
-        self.syncplay_modal(&ctx);
         self.palette(&ctx);
         self.delete_modal(&ctx);
         self.playlist_picker(&ctx);

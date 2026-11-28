@@ -19,4 +19,13 @@ class CredentialStoreTest {
         if ("posix" in java.nio.file.FileSystems.getDefault().supportedFileAttributeViews()) assertTrue(Files.getPosixFilePermissions(file.toPath()).map { it.name }.all { it.startsWith("OWNER") })
         dir.deleteRecursively()
     }
+
+    @Test
+    fun aFileThatCannotBeReadIsLeftInPlace() {
+        val dir = Files.createTempDirectory("creds").toFile()
+        val unreadable = dir.resolve("credentials.json").apply { mkdir() }
+        kotlin.test.assertFails { CredentialStore(unreadable).load() }
+        assertEquals(listOf("credentials.json"), dir.list()!!.toList())
+        dir.deleteRecursively()
+    }
 }

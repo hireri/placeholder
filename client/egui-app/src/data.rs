@@ -62,6 +62,32 @@ impl<T: Send + Sync + 'static> Remote<T> {
         *g = State::Idle;
     }
 
+    /// Reloads a loaded value behind the one on screen and swaps it in; a failure keeps the old one.
+    /// With nothing loaded this is `reset`, and the next `ensure` loads.
+    pub fn refresh(&self, ctx: &Context, load: impl FnOnce() -> Result<T, String> + Send + 'static) {
+        let s = self.lock();
+        if !matches!(*s, State::Ready(_)) {
+            drop(s);
+            return self.reset();
+        }
+        let (slot, gens, ctx) = (self.0.clone(), self.1.clone(), ctx.clone());
+        let gen = gens.fetch_add(1, Ordering::SeqCst) + 1;
+        drop(s);
+        std::thread::spawn(move || {
+            let r = load();
+            let mut g = slot.lock().unwrap();
+            if gens.load(Ordering::SeqCst) != gen {
+                return;
+            }
+            match r {
+                Ok(v) => *g = State::Ready(Arc::new(v)),
+                Err(e) => crate::toast::error(format!("Couldn't refresh: {e}")),
+            }
+            drop(g);
+            ctx.request_repaint();
+        });
+    }
+
     /// Swaps in a value without passing through `Loading`, so a visible page never falls back to its skeleton.
     pub fn replace(&self, v: Arc<T>) {
         let mut g = self.lock();
@@ -79,12 +105,17 @@ pub struct Item {
     pub title: String,
     pub subtitle: Option<String>,
     pub thumbnail: Option<String>,
+    /// Artist pages only: a wide picture to sit behind the header.
+    pub banner: Option<String>,
     pub duration_sec: Option<u32>,
     /// Browse id of the song's first artist.
     pub artist_id: Option<String>,
     /// Songs only: the album they sit on (`None` for singles).
     pub album: Option<String>,
     pub album_id: Option<String>,
+    /// Playlist pages only: who made it, and their picture.
+    pub author: Option<String>,
+    pub author_avatar: Option<String>,
     /// Songs only: marked explicit / a music video rather than the studio track.
     pub explicit: bool,
     pub video: bool,
@@ -198,12 +229,15 @@ pub struct Track {
     /// Favorited on its own source (Jellyfin, Navidrome) when the list was fetched.
     #[serde(default)]
     pub liked: bool,
-    /// Spotify import only: the YouTube counterpart is still being looked up.
+    /// Spotify only: the YouTube counterpart is still being looked up.
     #[serde(default)]
     pub resolving: bool,
-    /// Spotify import only: no YouTube counterpart was found; the row keeps its Spotify metadata.
+    /// Spotify only: no YouTube counterpart was found; the row keeps its Spotify metadata.
     #[serde(default)]
     pub unavailable: bool,
+    /// Spotify source rows: a counterpart exists, and the row stays a Spotify track.
+    #[serde(default)]
+    pub matched: bool,
 }
 
 impl Track {
@@ -214,11 +248,32 @@ impl Track {
 
 /// The daemon's answer to `/youtube/match`: the matched track, or none.
 #[derive(Deserialize, Default)]
-struct Match {
-    track: Option<Track>,
+pub(crate) struct Match {
+    pub(crate) track: Option<Track>,
     /// The daemon's search failed (rate limit, network); the row should stay retryable rather than look unmatched.
     #[serde(default)]
     retry: bool,
+}
+
+/// The daemon route that finds a Spotify track's YouTube Music counterpart.
+fn match_path(t: &Track) -> String {
+    format!(
+        "/youtube/match?id={}&title={}&artist={}&duration={}&album={}",
+        backend::enc(&t.id),
+        backend::enc(&t.title),
+        backend::enc(&t.artists.join(", ")),
+        t.duration_sec.map_or(String::new(), |d| d.to_string()),
+        backend::enc(t.album.as_deref().unwrap_or("")),
+    )
+}
+
+/// Blocking: the YouTube id a Spotify track plays through.
+pub fn youtube_match(t: &Track) -> Result<String, String> {
+    match backend::get::<Match>(&match_path(t))? {
+        Match { track: Some(m), .. } => Ok(m.id),
+        Match { retry: true, .. } => Err("Couldn't search YouTube Music; try again".into()),
+        _ => Err(format!("“{}” isn't on YouTube Music", t.title)),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -267,7 +322,8 @@ impl SpotifyMatcher {
             let d = Arc::make_mut(d);
             for i in range {
                 let Some(t) = d.tracks.get_mut(i) else { continue };
-                if t.source != "spotify" || t.unavailable {
+                // Direct playback needs no match; the import page (bare ids) still does.
+                if t.source != "spotify" || t.unavailable || t.matched || (crate::spotify::direct() && t.id.starts_with("spotify:")) {
                     continue;
                 }
                 if !t.resolving {
@@ -300,18 +356,11 @@ impl SpotifyMatcher {
                 self.finish(&id, i);
                 continue;
             };
-            if t.source != "spotify" || t.unavailable || !t.resolving {
+            if t.source != "spotify" || t.unavailable || t.matched || !t.resolving {
                 self.finish(&id, i);
                 continue;
             }
-            let path = format!(
-                "/youtube/match?id={}&title={}&artist={}&duration={}&album={}",
-                backend::enc(&t.id),
-                backend::enc(&t.title),
-                backend::enc(&t.artists.join(", ")),
-                t.duration_sec.map_or(String::new(), |d| d.to_string()),
-                backend::enc(t.album.as_deref().unwrap_or("")),
-            );
+            let path = match_path(&t);
             let answer = backend::get::<Match>(&path);
             let retry = match &answer {
                 Ok(m) => m.retry,
@@ -321,6 +370,8 @@ impl SpotifyMatcher {
                 if let Some(t) = Arc::make_mut(d).tracks.get_mut(i) {
                     match answer {
                         Ok(m) => match m.track {
+                            // A source's page keeps the Spotify track; the import page becomes the YouTube songs it exports.
+                            Some(_) if t.id.starts_with("spotify:") => (t.resolving, t.matched) = (false, true),
                             Some(yt) => *t = yt,
                             None => {
                                 t.resolving = false;
@@ -487,11 +538,14 @@ pub struct Data {
     pub suggests: Mutex<HashMap<String, Arc<Remote<Suggest>>>>,
     matcher: Arc<SpotifyMatcher>,
     exporting: Arc<AtomicBool>,
+    /// A sign-in or sign-out finished: the sources list is out of date.
+    pub account_changed: AtomicBool,
     /// Songs looked up by id, to learn which album a feed item sits on.
     pub song_infos: Mutex<HashMap<String, Arc<Remote<Track>>>>,
-    /// Likes and unlikes made here on non-YouTube songs, by prefixed id; they win over the `liked` flag the source sent.
+    /// Likes and unlikes made here, by song id; they win over what the source sent, also before the liked list has loaded.
     pub provider_likes: Mutex<HashMap<String, bool>>,
-    /// Prefixed ids of the songs liked on SoundCloud, which does not flag them on the tracks it sends.
+    /// Prefixed ids of the favorites on SoundCloud, Jellyfin and Navidrome: SoundCloud never flags them on its tracks,
+    /// and a queue restored from the last session has no flags at all.
     pub source_likes: Remote<HashSet<String>>,
     /// Set while a sign-in/out is in flight (the login window blocks), with the last error.
     pub busy: Arc<Mutex<(Option<&'static str>, Option<String>)>>,
@@ -525,6 +579,7 @@ impl Data {
             suggests: Default::default(),
             matcher: SpotifyMatcher::start(),
             exporting: Default::default(),
+            account_changed: Default::default(),
             song_infos: Default::default(),
             provider_likes: Default::default(),
             source_likes: Remote::new(),
@@ -553,12 +608,12 @@ impl Data {
         r
     }
 
-    /// Queues the visible Spotify rows (± padding, filtered in page.rs) for matching.
-    pub fn want_spotify(&self, ctx: &Context, id: &str, range: Range<usize>) {
+    /// Queues the visible Spotify rows (± padding, filtered in page.rs) of the page `kind/id` for matching.
+    pub fn want_spotify(&self, ctx: &Context, kind: &str, id: &str, range: Range<usize>) {
         if range.is_empty() {
             return;
         }
-        let detail = self.details.lock().unwrap().get(&format!("spotify/{id}")).cloned();
+        let detail = self.details.lock().unwrap().get(&format!("{kind}/{id}")).cloned();
         if let Some(detail) = detail {
             self.matcher.request(ctx, id, &detail, range);
         }
@@ -875,6 +930,7 @@ impl Data {
         self.spotify.reset();
         self.library.reset();
         self.source_likes.reset();
+        self.provider_likes.lock().unwrap().clear();
         self.searches.lock().unwrap().clear();
         self.item_searches.lock().unwrap().clear();
         self.details.lock().unwrap().clear();
@@ -925,7 +981,7 @@ impl Data {
         });
     }
 
-    /// Whether `id` is in the loaded Liked songs page (false until it loads).
+    /// Whether the song is liked, from what has loaded so far.
     pub fn is_liked(&self, track: &Track) -> bool {
         if let Some(&on) = self.provider_likes.lock().unwrap().get(&track.id) {
             return on;
@@ -940,8 +996,9 @@ impl Data {
     pub fn load_source_likes(&self, ctx: &Context, sources: Vec<String>) {
         self.source_likes.ensure(ctx, move || {
             let mut ids = HashSet::new();
+            // An unreachable server must not hide the others' favorites.
             for s in sources {
-                ids.extend(backend::get::<Vec<Item>>(&format!("/source/{s}/library/songs"))?.into_iter().map(|i| i.id));
+                ids.extend(backend::get::<Vec<Item>>(&format!("/source/{s}/library/songs")).into_iter().flatten().map(|i| i.id));
             }
             Ok(ids)
         });
@@ -962,10 +1019,10 @@ impl Data {
         });
     }
 
-    /// Mirrors a like into the cached Liked songs page (`LM`) so it shows without a refetch. Other sources only set the liked flag.
+    /// Records a like, and mirrors a YouTube one into the cached Liked songs page (`LM`) so it shows without a refetch.
     pub fn mirror_like(&self, track: Track, on: bool) {
+        self.provider_likes.lock().unwrap().insert(track.id.clone(), on);
         if track.source != "youtube" {
-            self.provider_likes.lock().unwrap().insert(track.id, on);
             return;
         }
         for key in ["playlists/LM", "playlists/VLLM"] {
@@ -1019,9 +1076,26 @@ impl Data {
                 Err(e) => crate::toast::error(e),
             }
             *me.busy.lock().unwrap() = (None, err);
+            me.account_changed.store(true, Ordering::SeqCst);
             me.reset_content();
             ctx.request_repaint();
         });
+    }
+}
+
+#[cfg(test)]
+mod like_tests {
+    use super::*;
+
+    #[test]
+    fn like_shows_before_liked_songs_loads() {
+        let d = Data::new();
+        let t = Track { id: "a".into(), source: "youtube".into(), ..Default::default() };
+        assert!(!d.is_liked(&t));
+        d.mirror_like(t.clone(), true);
+        assert!(d.is_liked(&t));
+        d.reset_content();
+        assert!(!d.is_liked(&t));
     }
 }
 
@@ -1038,5 +1112,27 @@ mod placeholder_tests {
         assert_eq!(it("playlist", None).sub(), "");
         assert_eq!(it("artist", None).sub(), "");
         assert!(!real_artist("") && !real_artist(" ") && !real_artist(UNKNOWN_ARTIST) && real_artist("A"));
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_keeps_the_old_value_until_the_new_one_lands() {
+        let (r, ctx) = (Remote::new(), Context::default());
+        r.replace(Arc::new(1));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        r.refresh(&ctx, move || rx.recv().map(|_| 2).map_err(|e| e.to_string()));
+        assert_eq!(r.ready().as_deref(), Some(&1));
+        tx.send(()).unwrap();
+        for _ in 0..200 {
+            if r.ready().as_deref() == Some(&2) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("new value never arrived");
     }
 }

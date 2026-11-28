@@ -15,7 +15,7 @@ enum class Cap { SEARCH, HOME, LIBRARY, LIKE, PLAYLIST_WRITE, RADIO, VIDEO, HIST
 @Serializable
 data class SourceConfig(
     val id: String,
-    /** youtube | navidrome | jellyfin | soundcloud */
+    /** youtube | navidrome | jellyfin | soundcloud | bandcamp | spotify */
     val type: String,
     val name: String,
     val url: String? = null,

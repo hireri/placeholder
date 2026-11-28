@@ -13,6 +13,18 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Where the app's colours come from. Exactly one applies at a time.
+#[derive(Clone, Copy, PartialEq, Default, Debug, Serialize, Deserialize)]
+pub enum Colours {
+    /// The accent preset.
+    Accent,
+    /// The playing cover; the accent preset while the queue is empty.
+    #[default]
+    Artwork,
+    /// `theme.toml` over a neutral base.
+    Custom,
+}
+
 /// Preferences edited on this page; saved with the rest of the UI prefs.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -27,12 +39,18 @@ pub struct Opts {
     pub tint: bool,
     /// 0 follow the system, 1 light, 2 dark.
     pub mode: u8,
-    /// Colours from `theme.toml` override the generated theme.
-    pub custom: bool,
-    /// Theme follows the playing cover; off uses `hue` always.
-    pub auto_theme: bool,
-    /// Index into `PRESETS`; used when `auto_theme` is off or nothing is playing.
+    pub colours: Colours,
+    /// The two toggles `colours` replaced; only read, so `sanitize` can carry an old file over.
+    #[serde(skip_serializing)]
+    custom: bool,
+    #[serde(skip_serializing)]
+    auto_theme: bool,
+    /// Index into `PRESETS`.
     pub accent: u8,
+    /// Spotify songs stream from Spotify instead of playing their YouTube Music match.
+    pub spotify_direct: bool,
+    /// Spotify apps can see and control this player.
+    pub spotify_connect: bool,
     /// Whole seconds, 0..=12; 0 is off.
     pub crossfade: u8,
     pub gapless: bool,
@@ -56,6 +74,7 @@ pub struct Opts {
     pub discord_link: u8,
     /// Host: let people in without asking.
     pub party_auto_accept: bool,
+    pub party_fallback: bool,
     /// Party notifications: join requests and answers to yours; people joining and leaving; being removed or the party ending.
     pub notify_requests: bool,
     pub notify_people: bool,
@@ -71,6 +90,8 @@ pub struct Opts {
     pub show_bio: bool,
     pub show_subs: bool,
     pub show_monthly: bool,
+    /// The artist's wide picture behind the page header.
+    pub artist_banner: bool,
     /// Dark mode only: pure black window and sidebar.
     pub pure_black: bool,
     /// Scale each track toward the loudness target using the loudness YouTube reports.
@@ -151,7 +172,7 @@ pub struct Opts {
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { compact: false, hide_off: false, home_layout: 0, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, discord_listen: true, discord_get: false, discord_cover: true, discord_link: 0, party_auto_accept: false, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, lyrics_center: false, lyrics_follow: true, lyrics_tap_seek: true, reduce_motion: false, close_tray: true, start_minimized: false, autostart: false, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false, image_cache: 96, hide_recents: false, hide_moods: false, hide_top_picks: false, hide_shorts: false, music_only: false, auto_playlists: true, auto_update: true, restore_queue: false, skip_on_error: false, output: String::new(), viz_style: 1, viz_logo: false, logo: 1, viz_ambient: false, viz_wave: false, viz_fps: 60, cover_style: 0 }
+        Opts { compact: false, hide_off: false, home_layout: 0, tint: true, mode: 0, colours: Colours::Artwork, custom: false, auto_theme: true, accent: 0, spotify_direct: false, spotify_connect: false, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, discord_listen: true, discord_get: false, discord_cover: true, discord_link: 0, party_auto_accept: false, party_fallback: true, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, artist_banner: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, lyrics_center: false, lyrics_follow: true, lyrics_tap_seek: true, reduce_motion: false, close_tray: true, start_minimized: false, autostart: false, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false, image_cache: 96, hide_recents: false, hide_moods: false, hide_top_picks: false, hide_shorts: false, music_only: false, auto_playlists: true, auto_update: true, restore_queue: false, skip_on_error: false, output: String::new(), viz_style: 1, viz_logo: false, logo: 1, viz_ambient: false, viz_wave: false, viz_fps: 60, cover_style: 0 }
     }
 }
 
@@ -236,14 +257,47 @@ const SHORTCUTS: &[(&str, &[&str])] = &[
     ("Command palette", &["Ctrl", "K"]),
 ];
 
-/// Logo of a source type; Navidrome has no mark of its own.
-fn source_icon(ty: &str) -> &'static str {
+/// One row of `App::ranked`.
+struct Rank<'a> {
+    id: &'a str,
+    title: &'a str,
+    desc: String,
+    /// Logo and its tint.
+    icon: Option<(&'static str, egui::Color32)>,
+    on: bool,
+}
+
+/// What happened in `App::ranked` this frame; indices are into its items.
+#[derive(Default)]
+struct Ranked {
+    clicked: Option<usize>,
+    toggled: Option<(usize, bool)>,
+    moved: Option<(usize, usize)>,
+    dragging: bool,
+}
+
+/// Where row `i` sits once row `from` has been moved to `to`.
+fn shifted(i: usize, from: usize, to: usize) -> usize {
+    if i == from {
+        to
+    } else if from < i && i <= to {
+        i - 1
+    } else if to <= i && i < from {
+        i + 1
+    } else {
+        i
+    }
+}
+
+/// Symbolic and brand-colour logo of a source type; Navidrome has no mark of its own.
+fn source_icons(ty: &str) -> (&'static str, Option<&'static str>) {
     match ty {
-        "youtube" => icon!("src-youtube"),
-        "jellyfin" => icon!("src-jellyfin"),
-        "soundcloud" => icon!("src-soundcloud"),
-        "bandcamp" => icon!("src-bandcamp"),
-        _ => icon!("src-generic"),
+        "youtube" => (icon!("src-youtube"), Some(icon!("src-youtube-color"))),
+        "jellyfin" => (icon!("src-jellyfin"), Some(icon!("src-jellyfin-color"))),
+        "soundcloud" => (icon!("src-soundcloud"), Some(icon!("src-soundcloud-color"))),
+        "bandcamp" => (icon!("src-bandcamp"), Some(icon!("src-bandcamp-color"))),
+        "spotify" => (icon!("mspot"), Some(icon!("src-spotify-color"))),
+        _ => (icon!("src-generic"), None),
     }
 }
 
@@ -506,6 +560,117 @@ impl App {
         Some(pg.y - ROW_H / 2.)
     }
 
+    /// Rows in priority order, each with its position, optional logo and switch; drag one anywhere to move it.
+    /// The others slide out of its way and it settles into place on release. `after` draws what hangs under row `i`.
+    fn ranked(&mut self, ui: &mut egui::Ui, pg: &mut Page, key: &str, items: &[Rank], mut after: impl FnMut(&mut Self, &mut egui::Ui, &mut Page, usize)) -> Ranked {
+        let (t, n, can_drag) = (self.t, items.len(), pg.q.is_empty());
+        let drag_id = ui.scope_id().with((key, "drag"));
+        let mut drag: Option<(String, f32)> = ui.data(|d| d.get_temp(drag_id));
+        let from = drag.as_ref().and_then(|(id, _)| items.iter().position(|r| r.id == id));
+        let pointer = ui.input(|i| i.pointer.latest_pos());
+        // Top of the first row and, while dragging, the lifted row's position in row units.
+        let mut top = ui.data(|d| d.get_temp::<f32>(drag_id.with("top"))).unwrap_or(pg.y);
+        let lifted = match (from, &drag, pointer) {
+            (Some(_), Some((_, grab)), Some(p)) => Some(((p.y - grab - top) / ROW_H).clamp(0., (n - 1) as f32)),
+            _ => None,
+        };
+        let to = lifted.map(|v| v.round() as usize);
+        let mut out = Ranked::default();
+        let mut held = None;
+        for (i, r) in items.iter().enumerate() {
+            if !Self::visible(pg, r.title, &r.desc) {
+                continue;
+            }
+            if !self.begin_card(ui, pg) {
+                ui.painter().hline((pg.x0 + 20.)..=(pg.x1 - 20.), pg.y, egui::Stroke::new(1., t.s3.gamma_multiply(0.6)));
+            }
+            if i == 0 {
+                top = pg.y;
+                ui.data_mut(|d| d.insert_temp(drag_id.with("top"), top));
+            }
+            let dragged = from == Some(i);
+            let slot = match (lifted, from, to) {
+                (Some(v), Some(f), _) if f == i => v,
+                (_, Some(f), Some(to)) => shifted(i, f, to) as f32,
+                _ => i as f32,
+            };
+            let time = if dragged || crate::gfx::reduced_motion() { 0. } else { 0.16 };
+            let slot = ui.ctx().animate_value_with_time(ui.scope_id().with((key, "slot", r.id)), slot, time);
+            let y = if dragged { top + slot * ROW_H } else { pg.y + (slot - i as f32) * ROW_H };
+            let rect = Rect::from_min_size(pos2(pg.x0, y), vec2(pg.x1 - pg.x0, ROW_H));
+            pg.rows += 1;
+            pg.y += ROW_H;
+            if dragged {
+                held = Some((i, rect));
+            } else {
+                self.ranked_row(ui, pg, key, i, r, rect, can_drag, &mut drag, &mut out);
+            }
+            after(self, ui, pg, i);
+        }
+        // The lifted row is drawn last so it stays above the ones it passes.
+        if let Some((i, rect)) = held {
+            ui.painter().add(egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: egui::Color32::from_black_alpha(80) }.as_shape(rect, rad(12.)));
+            ui.painter().rect_filled(rect, rad(12.), t.s2.lerp_to_gamma(t.tx, 0.05));
+            self.ranked_row(ui, pg, key, i, &items[i], rect, can_drag, &mut drag, &mut out);
+        }
+        out.dragging = drag.is_some();
+        if !ui.input(|i| i.pointer.any_down()) {
+            if let (Some(f), Some(to)) = (from, to) {
+                out.moved = (f != to).then_some((f, to));
+            }
+            drag = None;
+        }
+        match drag {
+            Some(d) => ui.data_mut(|m| {
+                m.insert_temp(drag_id, d);
+            }),
+            None => ui.data_mut(|m| {
+                m.remove_temp::<(String, f32)>(drag_id);
+            }),
+        }
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ranked_row(&self, ui: &egui::Ui, pg: &Page, key: &str, i: usize, r: &Rank, rect: Rect, can_drag: bool, drag: &mut Option<(String, f32)>, out: &mut Ranked) {
+        let (t, cy) = (self.t, rect.center().y);
+        let hit = ui.interact(rect, ui.scope_id().with((key, "row", r.id)), if can_drag { Sense::click_and_drag() } else { Sense::click() });
+        if drag.as_ref().is_some_and(|d| d.0 == r.id) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if hit.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if hit.drag_started() {
+            let origin = ui.input(|i| i.pointer.press_origin()).map_or(cy, |p| p.y);
+            *drag = Some((r.id.to_string(), origin - rect.min.y));
+            ui.ctx().request_repaint();
+        }
+        if hit.clicked() {
+            out.clicked = Some(i);
+        }
+        let p = ui.painter();
+        if can_drag {
+            icon(ui, icon!("grip"), pos2(rect.min.x + 26., cy), 16., if hit.hovered() { t.tm } else { t.tf });
+        }
+        p.text(pos2(rect.min.x + 42., cy), Align2::LEFT_CENTER, i + 1, font_w(12., Weight::Semi), t.tm);
+        let pad = if let Some((uri, tint)) = r.icon {
+            icon(ui, uri, pos2(rect.min.x + 84., cy), 22., tint);
+            84.
+        } else {
+            44.
+        };
+        let (x, w) = (rect.min.x + 20. + pad, (rect.width() - 40. - CONTROL_W - pad).max(120.));
+        let ty = if r.desc.is_empty() { cy } else { rect.min.y + 23. };
+        trunc(p, pos2(x, ty), w, r.title, font(13.), if r.on { t.tx } else { t.tm });
+        if !r.desc.is_empty() {
+            trunc(p, pos2(x, rect.min.y + 43.), w, &r.desc, font(12.), t.tm);
+        }
+        let mut on = r.on;
+        if toggle(ui, &t, &format!("{key}-on-{}", r.id), pg.right(), cy, &mut on) {
+            out.toggled = Some((i, on));
+        }
+    }
+
     /// A line of plain text in a card of its own (daemon status and the like); hidden while searching.
     fn info(&self, ui: &egui::Ui, pg: &mut Page, text: &str) {
         if pg.q.is_empty() {
@@ -540,11 +705,17 @@ impl App {
         if let Some((_, body)) = self.block(ui, pg, "Mode", "Light, dark, or follow the system", 100.) {
             self.mode_tiles(ui, body);
         }
-        if let Some(cy) = self.row(ui, pg, "Theme from artwork", "Colour the app from the playing cover") {
-            toggle(ui, &self.t, "auto-theme", right, cy, &mut self.opts.auto_theme);
+        if let Some(cy) = self.row(ui, pg, "Colours", "Custom reads theme.toml") {
+            const SOURCES: [Colours; 3] = [Colours::Accent, Colours::Artwork, Colours::Custom];
+            let cur = SOURCES.iter().position(|c| *c == self.opts.colours).unwrap_or(1);
+            let sel = segmented(ui, &self.t, "colours", right, cy, &["Accent", "Artwork", "Custom"], cur);
+            if sel != cur {
+                self.opts.colours = SOURCES[sel];
+                self.reload_custom();
+            }
         }
         let cols = (((pg.x1 - pg.x0 - 40.) / 40.).floor() as usize).clamp(1, PRESETS.len());
-        if let Some((card, body)) = self.block(ui, pg, "Accent colour", "Colour for buttons and highlights", PRESETS.len().div_ceil(cols) as f32 * 40.) {
+        if let Some((card, body)) = self.block(ui, pg, "Accent colour", "Also used by Artwork while the queue is empty", PRESETS.len().div_ceil(cols) as f32 * 40.) {
             for (i, (name, ..)) in PRESETS.iter().enumerate() {
                 let c = pos2(body.min.x + 18. + (i % cols) as f32 * 40., body.min.y + 18. + (i / cols) as f32 * 40.);
                 let hit = press(ui, ("accent", i), Rect::from_center_size(c, vec2(36., 36.)));
@@ -557,15 +728,10 @@ impl App {
                 }
                 hit.tip(&self.t, name);
             }
-            let why = self.opts.custom.then_some("Turn off “Custom theme” to pick an accent");
+            let why = (self.opts.colours == Colours::Custom).then_some("Custom colours are on; the accent isn’t used");
             let id = ui.scope_id().with(("settings-gate", "accent"));
             let k = ui.ctx().calm_bool_ease(id, why.is_some(), 0.2, ease_out);
             self.gate_rect(ui, card.shrink2(vec2(0., 1.)), id, k, why);
-        }
-        if let Some(cy) = self.row(ui, pg, "Custom theme", "Loads theme.toml from the config folder") {
-            if toggle(ui, &self.t, "custom", right, cy, &mut self.opts.custom) {
-                self.reload_custom();
-            }
         }
         if let Some(cy) = self.row(ui, pg, "Pure black", "True black in dark mode") {
             toggle(ui, &self.t, "pure-black", right, cy, &mut self.opts.pure_black);
@@ -854,12 +1020,13 @@ impl App {
         }
         self.sec(ui, pg, "Artist page");
         for (key, title, desc) in [
+            ("artist-banner", "Artist banner", "Wide picture behind the artist page header"),
             ("show-bio", "Artist description", "Biography on artist pages"),
             ("show-subs", "Subscriber count", ""),
             ("show-monthly", "Monthly listeners", ""),
         ] {
             if let Some(cy) = self.row(ui, pg, title, desc) {
-                let v = match key { "show-bio" => &mut self.opts.show_bio, "show-subs" => &mut self.opts.show_subs, _ => &mut self.opts.show_monthly };
+                let v = match key { "artist-banner" => &mut self.opts.artist_banner, "show-bio" => &mut self.opts.show_bio, "show-subs" => &mut self.opts.show_subs, _ => &mut self.opts.show_monthly };
                 toggle(ui, &self.t, key, right, cy, v);
             }
         }
@@ -947,7 +1114,6 @@ impl App {
 
     /// Lyric providers in priority order; a connected Jellyfin or Navidrome server is always asked first, so its row is fixed and dimmed without one.
     fn lyric_providers(&mut self, ui: &mut egui::Ui, pg: &mut Page, list: &[crate::sources::Source]) {
-        let right = pg.right();
         let Ok(d) = self.daemon(ui) else { return };
         self.sec(ui, pg, "Lyric providers");
         let servers: Vec<&str> = list.iter().filter(|s| s.enabled && !s.builtin && !s.singleton).map(|s| s.name.as_str()).collect();
@@ -955,30 +1121,19 @@ impl App {
         if let Some(cy) = self.row(ui, pg, "Your servers", &desc) {
             self.gate(ui, pg, cy, "lyr-servers", servers.is_empty().then_some("No server is connected"));
         }
-        let (t, n) = (self.t, d.lyrics.order.len());
-        for (i, name) in d.lyrics.order.iter().enumerate() {
-            let Some(cy) = self.row(ui, pg, name, &format!("Priority {}", i + 1)) else { continue };
-            let mut on = d.lyrics.enabled.get(name).copied().unwrap_or(true);
-            if toggle(ui, &t, name, right, cy, &mut on) {
-                self.put(ui, json!({ "lyrics": { "enabled": { name: on } } }), |d| {
-                    d.lyrics.enabled.insert(name.clone(), on);
-                });
-            }
-            for (k, (glyph, to)) in [("↑", i.checked_sub(1)), ("↓", (i + 1 < n).then_some(i + 1))].into_iter().enumerate() {
-                let r = Rect::from_center_size(pos2(right - 40. - 12. - 14. - (1 - k) as f32 * 32., cy), vec2(28., 28.));
-                let hit = ui.interact(r, ui.scope_id().with(("lyr-move", i, k)), Sense::click());
-                let p = ui.painter();
-                if to.is_some() && hit.hovered() {
-                    p.rect_filled(r, rad(8.), t.s3);
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                p.text(r.center(), Align2::CENTER_CENTER, glyph, font_w(14., Weight::Medium), if to.is_some() { t.tx } else { t.tf });
-                if let (true, Some(to)) = (hit.clicked(), to) {
-                    let mut order = d.lyrics.order.clone();
-                    order.swap(i, to);
-                    self.put(ui, json!({ "lyrics": { "order": order } }), |d| d.lyrics.order = order.clone());
-                }
-            }
+        let items: Vec<Rank> = d.lyrics.order.iter().map(|name| Rank { id: name, title: name, desc: String::new(), icon: None, on: d.lyrics.enabled.get(name).copied().unwrap_or(true) }).collect();
+        let act = self.ranked(ui, pg, "lyr", &items, |_, _, _, _| {});
+        if let Some((i, on)) = act.toggled {
+            let name = &d.lyrics.order[i];
+            self.put(ui, json!({ "lyrics": { "enabled": { name: on } } }), |d| {
+                d.lyrics.enabled.insert(name.clone(), on);
+            });
+        }
+        if let Some((from, to)) = act.moved {
+            let mut order = d.lyrics.order.clone();
+            let name = order.remove(from);
+            order.insert(to, name);
+            self.put(ui, json!({ "lyrics": { "order": order } }), |d| d.lyrics.order = order.clone());
         }
     }
 
@@ -1147,7 +1302,8 @@ impl App {
 
     /// Music sources in priority order (drag the grip to reorder), their details when expanded, and the add form.
     fn sources_tab(&mut self, ui: &mut egui::Ui, pg: &mut Page) {
-        let (t, right, ctx) = (self.t, pg.right(), ui.ctx().clone());
+        let (t, ctx) = (self.t, ui.ctx().clone());
+        let right = pg.right();
         let list = match self.sources.list(&ctx) {
             None => return self.info(ui, pg, "Loading sources…"),
             Some(Err(e)) => return self.info(ui, pg, &format!("Couldn't load sources: {e}")),
@@ -1160,9 +1316,7 @@ impl App {
             _ => String::new(),
         };
         self.sec(ui, pg, "Sources");
-        let (width, can_drag) = (pg.x1 - pg.x0, pg.q.is_empty());
-        let (mut top, mut drop_at) = (0., None);
-        for (i, s) in list.iter().enumerate() {
+        let items: Vec<Rank> = list.iter().map(|s| {
             // YouTube's connection detail is the account name, which the signed-in note already says.
             let mut shown = s.clone();
             if s.id == "yt" && !signed_in.is_empty() {
@@ -1172,57 +1326,33 @@ impl App {
             if s.id == "yt" && s.enabled && !signed_in.is_empty() {
                 desc = format!("{desc} · {signed_in}");
             }
-            pg.pad = 84.;
-            let cy = self.row(ui, pg, &s.name, &desc);
-            pg.pad = 0.;
-            let Some(cy) = cy else { continue };
-            let row = Rect::from_center_size(pos2((pg.x0 + pg.x1) / 2., cy), vec2(width, ROW_H));
-            if i == 0 {
-                top = row.min.y;
-            }
+            let (mono, colour) = source_icons(&s.r#type);
+            let icon = match (s.enabled, colour) {
+                (true, Some(uri)) => (uri, egui::Color32::WHITE),
+                (true, None) => (mono, t.tx),
+                (false, _) => (mono, t.tm),
+            };
+            Rank { id: &s.id, title: &s.name, desc, icon: Some(icon), on: s.enabled }
+        }).collect();
+        let act = self.ranked(ui, pg, "src", &items, |app, ui, pg, i| {
+            let open = app.sources.open.as_deref() == Some(list[i].id.as_str());
+            app.details_anim(ui, pg, &list[i], open);
+        });
+        if act.dragging {
+            self.sources.open = None;
+        }
+        if let Some(i) = act.clicked {
+            let s = &list[i];
             let open = self.sources.open.as_deref() == Some(s.id.as_str());
-            if press(ui, ("src-row", &s.id), row).clicked() {
-                self.sources.confirm = None;
-                self.sources.open = (!open).then(|| s.id.clone());
-                self.sources.edit = crate::sources::Edit { name: s.name.clone(), url: s.url.clone().unwrap_or_default(), user: s.username.clone().unwrap_or_default(), secret: String::new() };
-            }
-            let p = ui.painter();
-            let dim = if s.enabled { t.tx } else { t.tm };
-            let grip = Rect::from_min_size(row.min, vec2(60., ROW_H));
-            let g = ui.interact(grip, ui.scope_id().with(("src-grip", &s.id)), Sense::drag());
-            if can_drag && (g.hovered() || g.dragged()) {
-                ui.ctx().set_cursor_icon(if g.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
-            }
-            if can_drag && g.dragged() {
-                self.sources.drag = Some(i);
-                self.sources.open = None;
-            }
-            if can_drag && g.drag_stopped() {
-                drop_at = Some(i);
-            }
-            icon(ui, icon!("grip"), pos2(row.min.x + 26., cy), 16., t.tf);
-            p.text(pos2(row.min.x + 42., cy), Align2::LEFT_CENTER, i + 1, font_w(12., Weight::Semi), t.tm);
-            icon(ui, source_icon(&s.r#type), pos2(row.min.x + 84., cy), 22., dim);
-            if self.sources.drag == Some(i) {
-                p.rect_filled(row, 0., t.s1.gamma_multiply(0.5));
-            }
-            let mut on = s.enabled;
-            if toggle(ui, &t, &format!("src-on-{}", s.id), right, cy, &mut on) {
-                self.sources.patch(&ctx, &s.id, json!({ "enabled": on }), on, |s| s.enabled = on);
-            }
-            self.details_anim(ui, pg, s, open);
+            self.sources.confirm = None;
+            self.sources.open = (!open).then(|| s.id.clone());
+            self.sources.edit = crate::sources::Edit { name: s.name.clone(), url: s.url.clone().unwrap_or_default(), user: s.username.clone().unwrap_or_default(), secret: String::new() };
         }
-        if let (Some(from), Some(p)) = (self.sources.drag, ui.input(|i| i.pointer.latest_pos())) {
-            let to = (((p.y - top) / ROW_H).floor().max(0.) as usize).min(list.len() - 1);
-            if let Some(i) = drop_at {
-                self.sources.reorder(&ctx, i, to);
-            } else {
-                let y = top + (to + (to > from) as usize) as f32 * ROW_H;
-                ui.painter().hline(pg.x0..=pg.x1, y, egui::Stroke::new(2., t.ax));
-            }
+        if let Some((i, on)) = act.toggled {
+            self.sources.patch(&ctx, &list[i].id, json!({ "enabled": on }), on, |s| s.enabled = on);
         }
-        if drop_at.is_some() || !ui.input(|i| i.pointer.any_down()) {
-            self.sources.drag = None;
+        if let Some((from, to)) = act.moved {
+            self.sources.reorder(&ctx, from, to);
         }
         self.add_source(ui, pg);
         self.info(ui, pg, "When a song is in more than one source, the one higher up plays.");
@@ -1295,6 +1425,21 @@ impl App {
         }
         if let Some((key, v, retest)) = patch {
             self.sources.patch(&ctx, &s.id, json!({ key: v }), retest, |s| if key == "name" { s.name = v.clone() });
+        }
+        if s.id == "spotify" {
+            if let Some(cy) = self.row(ui, pg, "Spotify songs play from", "Spotify needs Premium") {
+                let cur = self.opts.spotify_direct as usize;
+                let sel = segmented(ui, &self.t, "spsrc", right, cy, &["YouTube Music", "Spotify"], cur);
+                if sel != cur {
+                    self.opts.spotify_direct = sel == 1;
+                    crate::spotify::set_direct(sel == 1);
+                    self.data.reset_content();
+                    self.pl.restream(ui.ctx());
+                }
+            }
+            if let Some(cy) = self.row(ui, pg, "Spotify Connect", "Control Serafin from Spotify apps. Titles of what plays are sent to Spotify") {
+                toggle(ui, &self.t, "spconnect", right, cy, &mut self.opts.spotify_connect);
+            }
         }
         if has("home") {
             if let Some(cy) = self.row(ui, pg, "Show on Home", "") {
@@ -1432,6 +1577,9 @@ impl App {
         self.sec(ui, pg, "Listening party");
         if let Some(cy) = self.row(ui, pg, "Let people in automatically", "Accept join requests without asking") {
             toggle(ui, &self.t, "party-auto", pg.right(), cy, &mut self.opts.party_auto_accept);
+        }
+        if let Some(cy) = self.row(ui, pg, "Fill in unavailable songs", "Play them from your other sources when YouTube can't") {
+            toggle(ui, &self.t, "party-fallback", pg.right(), cy, &mut self.opts.party_fallback);
         }
         if let Some(cy) = self.row(ui, pg, "Notify about join requests", "Requests and the host's replies") {
             toggle(ui, &self.t, "notify-requests", pg.right(), cy, &mut self.opts.notify_requests);
@@ -1698,6 +1846,12 @@ impl Opts {
         self.viz_style = self.viz_style.min(crate::viz::STYLES.len() as u8 - 1);
         self.mode = self.mode.min(2);
         self.accent = self.accent.min(PRESETS.len() as u8 - 1);
+        if self.custom {
+            self.colours = Colours::Custom;
+        } else if !self.auto_theme {
+            self.colours = Colours::Accent;
+        }
+        (self.custom, self.auto_theme) = (false, true);
     }
 }
 
@@ -1877,4 +2031,37 @@ fn text_field(ui: &mut egui::Ui, t: &crate::theme::Theme, key: &str, right: f32,
     }
     let edit = r.shrink2(vec2(12., 0.));
     ui.put(edit, egui::TextEdit::singleline(buf).id(id).frame(egui::Frame::NONE).font(font(13.)).password(password).align(Align2::LEFT_CENTER).desired_width(edit.width())).lost_focus()
+}
+
+#[cfg(test)]
+mod colour_tests {
+    use super::*;
+
+    #[test]
+    fn old_toggles_become_one_colour_source() {
+        for (custom, auto_theme, want) in [(false, true, Colours::Artwork), (false, false, Colours::Accent), (true, true, Colours::Custom), (true, false, Colours::Custom)] {
+            let mut o = Opts { custom, auto_theme, ..Opts::default() };
+            o.sanitize();
+            assert!(o.colours == want, "custom {custom} auto {auto_theme} -> {:?}", o.colours);
+            o.sanitize();
+            assert!(o.colours == want, "a second pass must not change it");
+        }
+    }
+}
+
+#[cfg(test)]
+mod rank_tests {
+    #[test]
+    fn preview_matches_the_move() {
+        for from in 0..4 {
+            for to in 0..4 {
+                let mut l = vec![0, 1, 2, 3];
+                let x = l.remove(from);
+                l.insert(to, x);
+                for i in 0..4 {
+                    assert_eq!(l[super::shifted(i, from, to)], i, "{from} -> {to}");
+                }
+            }
+        }
+    }
 }

@@ -11,7 +11,7 @@ pub struct Custom {
     light: HashMap<String, String>,
 }
 
-const TEMPLATE: &str = "# Serafin custom theme. Only uncommented lines override the generated (artwork or accent) colours.
+const TEMPLATE: &str = "# Serafin custom theme. Only uncommented lines override the neutral base colours.
 # Names: s0 s1 s2 s3 (window, sidebar, panel, hover), tx tm tf (text), ax on_ax axc (accent, text on accent, accent container)
 # With Pure black on, dark s0 and s1 are pulled towards black after these apply.
 [dark]
@@ -101,7 +101,7 @@ impl Theme {
         Theme { hue, dark, tx, tm, tf, ax, on_ax, axc, s0: c(s[0], nc), s1: c(s[1], nc), s2: c(s[2], nc), s3: c(s[3], nc) }
     }
 
-    /// Nothing playing: near-grey surfaces with a blue accent.
+    /// Near-grey surfaces with a blue accent: grey covers, and the base under custom colours.
     pub fn idle(dark: bool) -> Self {
         Theme::new(265., 0.12, 0.003, dark)
     }
@@ -115,12 +115,6 @@ impl Theme {
     /// Built around a cover's (hue, chroma): vivid covers get a stronger accent and tinted surfaces.
     pub fn tinted((hue, chroma): (f32, f32), dark: bool) -> Self {
         Theme::new(hue, (chroma * 1.4).clamp(0.06, 0.16), (chroma * 0.2).clamp(0.006, 0.026), dark)
-    }
-
-    /// Keeps `self`'s surfaces and text but takes `p`'s accent colours.
-    pub fn accent_of(mut self, p: Theme) -> Self {
-        (self.ax, self.on_ax, self.axc) = (p.ax, p.on_ax, p.axc);
-        self
     }
 
     /// Window and sidebar go true black (OLED); panels and hover keep their tonal steps.

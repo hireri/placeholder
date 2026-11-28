@@ -89,7 +89,7 @@ impl State {
 enum Kind {
     /// A past search, shown while the box is empty.
     Recent(String),
-    /// Search YouTube Music for exactly this text.
+    /// Search the enabled sources for exactly this text.
     Search(String),
     /// A completion YouTube Music suggested for the typed text.
     Complete(String),
@@ -137,7 +137,7 @@ fn build(query: &str, recents: &[String], sugg: Option<&Suggest>) -> Vec<Line> {
         lines.push(Line::Head("Songs, albums and artists"));
         lines.extend(items.into_iter().map(|i| Line::Row(Kind::Entity(i.clone()))));
     }
-    lines.push(Line::Head("Search YouTube Music"));
+    lines.push(Line::Head("Search"));
     lines.push(Line::Row(Kind::Search(q.to_string())));
     if let Some(s) = sugg {
         let ql = q.to_lowercase();

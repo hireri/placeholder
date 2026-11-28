@@ -48,6 +48,11 @@ fn height(i: &Item) -> f32 {
 /// `keep` is a rect whose presses don't count as "outside" (the anchor button, which toggles `open` itself).
 /// Returns the id of the item clicked this frame.
 pub fn show(ctx: &Context, t: &Theme, id: &'static str, open: &mut bool, at: egui::Pos2, keep: Rect, items: &[Item]) -> Option<usize> {
+    show_sized(ctx, t, id, open, at, keep, items, W)
+}
+
+/// [`show`] at a width of its own, for menus whose few short labels would swim in the usual one.
+pub fn show_sized(ctx: &Context, t: &Theme, id: &'static str, open: &mut bool, at: egui::Pos2, keep: Rect, items: &[Item], width: f32) -> Option<usize> {
     if !*open {
         return None;
     }
@@ -57,8 +62,8 @@ pub fn show(ctx: &Context, t: &Theme, id: &'static str, open: &mut bool, at: egu
     if pos.y + h > scr.max.y - 8. {
         pos.y = (at.y - h - 12.).max(scr.min.y + 8.);
     }
-    pos.x = pos.x.min(scr.max.x - W - 8.).max(8.);
-    let rect = Rect::from_min_size(pos, vec2(W, h));
+    pos.x = pos.x.min(scr.max.x - width - 8.).max(8.);
+    let rect = Rect::from_min_size(pos, vec2(width, h));
     let mut picked = None;
     Area::new(Id::unique(id)).order(Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
         ui.allocate_rect(rect, Sense::click()); // swallow clicks so they don't reach widgets beneath
@@ -147,6 +152,7 @@ const ADD: usize = 12;
 const REMOVE_PL: usize = 13;
 const RENAME: usize = 14;
 const COVER: usize = 15;
+const PIN: usize = 16;
 const NEW_PL: usize = 99;
 const PICK_BASE: usize = 100;
 
@@ -156,12 +162,15 @@ fn linkable(src: Option<&str>) -> bool {
 }
 
 fn track_link(t: &Track) -> String {
-    if t.source == "spotify" { format!("https://open.spotify.com/track/{}", t.id) } else { format!("https://music.youtube.com/watch?v={}", t.id) }
+    if t.source == "spotify" { format!("https://open.spotify.com/track/{}", t.id.trim_start_matches("spotify:")) } else { format!("https://music.youtube.com/watch?v={}", t.id) }
 }
 
 fn item_link(it: &data::Item) -> String {
     if it.source.as_deref() == Some("spotify") {
-        return format!("https://open.spotify.com/{}/{}", it.r#type, it.id);
+        return match it.id.trim_start_matches("spotify:") {
+            "liked" => "https://open.spotify.com/collection/tracks".into(),
+            id => format!("https://open.spotify.com/{}/{id}", it.r#type),
+        };
     }
     match it.r#type.as_str() {
         "artist" => format!("https://music.youtube.com/channel/{}", it.id),
@@ -265,6 +274,9 @@ impl App {
                     let lib = if it.r#type == "album" { 2 } else { 1 };
                     let on = self.lib_items.iter().any(|i| i.kind == lib && i.id == it.id);
                     saved = Some(on);
+                    if on && lib == 1 {
+                        items.push(Item::Action(PIN, if self.is_pinned(&it.id) { "Unpin" } else { "Pin to top" }, Some(icon!("pin"))));
+                    }
                     if on && it.editable {
                         items.push(Item::Action(RENAME, "Rename…", Some(icon!("mnote"))));
                         items.push(Item::Action(DELETE, "Delete playlist", Some(icon!("mtrash"))));
@@ -341,6 +353,13 @@ impl App {
                     OPEN => {
                         if let Some((kind, route)) = crate::live::target(&it) {
                             self.open(route, Some((kind, it.id.clone())));
+                        }
+                    }
+                    PIN => {
+                        if self.pin_flipped.contains(&it.id) {
+                            self.pin_flipped.retain(|id| *id != it.id);
+                        } else {
+                            self.pin_flipped.push(it.id.clone());
                         }
                     }
                     DELETE => self.confirm_delete(ctx, &it.id),

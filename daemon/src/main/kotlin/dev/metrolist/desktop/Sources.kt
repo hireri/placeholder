@@ -11,11 +11,12 @@ object Sources {
         "jellyfin" to ::JellyfinSource,
         "soundcloud" to ::SoundCloudSource,
         "bandcamp" to ::BandcampSource,
+        "spotify" to ::SpotifySource,
     )
     val types: Set<String> get() = factories.keys
 
     /** Providers with exactly one instance: listed from the start (off), never added or removed. */
-    private val singletons = mapOf("soundcloud" to "SoundCloud", "bandcamp" to "Bandcamp")
+    private val singletons = mapOf("soundcloud" to "SoundCloud", "bandcamp" to "Bandcamp", "spotify" to "Spotify")
     fun isSingleton(type: String) = type in singletons
 
     private val live = ConcurrentHashMap<String, MusicSource>()
@@ -78,7 +79,7 @@ object Sources {
 
     /** Throws IllegalArgumentException with a user-facing message for a bad request. */
     suspend fun add(req: SourceReq): SourceConfig {
-        val type = req.type?.lowercase()?.takeIf { it in factories && !isSingleton(it) } ?: throw IllegalArgumentException("type must be one of ${(factories.keys.filter { !isSingleton(it) }).joinToString()}; SoundCloud and Bandcamp are built in")
+        val type = req.type?.lowercase()?.takeIf { it in factories && !isSingleton(it) } ?: throw IllegalArgumentException("type must be one of ${(factories.keys.filter { !isSingleton(it) }).joinToString()}; SoundCloud, Bandcamp and Spotify are built in")
         val cfg = SourceConfig(
             id = "$type-${java.util.UUID.randomUUID().toString().take(4)}", type = type,
             name = req.name?.takeIf { it.isNotBlank() } ?: type.replaceFirstChar { it.uppercase() },

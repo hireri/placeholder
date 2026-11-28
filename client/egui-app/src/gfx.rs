@@ -67,6 +67,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("bytes://icons/lib.svg", include_bytes!("../assets/icons/lib.svg")),
     ("bytes://icons/lyr.svg", include_bytes!("../assets/icons/lyr.svg")),
     ("bytes://icons/more.svg", include_bytes!("../assets/icons/more.svg")),
+    ("bytes://icons/pin.svg", include_bytes!("../assets/icons/pin.svg")),
     ("bytes://icons/pl.svg", include_bytes!("../assets/icons/pl.svg")),
     ("bytes://icons/play.svg", include_bytes!("../assets/icons/play.svg")),
     ("bytes://icons/que.svg", include_bytes!("../assets/icons/que.svg")),
@@ -92,6 +93,11 @@ const ICONS: &[(&str, &[u8])] = &[
     ("bytes://icons/src-soundcloud.svg", include_bytes!("../assets/sources/soundcloud.svg")),
     ("bytes://icons/src-bandcamp.svg", include_bytes!("../assets/sources/bandcamp.svg")),
     ("bytes://icons/src-generic.svg", include_bytes!("../assets/sources/generic.svg")),
+    ("bytes://icons/src-youtube-color.svg", include_bytes!("../assets/sources/youtube-color.svg")),
+    ("bytes://icons/src-jellyfin-color.svg", include_bytes!("../assets/sources/jellyfin-color.svg")),
+    ("bytes://icons/src-soundcloud-color.svg", include_bytes!("../assets/sources/soundcloud-color.svg")),
+    ("bytes://icons/src-bandcamp-color.svg", include_bytes!("../assets/sources/bandcamp-color.svg")),
+    ("bytes://icons/src-spotify-color.svg", include_bytes!("../assets/sources/spotify-color.svg")),
     ("bytes://icons/x.svg", include_bytes!("../assets/icons/x.svg")),
     ("bytes://icons/vid.svg", include_bytes!("../assets/icons/vid.svg")),
     ("bytes://icons/vidoff.svg", include_bytes!("../assets/icons/vidoff.svg"))
@@ -452,7 +458,7 @@ pub fn clear_covers(ctx: &Context) {
     }
 }
 
-fn touch_cover(ctx: &Context, uri: &str) {
+pub fn touch_cover(ctx: &Context, uri: &str) {
     let frame = ctx.cumulative_pass_nr();
     ctx.data_mut(|d| d.get_temp_mut_or_default::<HashMap<String, u64>>(egui::Id::NULL).insert(uri.to_owned(), frame));
 }
@@ -478,7 +484,7 @@ pub fn trim_covers(ctx: &Context) {
 
 /// The cover at `url` for a `size` slot, `None` until one has loaded. The CDN bucket is roughly the pixels drawn, in 64px steps,
 /// and never below the largest bucket already loaded for this URL, so a resize keeps the sharp image up while a bigger one loads.
-fn cover_texture(ctx: &Context, url: &str, size: egui::Vec2) -> Option<SizedTexture> {
+pub fn cover_texture(ctx: &Context, url: &str, size: egui::Vec2) -> Option<SizedTexture> {
     cover_loaded(ctx, url, size).map(|(t, _)| t)
 }
 

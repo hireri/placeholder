@@ -54,7 +54,7 @@ pub fn exe_dir() -> Option<std::path::PathBuf> {
 }
 
 /// The login helper, which the daemon also runs to send SoundCloud likes from a real browser session.
-fn login_helper() -> std::path::PathBuf {
+pub fn login_helper() -> std::path::PathBuf {
     exe_dir().map(|d| d.join(format!("serafin-login{}", std::env::consts::EXE_SUFFIX))).unwrap_or_default()
 }
 
@@ -286,14 +286,25 @@ pub struct Status {
 /// Blocking: opens the login helper window (the credentials go straight from it to the daemon).
 pub fn sign_in(svc: &str) -> Result<(), String> {
     let (url, token) = conn()?;
+    if svc == "spotify" {
+        crate::spotify::stop();
+    }
     let helper = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("serafin-login{}", std::env::consts::EXE_SUFFIX)))).unwrap_or_else(|| "serafin-login".into());
     let st = Command::new(&helper).arg(svc).env("METROLIST_URL", url).env("METROLIST_TOKEN", token).status().map_err(|e| format!("cannot start login helper {} (build it: cargo build -p serafin-login): {e}", helper.display()))?;
-    if st.success() { Ok(()) } else { Err("sign-in cancelled".into()) }
+    match st.code() {
+        Some(0) => Ok(()),
+        // serafin-login: the Spotify browser callback port is taken (another Spotify client waiting for its own sign-in).
+        Some(3) => Err("Port 8898 is in use. Close other Spotify apps and try again.".into()),
+        _ => Err("sign-in cancelled".into()),
+    }
 }
 
 /// Blocking: drops the stored credentials and the webview profile.
 pub fn sign_out(svc: &str) -> Result<(), String> {
     let (url, token) = conn()?;
+    if svc == "spotify" {
+        crate::spotify::stop();
+    }
     ureq::delete(&format!("{url}/auth/{svc}")).set("X-Metrolist-Token", token).call().map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(data_dir().join("webview").join(svc));
     Ok(())

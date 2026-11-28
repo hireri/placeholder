@@ -167,7 +167,9 @@ class NavidromeSource(override val config: SourceConfig) : MusicSource {
     override suspend fun playlist(id: String): PageDto {
         if (id == STARRED) return PageDto(STARRED_ITEM, tracks = call("getStarred2").obj("starred2").list("song").map(::track))
         val p = call("getPlaylist", "id" to id).obj("playlist")
-        return PageDto(playlistItem(p), description = p.str("comment"), tracks = p.list("entry").map(::track))
+        val owner = p.str("owner")
+        val item = playlistItem(p).copy(author = owner, authorAvatar = owner?.let { url("getAvatar", "username" to it) })
+        return PageDto(item, description = p.str("comment"), tracks = p.list("entry").map(::track))
     }
 
     override suspend fun stream(id: String): StreamDto {

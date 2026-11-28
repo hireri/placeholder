@@ -9,8 +9,10 @@ use crate::data::Track;
 use crate::gfx::*;
 use eframe::egui::{self, pos2, vec2, Align2, Context, Id, Key, Modifiers, Rect};
 use prost::Message;
+use std::collections::HashMap;
 use std::io::Read;
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -22,6 +24,12 @@ const SERVER: &str = "wss://party.aveline.fish/ws";
 
 fn server() -> String {
     std::env::var("SERAFIN_PARTY_SERVER").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| SERVER.into())
+}
+/// In (or joining) a party with the stand-in option on; read by the stream workers.
+static FALLBACK: AtomicBool = AtomicBool::new(false);
+
+pub fn fallback() -> bool {
+    FALLBACK.load(Ordering::Relaxed)
 }
 /// How many can be in a party; the server enforces the same limit.
 pub const MAX: i32 = 8;
@@ -558,9 +566,42 @@ pub struct Party {
     faces: Vec<(String, String, String)>,
     /// The song whose full details (cover, album, artist links) were looked up.
     filled: String,
+    /// Jellyfin songs by their id: the YouTube Music song the room gets instead, or None when nothing is close enough.
+    matches: HashMap<String, Option<Track>>,
+    matching: Option<(String, Receiver<Option<Track>>)>,
+    /// The unmatched song we last warned about.
+    warned: String,
+}
+
+/// How far ahead Jellyfin songs are matched; the shared queue stops at the first one still unmatched.
+const MATCH_AHEAD: usize = 10;
+/// A match further off than this is another edit, which would put guests out of step.
+const MATCH_DRIFT_S: u32 = 5;
+
+/// Whether a song only its owner can stream, so the room needs a stand-in.
+fn private_source(source: &str) -> bool {
+    source.split('-').next() == Some("jellyfin")
+}
+
+fn same_edit(local: Option<u32>, found: Option<u32>) -> bool {
+    local.zip(found).is_none_or(|(a, b)| a.abs_diff(b) <= MATCH_DRIFT_S)
 }
 
 impl Party {
+    /// Not in a party, nor on the way into one.
+    pub fn idle(&self) -> bool {
+        self.room.is_none() && self.pending.is_none() && self.busy.is_none()
+    }
+
+    /// What the room is told for a queued song: itself, its stand-in, or nothing.
+    fn stand_in(&self, t: &Track) -> Option<Track> {
+        if private_source(&t.source) {
+            self.matches.get(&t.id).cloned().flatten()
+        } else {
+            (t.source == "youtube").then(|| t.clone())
+        }
+    }
+
     fn start(&mut self, ctx: &Context, first: Vec<u8>, joining: bool) {
         self.leave();
         let (out_tx, out_rx) = channel();
@@ -647,6 +688,7 @@ impl Party {
 impl App {
     /// Drains the room's messages and keeps the player and the room in step; called every frame.
     pub fn party_tick(&mut self, ctx: &Context) {
+        FALLBACK.store(self.opts.party_fallback && self.party.inbox.is_some(), Ordering::Relaxed);
         let Some(inbox) = &self.party.inbox else { return };
         let mut msgs = vec![];
         loop {
@@ -681,10 +723,11 @@ impl App {
         }
         // ponytail: radio songs would differ per listener and each would announce its own; no endless mode in a party.
         self.pl.endless = false;
+        self.party_match(ctx);
         self.party_follow_tick(ctx);
         self.party_announce();
-        let (track, pos_ms) = match self.pl.song() {
-            Some(s) if self.pl.loaded() && matches!(s.source(), "yt" | "spotify") => (s.vid().to_string(), (self.pl.pos * 1000.) as i64),
+        let (track, pos_ms) = match self.current_shared() {
+            Some(t) if self.pl.loaded() => (t.id, (self.pl.pos * 1000.) as i64),
             _ => Default::default(),
         };
         *self.party.report.lock().unwrap() = Report { track, pos_ms };
@@ -709,16 +752,83 @@ impl App {
     /// The player as the room would see it.
     fn local_sent(&self) -> Sent {
         Sent {
-            vid: self.pl.song().filter(|s| matches!(s.source(), "yt" | "spotify")).map(|s| s.vid().to_string()).unwrap_or_default(),
+            vid: self.current_shared().map(|t| t.id).unwrap_or_default(),
             playing: self.pl.playing,
             seeks: self.pl.seeks,
             queue: self.shared_upcoming().iter().map(|t| t.id.clone()).collect(),
         }
     }
 
-    /// The songs after the current one that can be shared (YouTube Music ones).
+    /// The current song as the room knows it, under its YouTube id.
+    fn current_shared(&self) -> Option<Track> {
+        let s = self.pl.song()?;
+        let mut t = s.track();
+        if private_source(&t.source) {
+            return self.party.stand_in(&t);
+        }
+        if !matches!(s.source(), "yt" | "spotify") || s.vid().is_empty() {
+            return None;
+        }
+        t.id = s.vid().to_string();
+        Some(t)
+    }
+
+    /// The current song is ours alone: a Jellyfin one with no stand-in (yet).
+    pub(crate) fn off_air(&self) -> bool {
+        self.pl.song().is_some_and(|s| private_source(s.source())) && self.current_shared().is_none()
+    }
+
+    /// The songs after the current one that can be shared. It stops at a Jellyfin song with no stand-in, so guests do not
+    /// skip past it and pull everyone on.
     fn shared_upcoming(&self) -> Vec<Track> {
-        (1..=QUEUE_MAX).map_while(|i| self.pl.upcoming(i)).filter(|t| t.source == "youtube").collect()
+        (1..=QUEUE_MAX)
+            .map_while(|i| self.pl.upcoming(i))
+            .map_while(|t| {
+                let s = self.party.stand_in(&t);
+                (s.is_some() || !private_source(&t.source)).then_some(s)
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Looks up YouTube Music stand-ins for the Jellyfin songs playing and coming up, one at a time.
+    fn party_match(&mut self, ctx: &Context) {
+        if let Some((id, rx)) = &self.party.matching {
+            let found = match rx.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                r => r.ok().flatten(),
+            };
+            let id = id.clone();
+            self.party.matches.insert(id, found);
+            self.party.matching = None;
+        }
+        if let Some(t) = self.pl.song().map(|s| s.track()) {
+            if self.party.matches.get(&t.id).is_some_and(Option::is_none) && self.party.warned != t.id {
+                crate::toast::info("Guests can't hear this song: no match on YouTube Music");
+                self.party.warned = t.id;
+            }
+        }
+        let next = (0..=MATCH_AHEAD)
+            .map_while(|i| self.pl.upcoming(i))
+            .find(|t| private_source(&t.source) && !self.party.matches.contains_key(&t.id));
+        let Some(t) = next else { return };
+        let (tx, rx) = channel();
+        self.party.matching = Some((t.id.clone(), rx));
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            // No id: the daemon keys its cache on one as a Spotify id. Nothing about the server leaves this machine.
+            let path = format!(
+                "/youtube/match?title={}&artist={}&duration={}&album={}",
+                crate::backend::enc(&t.title),
+                crate::backend::enc(&t.artists.join(", ")),
+                t.duration_sec.map_or(String::new(), |d| d.to_string()),
+                crate::backend::enc(t.album.as_deref().unwrap_or("")),
+            );
+            // ponytail: a failed lookup counts as no match until the next party.
+            let found = crate::backend::get::<crate::data::Match>(&path).ok().and_then(|m| m.track).filter(|f| same_edit(t.duration_sec, f.duration_sec));
+            let _ = tx.send(found);
+            ctx.request_repaint();
+        });
     }
 
     fn party_msg(&mut self, ctx: &Context, kind: &str, b: &[u8]) {
@@ -885,10 +995,12 @@ impl App {
         match a.action.as_str() {
             "queue_add" | "queue_remove" | "queue_clear" | "sync_queue" => self.party_set_queue(&a.queue),
             // Everyone's player moves on at the end of a song, so the same change arrives from several; the first one counts.
-            "change_track" if a.track_info.as_ref().map(|t| t.id.as_str()) == self.pl.song().map(|s| s.vid()) => {}
+            "change_track" if a.track_info.as_ref().map(|t| &t.id) == self.current_shared().map(|t| t.id).as_ref() => {}
             "change_track" => self.party_follow(ctx, a.track_info, a.queue, true, 0, at),
+            // They are acting on a song we have moved on from, to one they cannot hear.
+            "play" | "pause" | "seek" if self.off_air() => {}
             "play" | "pause" | "seek" => {
-                let cur = self.pl.song().map(|s| s.vid().to_string()).unwrap_or_default();
+                let cur = self.current_shared().map(|t| t.id).unwrap_or_default();
                 let playing = match a.action.as_str() {
                     "play" => true,
                     "pause" => false,
@@ -913,7 +1025,14 @@ impl App {
         }
         let ids: Vec<String> = queue.iter().map(|t| t.id.clone()).collect();
         if self.shared_upcoming().iter().map(|t| &t.id).ne(ids.iter()) {
-            let tracks: Vec<Track> = queue.iter().map(pb::to_track).collect();
+            // Our own copies stay in place of the room's, and what the room never saw stays after them.
+            let local: Vec<Track> = (1..).map_while(|i| self.pl.upcoming(i)).collect();
+            let cut = local.iter().position(|t| private_source(&t.source) && self.party.stand_in(t).is_none()).unwrap_or(local.len());
+            let mut tracks: Vec<Track> = queue
+                .iter()
+                .map(|q| local[..cut].iter().find(|t| self.party.stand_in(t).is_some_and(|s| s.id == q.id)).cloned().unwrap_or_else(|| pb::to_track(q)))
+                .collect();
+            tracks.extend_from_slice(&local[cut..]);
             self.pl.set_upcoming(&tracks);
         }
         if let Some(s) = &mut self.party.sent {
@@ -924,7 +1043,7 @@ impl App {
     /// Loads the room's song (paused, at its position) unless it is already the current one, then aims for the room's playback.
     fn party_follow(&mut self, ctx: &Context, track: Option<pb::TrackInfo>, queue: Vec<pb::TrackInfo>, playing: bool, pos: i64, at: i64) {
         let Some(t) = track.filter(|t| !t.id.is_empty()) else { return };
-        if self.pl.song().map(|s| s.vid()) != Some(t.id.as_str()) {
+        if self.current_shared().is_none_or(|c| c.id != t.id) {
             let list: Vec<Track> = std::iter::once(&t).chain(&queue).map(pb::to_track).collect();
             self.pl.play_tracks(ctx, &list, 0, false);
             self.pl.playing = false;
@@ -936,7 +1055,11 @@ impl App {
     }
 
     fn party_follow_tick(&mut self, ctx: &Context) {
-        let Some(vid) = self.pl.song().filter(|s| matches!(s.source(), "yt" | "spotify")).map(|s| s.vid().to_string()) else { return };
+        let Some(vid) = self.current_shared().map(|t| t.id) else { return };
+        // Our own copy of the room's song keeps its own details.
+        if self.pl.song().is_some_and(|s| private_source(s.source())) {
+            return self.party_apply(ctx, vid);
+        }
         // The room only carries title, artist and a thumbnail; the rest comes from looking the song up, as a normal play has it.
         if self.party.filled != vid {
             match &*self.data.song_info(ctx, &vid).lock() {
@@ -984,11 +1107,16 @@ impl App {
 
     /// Tells the room what changed in our player: a new song (with the queue), play or pause, a seek, or the queue.
     fn party_announce(&mut self) {
-        let Some(song) = self.pl.song() else { return };
-        // A Spotify song has no YouTube id until it is matched; a server's song cannot be streamed by the room.
-        if song.vid().is_empty() || !matches!(song.source(), "yt" | "spotify") {
+        if self.off_air() {
+            // Forget what was sent, so coming back to a shared song announces it again.
+            self.party.target = None;
+            if let Some(s) = &mut self.party.sent {
+                s.vid.clear();
+            }
             return;
         }
+        let Some(song) = self.current_shared() else { return };
+        let late = self.pl.song().is_some_and(|s| private_source(s.source())) && self.pl.pos > 1.;
         let now = self.local_sent();
         let Some(last) = self.party.sent.clone() else { return self.party.sent = Some(now) };
         if now == last {
@@ -997,12 +1125,16 @@ impl App {
         let (vid, pos) = (now.vid.clone(), self.pl.pos);
         let party = &self.party;
         if now.vid != last.vid {
-            let info = pb::track(&song.track(), &vid);
+            let info = pb::track(&song, &vid);
             let queue = self.shared_upcoming().iter().map(|t| pb::track(t, &t.id)).collect();
             party.action("change_track", &vid, 0., Some(info), queue);
             // The server starts a new song playing.
             if !now.playing {
                 party.action("pause", &vid, pos, None, vec![]);
+            }
+            // A stand-in can arrive after our copy started.
+            if late {
+                party.action("seek", &vid, pos, None, vec![]);
             }
         } else {
             if now.playing != last.playing {
@@ -1082,7 +1214,8 @@ impl App {
             ui.painter().rect_filled(rect, rad(16.), if open { t.s3 } else { t.s2 });
         }
         if self.party.room.is_none() {
-            icon(ui, icon!("party"), rect.center(), 16., if open { t.tx } else { t.tm });
+            let on = self.sp.group.is_some();
+            icon(ui, if on { icon!("partyf") } else { icon!("party") }, rect.center(), 16., if open || on { t.tx } else { t.tm });
         } else {
             let mut x = rect.center().x - (stack + chip) / 2. + D / 2.;
             let mut last = x;
@@ -1118,8 +1251,6 @@ impl App {
         if clicked {
             if open {
                 self.party_open = None;
-            } else if self.sp.group.is_some() {
-                crate::toast::info("Leave your SyncPlay group to start a listening party");
             } else {
                 (self.palette, self.ctx_menu, self.lib_menu, self.vol_open, self.me_menu) = (None, None, false, false, None);
                 self.party_open = Some(ui.input(|i| i.time));
@@ -1165,7 +1296,7 @@ impl App {
             let mut y = rect.min.y + pad;
             let live = self.party.room.as_ref().map(|r| r.members.iter().filter(|m| m.connected).count());
             icon(ui, icon!("partyf"), pos2(l + 9., y + 11.), 18., t.tx);
-            trunc(&p, pos2(l + 26., y + 11.), w - 26. - 90., "Listening party", font_w(15., Weight::Bold), t.tx);
+            trunc(&p, pos2(l + 26., y + 11.), w - 26. - 90., if self.sp.group.is_some() { "SyncPlay" } else { "Listening party" }, font_w(15., Weight::Bold), t.tx);
             // Head count at the right of the title.
             if self.party.reconnecting && live.is_some() {
                 p.text(pos2(l + w, y + 11.), Align2::RIGHT_CENTER, "Reconnecting…", font_w(12., Weight::Semi), t.tm);
@@ -1193,6 +1324,10 @@ impl App {
                     }
                     y += 56. + 10.;
 
+                    if self.off_air() && self.pl.song().is_some_and(|s| self.party.matches.contains_key(&s.track().id)) {
+                        trunc(&p, pos2(l, y + 8.), w, "Guests can't hear this song", font(12.5), t.tm);
+                        y += 24.;
+                    }
                     label(&p, &t, pos2(l, y + 6.), w, "Listeners");
                     y += 14.;
                     for m in &room.members {
@@ -1311,6 +1446,22 @@ impl App {
                     }
                     y += 36.;
                 }
+                None if self.sp.group.is_some() => {
+                    let Some(g) = &self.sp.group else { return };
+                    let status = if g.state.is_empty() { g.name.clone() } else { format!("{} · {}", g.name, g.state) };
+                    trunc(&p, pos2(l, y + 8.), w, &status, font(12.5), t.tm);
+                    y += 24.;
+                    for name in &g.participants {
+                        self.avatar(ui, None, pos2(l + 16., y + 22.), 16., Some(name));
+                        trunc(&p, pos2(l + 42., y + 22.), w - 42., name, font_w(13., Weight::Semi), t.tx);
+                        y += 44.;
+                    }
+                    y += 10.;
+                    if btn(ui, &t, "sp-leave", Rect::from_min_size(pos2(l, y), vec2(w, 36.)), "Leave group", false) {
+                        act = Some(Box::new(|a: &mut App| a.sp.leave()));
+                    }
+                    y += 36.;
+                }
                 // Asked to join: the host's card, with where we stand.
                 None if self.party.pending.is_some() => {
                     let (host, pos) = self.party.pending.clone().unwrap_or_default();
@@ -1368,8 +1519,10 @@ impl App {
                 // Not in a party: start one or join with a code. While one is being set up, the buttons say so.
                 None => {
                     let busy = self.party.busy;
+                    // One session at a time: nothing new starts while a server group is being joined.
+                    let blocked = busy.is_some() || self.sp.busy;
                     let start = Rect::from_min_size(pos2(l, y), vec2(w, 36.));
-                    if btn(ui, &t, "start", start, if busy == Some(false) { "Starting…" } else { "Start a party" }, busy.is_none()) && busy.is_none() {
+                    if btn(ui, &t, "start", start, if busy == Some(false) { "Starting…" } else { "Start a party" }, !blocked) && !blocked {
                         let (n, c, av) = (name.clone(), ctx.clone(), my_pic.clone());
                         act = Some(Box::new(move |a: &mut App| a.party.create(&c, &n, &av)));
                     }
@@ -1386,11 +1539,45 @@ impl App {
                     let te = ui.put(edit, egui::TextEdit::singleline(&mut self.party_code).id(fid).frame(egui::Frame::NONE).font(font(13.)).align(Align2::LEFT_CENTER)
                         .hint_text(egui::RichText::new("Enter a party code").color(t.tm)).desired_width(edit.width()));
                     let enter = te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    if (btn(ui, &t, "join", Rect::from_min_size(pos2(field.max.x + 6., y), vec2(jw, 36.)), join_label, false) || enter) && !self.party_code.trim().is_empty() && busy.is_none() {
+                    if (btn(ui, &t, "join", Rect::from_min_size(pos2(field.max.x + 6., y), vec2(jw, 36.)), join_label, false) || enter) && !self.party_code.trim().is_empty() && !blocked {
                         let (n, code, c, av) = (name.clone(), self.party_code.clone(), ctx.clone(), my_pic.clone());
                         act = Some(Box::new(move |a: &mut App| a.party.join(&c, &code, &n, &av)));
                     }
                     y += 36.;
+                    if self.party.idle() && !self.sources.with_cap("syncplay").is_empty() {
+                        y += 12.;
+                        label(&p, &t, pos2(l, y + 6.), w, "On your Jellyfin server");
+                        y += 18.;
+                        let note = match &self.sp.groups {
+                            None => Some("Looking for groups…".to_string()),
+                            Some(Err(e)) => Some(e.clone()),
+                            Some(Ok(g)) if g.is_empty() => Some("No groups yet".to_string()),
+                            Some(Ok(_)) => None,
+                        };
+                        if let Some(note) = note {
+                            let g = p.layout(note, font(12.5), t.tm, w);
+                            let gh = g.size().y;
+                            p.galley(pos2(l, y), g, t.tm);
+                            y += gh + 8.;
+                        }
+                        // ponytail: the first five groups; scroll if a server ever has more.
+                        for group in self.sp.groups.iter().flatten().flatten().take(5) {
+                            let cy = y + 20.;
+                            let bw = text_w(&p, "Join", font_w(13., Weight::Semi)) + 28.;
+                            trunc(&p, pos2(l, cy - 8.), w - bw - 10., &group.name, font_w(13., Weight::Semi), t.tx);
+                            trunc(&p, pos2(l, cy + 9.), w - bw - 10., &group.participants.join(", "), font(11.5), t.tm);
+                            if btn(ui, &t, &format!("sp-{}", group.id), Rect::from_min_size(pos2(l + w - bw, cy - 14.), vec2(bw, 28.)), "Join", false) && !blocked {
+                                let (c, group) = (ctx.clone(), group.clone());
+                                act = Some(Box::new(move |a: &mut App| a.sp.join(&c, &group)));
+                            }
+                            y += 44.;
+                        }
+                        if btn(ui, &t, "sp-start", Rect::from_min_size(pos2(l, y), vec2(w, 36.)), if self.sp.busy { "Connecting…" } else { "Start a server group" }, false) && !blocked {
+                            let (c, group) = (ctx.clone(), format!("{name}'s group"));
+                            act = Some(Box::new(move |a: &mut App| a.sp.create(&c, group)));
+                        }
+                        y += 36.;
+                    }
                 }
             }
             let nh = y + pad - rect.min.y;
@@ -1437,6 +1624,18 @@ mod tests {
             }
         }
         panic!("no {kind} within 15s");
+    }
+
+    #[test]
+    fn only_jellyfin_needs_a_stand_in_of_the_same_length() {
+        assert!(private_source("jellyfin") && private_source("jellyfin-2") && !private_source("youtube"));
+        assert!(same_edit(Some(200), Some(205)) && same_edit(None, Some(1)));
+        assert!(!same_edit(Some(200), Some(206)));
+        let mut p = Party::default();
+        let t = Track { id: "jellyfin:1".into(), source: "jellyfin".into(), ..Default::default() };
+        assert!(p.stand_in(&t).is_none(), "a server song is never sent as it is");
+        p.matches.insert(t.id.clone(), Some(Track { id: "abc".into(), source: "youtube".into(), ..Default::default() }));
+        assert_eq!(p.stand_in(&t).map(|s| s.id), Some("abc".into()));
     }
 
     #[test]

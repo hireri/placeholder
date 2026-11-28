@@ -216,7 +216,9 @@ class SoundCloudSource(override val config: SourceConfig) : MusicSource {
             get("/tracks", "ids" to ids.joinToString(",")).list().forEach { o -> idOf(o)?.let { full[it] = o } }
         }
         val tracks = raw.mapNotNull { item(full[idOf(it)] ?: it) }.mapNotNull(::track)
-        return PageDto(item = item(p) ?: error("bad playlist"), description = p.str("description"), tracks = tracks)
+        val user = p.obj("user")
+        val item = (item(p) ?: error("bad playlist")).copy(author = user?.str("username"), authorAvatar = user?.str("avatar_url")?.replace("-large", "-t300x300"))
+        return PageDto(item = item, description = p.str("description"), tracks = tracks)
     }
 
     private suspend fun me(): String = meId ?: (get("/me").obj()?.let(::idOf) ?: error("SoundCloud returned no user")).also { meId = it }

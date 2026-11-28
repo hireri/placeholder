@@ -11,13 +11,20 @@ import java.nio.file.attribute.PosixFilePermissions
 class CredentialStore(private val file: File = File(DesktopPaths.dataDir, "credentials.json")) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-    /** A file that exists but can't be read is set aside, never overwritten, so a later save can't wipe the logins in it. */
+    /**
+     * A file whose contents can't be parsed is set aside, never overwritten, so a later save can't wipe the logins in it.
+     * Anything else (a read error, a class that failed to load) is thrown: the file is fine, and treating it as empty
+     * would sign the user out of everything.
+     */
     @Synchronized
     fun load(): StoredCreds {
         if (!file.exists()) return StoredCreds()
-        return runCatching { json.decodeFromString<StoredCreds>(file.readText()) }.getOrElse { e ->
+        val text = file.readText()
+        return try {
+            json.decodeFromString<StoredCreds>(text)
+        } catch (e: IllegalArgumentException) { // SerializationException is one
             val bad = File(file.parentFile, "${file.name}.bad-${System.currentTimeMillis()}")
-            System.err.println("credentials: ${file.name} is unreadable (${e.message}); kept as ${bad.name}")
+            System.err.println("credentials: ${file.name} is unreadable (${e.message?.substringBefore("JSON input")}); kept as ${bad.name}")
             file.renameTo(bad)
             StoredCreds()
         }

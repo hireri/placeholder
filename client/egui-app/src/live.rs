@@ -535,9 +535,9 @@ impl App {
             }
             None => { trunc(ui.painter(), pos2(x, y + 38.), w, Self::greeting(), f, t.tx); }
         }
-        let names = self.sources.enabled_names();
-        let from = if names.is_empty() { "YouTube Music".to_string() } else { names.join(", ") };
-        trunc(ui.painter(), pos2(x, y + 70.), (card.width() - 44.).max(0.), &format!("From {from}"), font(13.), t.tm);
+        let names = self.sources.names_for("home");
+        let from = if names.is_empty() { String::new() } else { format!("From {}", names.join(", ")) };
+        trunc(ui.painter(), pos2(x, y + 70.), (card.width() - 44.).max(0.), &from, font(13.), t.tm);
         let labels: Vec<&str> = CHIPS.iter().map(|c| c.0).collect();
         self.home_chip = self.chips(ui, x, y + 100., &labels, self.home_chip);
         y + self.home_head_h()
@@ -552,6 +552,18 @@ impl App {
     pub fn source_mark_if(&self, ui: &egui::Ui, src: Option<&str>, force: bool, x: f32, cy: f32, col: Color32) -> f32 {
         let Some(src) = src.filter(|_| force || self.sources.multi()) else { return 0. };
         source_mark_at(ui, &self.t, src, &self.sources.name(src), x, cy, col)
+    }
+
+    /// The blocking fetch behind Home.
+    pub fn home_loader(&self) -> impl FnOnce() -> Result<Vec<Section>, String> + Send + 'static {
+        let stamp = self.data.clone();
+        let path = if self.opts.home_layout == 1 { "/mix/home?layout=separate" } else { "/mix/home?layout=mixed" };
+        move || backend::get::<Vec<Section>>(path).map(|mut v| {
+            crate::data::clean_sections(&mut v);
+            crate::data::clean_home(&mut v);
+            stamp.home_at.store(crate::data::now_secs(), std::sync::atomic::Ordering::Relaxed);
+            v
+        })
     }
 
     pub fn home_page(&mut self, ui: &mut egui::Ui, card: Rect, top: f32) {
@@ -573,19 +585,12 @@ impl App {
                 _ => None,
             },
         };
-        // Home refetches when a source changes, and whenever it is older than ten minutes when the page is drawn.
+        // Home refetches when a source changes (see `library`), and whenever it is older than ten minutes when the page is drawn.
         if d.home_age() > 600 {
             d.home.reset();
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(60));
-        let stamp = d.clone();
-        let path = if self.opts.home_layout == 1 { "/mix/home?layout=separate" } else { "/mix/home?layout=mixed" };
-        d.home.ensure(ui.ctx(), move || backend::get::<Vec<Section>>(path).map(|mut v| {
-            crate::data::clean_sections(&mut v);
-            crate::data::clean_home(&mut v);
-            stamp.home_at.store(crate::data::now_secs(), std::sync::atomic::Ordering::Relaxed);
-            v
-        }));
+        d.home.ensure(ui.ctx(), self.home_loader());
         let g = d.home.lock();
         match &*g {
             State::Ready(s) => self.home_feed(ui, card, top, s, user.as_ref()),
@@ -667,7 +672,7 @@ impl App {
                 let sub = if album {
                     [year, Some(summary(&p.tracks))].into_iter().flatten().collect::<Vec<_>>().join(" · ")
                 } else {
-                    [p.item.subtitle.clone().filter(|_| kind != "artists" || self.opts.show_subs), (!p.tracks.is_empty()).then(|| summary(&p.tracks))].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+                    [p.item.subtitle.clone().filter(|_| p.item.author.is_none() && (kind != "artists" || self.opts.show_subs)), (!p.tracks.is_empty()).then(|| summary(&p.tracks))].into_iter().flatten().collect::<Vec<_>>().join(" · ")
                 };
                 let first = p.tracks.first();
                 // The album's own artist (its subtitle before the year), not the first track's, which may be a featured guest.
@@ -678,11 +683,13 @@ impl App {
                 }).filter(|a| !a.is_empty());
                 let by = match album_artist {
                     Some(a) if album => Some((a, p.item.artist_id.as_deref().or(first.and_then(|t| t.artist_id.as_deref())))),
+                    _ if p.item.author.is_some() => p.item.author.as_deref().map(|a| (a, p.item.artist_id.as_deref())),
                     _ => first.filter(|_| album).map(|t| t.artists.first().map_or((crate::data::UNKNOWN_ARTIST, None), |n| (n.as_str(), t.artist_id.as_deref()))),
                 };
                 // Only YouTube albums and playlists can be saved; the saved state is read off the sidebar's library list.
                 let save = match kind {
-                    "albums" | "playlists" => {
+                    // Saving writes to YouTube Music, which has no Spotify ids.
+                    "albums" | "playlists" if !id.starts_with("spotify:") => {
                         let lib = if kind == "albums" { 2 } else { 1 };
                         Some((kind, id, self.lib_items.iter().any(|i| i.kind == lib && i.id == id)))
                     }
@@ -692,9 +699,12 @@ impl App {
                 // Rows of a playlist the user can edit get "Remove from this playlist" in their menu.
                 self.pl_ctx = (kind == "playlists" && p.item.editable).then(|| id.to_string());
                 let off = if p.tracks.is_empty() { self.sections(ui, card, &p.sections) } else { self.tracks_table(ui, card, &p.tracks, album.then(|| (by.and_then(|b| b.1).unwrap_or(""), p.sections.as_slice(), note.as_str()))) };
-                // While a Spotify import resolves, only its matched rows can play.
+                // While a Spotify import resolves, only its matched rows can play (they are YouTube songs by then).
                 let playable: Cow<'_, [Track]> = if kind == "spotify" {
                     Cow::Owned(p.tracks.iter().filter(|t| !t.resolving && !t.unavailable).cloned().collect())
+                } else if id.starts_with("spotify:") {
+                    // The whole list queues; songs are matched as they come up.
+                    Cow::Owned(p.tracks.iter().filter(|t| !t.unavailable).cloned().collect())
                 } else {
                     Cow::Borrowed(&p.tracks)
                 };
@@ -703,7 +713,7 @@ impl App {
             Err(Some(e)) => self.note(ui, card, card.min.y + 40., &e),
             Err(None) => {
                 let it = self.peek.clone().filter(|i| i.id == id);
-                self.detail_skeleton(ui, card, kind, it.as_ref().map(|i| i.title.as_str()).unwrap_or(""), it.as_ref().and_then(|i| i.thumbnail.as_deref()), it.as_ref().and_then(|i| i.subtitle.as_deref()).unwrap_or(""));
+                self.detail_skeleton(ui, card, kind, it.as_ref().map(|i| i.title.as_str()).unwrap_or(""), it.as_ref().and_then(|i| i.thumbnail.as_deref()).filter(|_| !(kind == "artists" && id.starts_with("UC"))), it.as_ref().and_then(|i| i.subtitle.as_deref()).unwrap_or(""));
             }
         }
     }
@@ -735,8 +745,13 @@ impl App {
             let (_, hr) = ui.allocate_space(vec2(full, 90.));
             let p = ui.painter().clone();
             trunc(&p, pos2(l, hr.min.y + 38.), full - 44., "Search", font_w(26., Weight::Bold), t.tx);
-            let sub = if q.is_empty() { "Press Ctrl K to search" } else { "Songs, videos, albums and artists on YouTube Music" };
-            trunc(&p, pos2(l, hr.min.y + 66.), full - 44., sub, font(13.), t.tm);
+            let names = self.sources.names_for("search");
+            let sub = match (q.is_empty(), names.is_empty()) {
+                (true, _) => "Press Ctrl K to search".to_string(),
+                (false, true) => String::new(),
+                (false, false) => format!("Results from {}", names.join(", ")),
+            };
+            trunc(&p, pos2(l, hr.min.y + 66.), full - 44., &sub, font(13.), t.tm);
             if q.is_empty() {
                 return;
             }
@@ -934,6 +949,9 @@ impl App {
     /// Returns the height it used.
     pub fn accounts_panel(&mut self, ui: &mut egui::Ui, card: Rect, top: f32) -> f32 {
         let (t, d) = (self.t, self.data.clone());
+        if d.account_changed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.sources.refetch();
+        }
         d.status.ensure(ui.ctx(), || backend::get("/auth/status"));
         let g = d.status.lock();
         let st = match &*g {
@@ -1242,11 +1260,12 @@ impl App {
     }
 }
 
-/// The logo for a source id (`yt`/`youtube`, or a configured source's id whose prefix is its type); none for Spotify imports.
+/// The logo for a source id (`yt`/`youtube`, or a configured source's id whose prefix is its type).
 pub fn source_icon(src: &str) -> Option<&'static str> {
     match src.split('-').next()? {
         "yt" | "youtube" => Some(icon!("src-youtube")),
-        "spotify" | "" => None,
+        "" => None,
+        "spotify" => Some(icon!("mspot")),
         "jellyfin" => Some(icon!("src-jellyfin")),
         "soundcloud" => Some(icon!("src-soundcloud")),
         "bandcamp" => Some(icon!("src-bandcamp")),

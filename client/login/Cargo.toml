@@ -8,6 +8,16 @@ wry = "0.57"
 tao = "0.37"
 serde_json.workspace = true
 ureq.workspace = true
+serde.workspace = true
+# Spotify sign-in and tokens, without a webview.
+librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
+librespot-playback = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
+librespot-oauth = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
+librespot-protocol = { version = "0.8", default-features = false }
+librespot-metadata = { version = "0.8", default-features = false }
+protobuf = "3"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "macros", "sync"] }
 
 [target.'cfg(unix)'.dependencies]
 gtk = "0.18"

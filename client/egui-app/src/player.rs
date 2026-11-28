@@ -103,6 +103,15 @@ impl Song {
         &self.vid
     }
 
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Length in seconds; 0 until known.
+    pub fn secs(&self) -> u32 {
+        self.dur
+    }
+
     /// Back to the track it came from, for menus and the song page.
     pub fn track(&self) -> Track {
         Track {
@@ -178,7 +187,7 @@ pub struct Player {
     /// Radio lookup in flight for a seed song, and the last seed asked about (so an empty or failed one is not retried in a loop).
     more: Option<Receiver<Result<Vec<Track>, String>>>,
     seeded: String,
-    /// The current song's like as the star shows it; not read back from YouTube, so it starts unfilled.
+    /// The current song's like as the star shows it; `App` refreshes it from the loaded likes every frame.
     pub liked: bool,
     /// Like request in flight: the value it asked for, and the daemon's answer.
     like: Option<(bool, Track, Receiver<Result<(), String>>)>,
@@ -220,16 +229,38 @@ fn shuffle_in_place(songs: &mut [Song]) {
     }
 }
 
-/// Blocking: the stream for a song. A Spotify song has no YouTube id yet, so the first search hit stands in for it.
-fn stream(vid: &str, title: &str, artist: &str) -> Result<(String, audio::StreamInfo), String> {
-    let vid = if vid.is_empty() {
-        let hits: Vec<Track> = backend::get(&format!("/youtube/search?q={}", backend::enc(&format!("{title} {artist}"))))?;
-        hits.into_iter().next().map(|t| t.id).ok_or("no YouTube match")?
-    } else {
-        vid.to_string()
-    };
-    let info = backend::get(&format!("/music/stream/{vid}"))?;
+/// Blocking: the stream for a song. A Spotify song has no YouTube id until the daemon matches it.
+fn stream(vid: &str, spotify: &Track) -> Result<(String, audio::StreamInfo), String> {
+    if spotify.source == "spotify" && crate::spotify::direct() {
+        // The match is still wanted for lyrics and likes, but a song without one plays all the same.
+        let vid = if vid.is_empty() { crate::data::youtube_match(spotify).unwrap_or_default() } else { vid.to_string() };
+        return Ok((vid, audio::StreamInfo::spotify(&spotify.id, spotify.duration_sec)));
+    }
+    let vid = if vid.is_empty() { crate::data::youtube_match(spotify)? } else { vid.to_string() };
+    let info = backend::get(&format!("/music/stream/{vid}")).or_else(|e| match spotify.source.as_str() {
+        "youtube" if crate::party::fallback() => own_copy(spotify).ok_or(e),
+        _ => Err(e),
+    })?;
     Ok((vid, info))
+}
+
+/// The same song from one of the user's other sources. The YouTube id stays, so the room still knows it.
+fn own_copy(t: &Track) -> Option<audio::StreamInfo> {
+    let path = format!(
+        "/mix/match?title={}&artist={}&duration={}&spotify={}",
+        backend::enc(&t.title),
+        backend::enc(&t.artists.join(", ")),
+        t.duration_sec.map_or(String::new(), |d| d.to_string()),
+        crate::spotify::direct(),
+    );
+    let m = backend::get::<Vec<Track>>(&path).ok()?.into_iter().next()?;
+    let info = if m.source == "spotify" {
+        audio::StreamInfo::spotify(&m.id, m.duration_sec)
+    } else {
+        backend::get(&format!("/music/stream/{}", backend::enc(&m.id))).ok()?
+    };
+    eprintln!("party: “{}” is unavailable on YouTube, playing it from {}", t.title, m.source);
+    Some(info)
 }
 
 impl Player {
@@ -257,6 +288,10 @@ impl Player {
 
     /// Why `s` cannot play (its source is off or unreachable), if so.
     pub fn off_of(&self, s: &Song) -> Option<&str> {
+        // A party can still play a YouTube song from another source.
+        if s.source == "youtube" && crate::party::fallback() {
+            return None;
+        }
         let id = if s.source == "youtube" { "yt" } else { s.source.as_str() };
         self.off.iter().find(|(o, _)| o == id).map(|(_, r)| r.as_str())
     }
@@ -277,6 +312,41 @@ impl Player {
         }
         s.artist_id = s.artist_id.take().or_else(|| t.artist_id.clone());
         s.album_id = s.album_id.take().or_else(|| t.album_id.clone());
+    }
+
+    /// The current song, with up to `before` songs behind it and `after` ahead.
+    pub fn window(&self, before: usize, after: usize) -> (&[Song], Option<&Song>, &[Song]) {
+        let n = self.queue.len();
+        let at = self.cur.min(n);
+        (&self.queue[at.saturating_sub(before)..at], self.queue.get(self.cur), &self.queue[(self.cur + 1).min(n)..(self.cur + 1 + after).min(n)])
+    }
+
+    /// Puts the first `window` upcoming songs in the order of `ids`, dropping those left out; songs beyond it stay.
+    pub fn reorder_upcoming(&mut self, ids: &[String], window: usize) {
+        let from = (self.cur + 1).min(self.queue.len());
+        let to = (from + window).min(self.queue.len());
+        let mut old: Vec<Song> = self.queue.drain(from..to).collect();
+        let kept: Vec<Song> = ids.iter().filter_map(|id| old.iter().position(|s| &s.id == id).map(|i| old.remove(i))).collect();
+        self.queue.splice(from..from, kept);
+        self.qgen += 1;
+    }
+
+    /// Queue index of the first upcoming song with this id.
+    pub fn upcoming_index(&self, id: &str) -> Option<usize> {
+        (self.cur + 1..self.queue.len()).find(|&i| self.queue[i].id == id)
+    }
+
+    /// `play_tracks` from `at` seconds into the song, optionally left paused.
+    pub fn play_from(&mut self, ctx: &egui::Context, tracks: &[Track], start: usize, at: f32, paused: bool) {
+        if start >= tracks.len() {
+            return;
+        }
+        self.queue = tracks.iter().map(song_of).collect();
+        self.play_at(ctx, start, at);
+        self.qjump = None;
+        if paused && self.playing {
+            self.toggle(ctx);
+        }
     }
 
     /// The `n`th song after the current one.
@@ -409,7 +479,7 @@ impl Player {
 
     fn resolve(&mut self, ctx: &egui::Context, at: f32) {
         let Some(s) = self.song() else { return };
-        let (idx, id, vid, title, artist) = (self.cur, s.id.clone(), s.vid.clone(), s.title.clone(), s.artist.clone());
+        let (idx, id, vid, track) = (self.cur, s.id.clone(), s.vid.clone(), s.track());
         let ahead = match &self.ahead {
             Some((a, _)) if *a == id => self.ahead.take().map(|(_, rx)| rx),
             _ => None,
@@ -425,7 +495,7 @@ impl Player {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             // A failed look-ahead gets a fresh try.
-            let r = ahead.and_then(|rx| rx.recv().ok()).filter(Result::is_ok).unwrap_or_else(|| stream(&vid, &title, &artist));
+            let r = ahead.and_then(|rx| rx.recv().ok()).filter(Result::is_ok).unwrap_or_else(|| stream(&vid, &track));
             let _ = tx.send((idx, req, r));
             ctx.request_repaint();
         });
@@ -438,10 +508,10 @@ impl Player {
         if self.ahead.as_ref().is_some_and(|(id, _)| *id == s.id) {
             return;
         }
-        let (id, vid, title, artist) = (s.id.clone(), s.vid.clone(), s.title.clone(), s.artist.clone());
+        let (id, vid, track) = (s.id.clone(), s.vid.clone(), s.track());
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let _ = tx.send(stream(&vid, &title, &artist));
+            let _ = tx.send(stream(&vid, &track));
         });
         self.ahead = Some((id, rx));
     }
@@ -523,6 +593,16 @@ impl Player {
         }
     }
 
+    /// Reloads what is playing after the way streams are fetched changed.
+    pub fn restream(&mut self, ctx: &egui::Context) {
+        self.ahead = None;
+        if self.loaded || self.pending.is_some() {
+            let was_playing = self.playing;
+            self.resolve(ctx, self.pos);
+            self.playing = was_playing;
+        }
+    }
+
     /// Switches to a new engine (another output device) and carries on from where the old one was.
     pub fn swap_engine(&mut self, ctx: &egui::Context, engine: audio::Engine) {
         let was_playing = self.playing;
@@ -601,22 +681,21 @@ impl Player {
         self.more = Some(rx);
     }
 
-    /// Likes or unlikes the current song on YouTube. The star flips at once; `tick` reverts it if the daemon refuses.
+    /// The current song as its like is stored: under the playable id, so a Spotify match counts as a YouTube song.
+    pub fn like_track(&self) -> Option<Track> {
+        let s = self.song().filter(|s| !s.vid.is_empty())?;
+        let mut t = s.track();
+        t.id = s.vid.clone();
+        if t.source == "spotify" {
+            t.source = "youtube".into();
+        }
+        Some(t)
+    }
+
+    /// Likes or unlikes the current song on its source. The star flips at once; `tick` reverts it if the daemon refuses.
     pub fn set_like(&mut self, ctx: &egui::Context) {
-        let Some(s) = self.song().filter(|s| !s.vid.is_empty()) else { return };
-        let vid = s.vid.clone();
-        let track = Track {
-            id: vid.clone(),
-            title: s.title.clone(),
-            artists: s.artist.split(", ").filter(|a| !a.is_empty()).map(String::from).collect(),
-            album: Some(s.album.clone()).filter(|a| !a.is_empty()),
-            duration_sec: Some(s.dur),
-            thumbnail: s.thumbnail.clone(),
-            source: s.source.clone(),
-            artist_id: s.artist_id.clone(),
-            album_id: s.album_id.clone(),
-            ..Default::default()
-        };
+        let Some(track) = self.like_track() else { return };
+        let vid = track.id.clone();
         let on = !self.liked;
         self.liked = on;
         crate::toast::info(if on { "Added to liked songs" } else { "Removed from liked songs" });
@@ -955,7 +1034,9 @@ impl App {
         let floats = wide.is_some() || framed;
         let shrink = ui.ctx().calm_bool_ease(ui.scope_id().with("pl-shrink"), framed && !self.pl.playing, if reduced_motion() { 0. } else { 0.35 }, ease_out_soft);
         // A video's thumbnail is wide: with videos on, the video itself plays in the floating rect (paced by the audio playhead).
-        let want = (self.video_on && video.is_some() && open > 0.5).then(|| self.pl.song().map(|s| s.vid.clone())).flatten().filter(|v| !v.is_empty());
+        // Videos come from YouTube: with it off the daemon refuses them, so none are asked for.
+        let videos = self.sources.can("yt", "video");
+        let want = (videos && self.video_on && video.is_some() && open > 0.5).then(|| self.pl.song().map(|s| s.vid.clone())).flatten().filter(|v| !v.is_empty());
         #[cfg(feature = "video")]
         let frame = self.video_frame(ui.ctx(), want.as_deref(), self.video_h);
         #[cfg(not(feature = "video"))]
@@ -1097,7 +1178,7 @@ impl App {
             }
         }
         // Video / thumbnail toggle and quality in the floating rect's corner; they fade in while the pointer is over it.
-        if video.is_some() && va < 0.5 && cfg!(feature = "video") {
+        if videos && video.is_some() && va < 0.5 && cfg!(feature = "video") {
             let over = ui.rect_contains_pointer(cr);
             let a = ui.ctx().calm_bool_ease(ui.scope_id().with("pl-vctl"), over, 0.15, ease_in_out);
             if a > 0. {
@@ -1187,6 +1268,8 @@ impl App {
         if let Some((codec, kbps)) = pl.quality.as_ref().filter(|_| !empty) {
             let (ic, tier) = if *kbps >= 256 { (icon!("aqh"), "High") } else { (icon!("aqs"), "Standard") };
             let label = if *kbps == 0 { codec.clone() } else { format!("{tier} · {codec} · {kbps} kbps") };
+            // A Spotify song playing its match says where the audio is really from (only the direct stream is Vorbis).
+            let label = if codec != "VORBIS" && pl.song().is_some_and(|s| s.source() == "spotify") { format!("From YouTube Music · {label}") } else { label };
             let font = font(11.);
             let tw = text_w(ui.painter(), &label, font.clone());
             let x = (x0 + x1) / 2. - (tw + 18.) / 2.;
@@ -1766,7 +1849,7 @@ impl App {
 }
 
 fn codec_name(mime: &str) -> String {
-    if mime.contains("opus") { "OPUS" } else if mime.contains("mp4a") { "AAC" } else { "AUDIO" }.into()
+    if mime.contains("opus") { "OPUS" } else if mime.contains("vorbis") { "VORBIS" } else if mime.contains("mp4a") { "AAC" } else { "AUDIO" }.into()
 }
 
 #[cfg(test)]

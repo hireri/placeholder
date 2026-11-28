@@ -5,8 +5,7 @@
 use crate::app::App;
 use crate::backend;
 use crate::data::Track;
-use crate::gfx::*;
-use eframe::egui::{pos2, Context, Rect};
+use eframe::egui::Context;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,9 +73,7 @@ pub struct SyncPlay {
     pub group: Option<Group>,
     pub groups: Option<Result<Vec<GroupInfo>, String>>,
     listed: Option<Instant>,
-    pub open: bool,
     pub busy: bool,
-    pub name: String,
     target: Option<Target>,
     fresh: bool,
     checked: Option<Instant>,
@@ -89,7 +86,7 @@ pub struct SyncPlay {
 impl Default for SyncPlay {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Self { tx, rx, stop: Default::default(), cmds: None, src: String::new(), group: None, groups: None, listed: None, open: false, busy: false, name: String::new(), target: None, fresh: false, checked: None, sent: None, ready: None, items: vec![] }
+        Self { tx, rx, stop: Default::default(), cmds: None, src: String::new(), group: None, groups: None, listed: None, busy: false, target: None, fresh: false, checked: None, sent: None, ready: None, items: vec![] }
     }
 }
 
@@ -161,14 +158,13 @@ impl SyncPlay {
         });
     }
 
-    pub fn create(&mut self, ctx: &Context) {
-        let name = self.name.trim().to_string();
-        let path = if name.is_empty() { self.path("new") } else { format!("{}?name={}", self.path("new"), backend::enc(&name)) };
+    pub fn create(&mut self, ctx: &Context, name: String) {
+        let path = format!("{}?name={}", self.path("new"), backend::enc(&name));
         self.busy = true;
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
             let _ = tx.send(match backend::post_json::<_, Value>(&path, &json!({})) {
-                Ok(_) => Ev::Joined(if name.is_empty() { "New group".into() } else { name }),
+                Ok(_) => Ev::Joined(name),
                 Err(e) => Ev::Failed(e),
             });
             ctx.request_repaint();
@@ -258,12 +254,15 @@ impl App {
         while let Ok(ev) = self.sp.rx.try_recv() {
             self.sp_event(ctx, ev);
         }
-        if self.sp.open && self.sp.group.is_none() && !self.sp.busy {
-            let due = self.sp.listed.is_none_or(|l| l.elapsed() >= LIST_EVERY);
-            if due {
-                self.sp.refresh(ctx);
+        // The party popover lists the server's groups while it is open and we are in neither kind of session.
+        if self.party_open.is_some() && self.sp.group.is_none() && !self.sp.busy && self.party.idle() {
+            if let Some(src) = self.sources.with_cap("syncplay").into_iter().next() {
+                self.sp.src = src;
+                if self.sp.listed.is_none_or(|l| l.elapsed() >= LIST_EVERY) {
+                    self.sp.refresh(ctx);
+                }
+                ctx.request_repaint_after(LIST_EVERY);
             }
-            ctx.request_repaint_after(LIST_EVERY);
         }
         if self.sp.group.is_none() {
             return;
@@ -412,84 +411,6 @@ impl App {
             }
         }
         self.sp.sent = Some(now);
-    }
-
-    /// Titlebar button for SyncPlay, shown only when a Jellyfin source offers it. `right` is its right edge; returns the width taken.
-    pub fn syncplay_button(&mut self, ui: &mut eframe::egui::Ui, right: f32, cy: f32) -> f32 {
-        let Some(src) = self.sources.with_cap("syncplay").into_iter().next() else { return 0. };
-        let (t, open) = (self.t, self.sp.open);
-        let rect = Rect::from_min_max(pos2(right - 32., cy - 16.), pos2(right, cy + 16.));
-        let resp = press(ui, "sp-btn", rect);
-        let on = self.sp.group.is_some();
-        if open || resp.hovered() {
-            ui.painter().rect_filled(rect, rad(16.), if open { t.s3 } else { t.s2 });
-        }
-        icon(ui, icon!("group"), rect.center(), 16., if open || on { t.tx } else { t.tm });
-        let clicked = resp.clicked();
-        crate::tip::Tip::tip(resp, &t, "SyncPlay");
-        if clicked {
-            if self.party.room.is_some() {
-                crate::toast::info("Leave the listening party to use SyncPlay");
-            } else if open {
-                self.sp.open = false;
-            } else {
-                (self.palette, self.ctx_menu, self.lib_menu, self.vol_open, self.me_menu, self.party_open) = (None, None, false, false, None, None);
-                if self.sp.group.is_none() {
-                    self.sp.src = src;
-                    self.sp.refresh(ui.ctx());
-                }
-                self.sp.open = true;
-            }
-        }
-        36.
-    }
-
-    pub fn syncplay_modal(&mut self, ctx: &Context) {
-        if !self.sp.open {
-            return;
-        }
-        let (t, sp) = (&self.t, &mut self.sp);
-        let (mut go, mut leave) = (false, false);
-        let closed = crate::modal::show(ctx, t, "syncplay", 340., |c| {
-            c.title(icon!("group"), "SyncPlay");
-            if let Some(g) = &sp.group {
-                c.text(&format!("{} on {}", g.name, if g.state.is_empty() { "your server" } else { &g.state }), true);
-                for p in &g.participants {
-                    c.row(p, p, "", None);
-                }
-                if c.actions("Leave group", crate::modal::Kind::Danger, true) == Some(true) {
-                    leave = true;
-                }
-                return;
-            }
-            match &sp.groups {
-                None => c.text("Looking for groups…", false),
-                Some(Err(e)) => c.text(e, false),
-                Some(Ok(l)) if l.is_empty() => c.text("No groups on this server yet.", false),
-                Some(Ok(l)) => {
-                    let mut pick = None;
-                    for g in l {
-                        if c.row(&format!("sp-{}", g.id), &g.name, &g.participants.join(", "), Some("Join")) {
-                            pick = Some(g.clone());
-                        }
-                    }
-                    if let Some(g) = pick {
-                        sp.join(ctx, &g);
-                    }
-                }
-            }
-            c.field("sp-name", "New group", &mut sp.name, "Group name");
-            go = c.actions("Start new group", crate::modal::Kind::Primary, !sp.busy) == Some(true) || (!sp.busy && crate::modal::enter(ctx));
-        });
-        if go {
-            self.sp.create(ctx);
-        }
-        if leave {
-            self.sp.leave();
-        }
-        if closed || leave {
-            self.sp.open = false;
-        }
     }
 }
 

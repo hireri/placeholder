@@ -7,12 +7,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlin.random.Random
 
-/** Spaces request starts and backs the whole gate off after a failure. */
+/** Spaces request starts (the first [burst] after a quiet spell go at once) and backs the whole gate off after a failure. */
 class RateGate(
     permits: Int,
     private val spacingMs: Long,
     private val backoffBaseMs: Long = 1500,
     private val maxBackoffMs: Long = 60_000,
+    private val burst: Int = 1,
 ) {
     private val permits = Semaphore(permits)
     private val lock = Mutex()
@@ -23,8 +24,8 @@ class RateGate(
     suspend fun <T> run(block: suspend () -> Result<T>): Result<T> = permits.withPermit {
         val start = lock.withLock {
             val now = System.currentTimeMillis()
-            val at = maxOf(now, nextStart, pausedUntil)
-            nextStart = at + spacingMs
+            val at = maxOf(now, nextStart - (burst - 1) * spacingMs, pausedUntil)
+            nextStart = maxOf(nextStart, at) + spacingMs
             at
         }
         val wait = start - System.currentTimeMillis()

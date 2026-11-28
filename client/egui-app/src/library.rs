@@ -78,6 +78,11 @@ impl LibItem {
 }
 
 impl App {
+    /// Liked/favorites lists start pinned, everything else unpinned.
+    pub fn is_pinned(&self, id: &str) -> bool {
+        crate::live::is_liked_list(id) != self.pin_flipped.iter().any(|p| p == id)
+    }
+
     /// `open_t` is the 0..1 expansion progress; text fades with it and the filter row grows with it.
     pub fn library(&mut self, ui: &mut egui::Ui, rect: Rect, open_t: f32) {
         let t = self.t;
@@ -90,9 +95,13 @@ impl App {
         if self.pl.off != off {
             self.pl.off = off;
         }
-        if self.sources.take_changed(ui.ctx()) {
-            d.reset_content();
-            d.refilter(); // suggestions were made against the old set of sources
+        match self.sources.take_changed(ui.ctx()) {
+            Some(true) => {
+                d.reset_content();
+                d.refilter(); // suggestions were made against the old set of sources
+            }
+            Some(false) => d.home.refresh(ui.ctx(), self.home_loader()),
+            None => {}
         }
         d.load_library(ui.ctx());
         match &*d.library.lock() {
@@ -219,6 +228,8 @@ impl App {
             LibSort::Alpha => order.sort_by_cached_key(|&i| items[i].title.to_lowercase()),
             LibSort::Creator => order.sort_by_cached_key(|&i| (items[i].by.to_lowercase(), items[i].title.to_lowercase())),
         }
+        // Stable, so pinned and unpinned each keep the order chosen above.
+        order.sort_by_key(|&i| !self.is_pinned(&items[i].id));
 
         // Only a list that mixes sources badges each row (items from a source that is off always do); a single-source list needs no repeating.
         let lib_mixed = crate::sources::mixed(order.iter().map(|&i| self.lib_items[i].source.as_deref().unwrap_or("yt")));
@@ -322,9 +333,18 @@ impl App {
                                 play_req = Some(it.item());
                             }
                         }
+                        let pinned = self.is_pinned(&it.id);
+                        let pin_mark = |x: f32, y: f32, col| {
+                            if !pinned {
+                                return 0.;
+                            }
+                            icon(ui, icon!("pin"), pos2(x + 6., y), 12., col);
+                            16.
+                        };
                         if view == LibView::Compact {
                             let tr = trunc(&tp, pos2(tx, ty), tw, &it.title, font_w(13., Weight::Medium), t.tx);
                             let sx = tr.max.x + 6.;
+                            let sx = sx + pin_mark(sx, ty, t.ax);
                             let dx = self.source_mark_if(ui, (lib_mixed || off).then_some(it.source.as_deref().unwrap_or("yt")), off, sx, ty, t.tm);
                             trunc(&tp, pos2(sx + dx, ty), (tx + tw - sx - dx).max(0.), &format!("· {}", it.sub), font(12.), t.tm);
                         } else {
@@ -332,7 +352,8 @@ impl App {
                             let fade = if view == LibView::List { ta } else { 1. };
                             trunc(&tp, pos2(tx, ty - if view == LibView::List { dy } else { 0. }), tw, &it.title, font_w(13., Weight::Medium), t.tx.gamma_multiply(fade));
                             let sy = ty + if view == LibView::List { 9. } else { 17. };
-                            let dx = if fade > 0.5 { self.source_mark_if(ui, (lib_mixed || off).then_some(it.source.as_deref().unwrap_or("yt")), off, tx, sy, t.tm) } else { 0. };
+                            let pw = pin_mark(tx, sy, t.ax.gamma_multiply(fade));
+                            let dx = pw + if fade > 0.5 { self.source_mark_if(ui, (lib_mixed || off).then_some(it.source.as_deref().unwrap_or("yt")), off, tx + pw, sy, t.tm) } else { 0. };
                             trunc(&tp, pos2(tx + dx, sy), (tw - dx).max(0.), &it.sub, font(12.), t.tm.gamma_multiply(fade));
                         }
                     }

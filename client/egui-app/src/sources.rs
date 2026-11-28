@@ -74,11 +74,23 @@ struct Inner {
     msg: Option<(bool, String)>,
     added: bool,
     /// When a source was last added, removed, reordered, toggled or edited: everything cached from the daemon must be fetched again once it settles.
-    changed: Option<Instant>,
+    /// The flag is false when only "Show on Home" changed, so only Home needs it.
+    changed: Option<(Instant, bool)>,
     /// Sources with a PUT in flight, and the edits made meanwhile (merged), sent when it returns: requests go out one at a time per source, in order.
     signing: bool,
     sending: HashSet<String>,
     queued: std::collections::HashMap<String, Value>,
+}
+
+impl Inner {
+    /// (Re)starts the settle timer; a pending full refetch stays full.
+    fn mark(&mut self, full: bool) {
+        self.changed = Some((Instant::now(), full || self.changed.is_some_and(|c| c.1)));
+    }
+}
+
+fn home_only(body: &Value) -> bool {
+    body.as_object().is_some_and(|o| o.keys().all(|k| k == "home"))
 }
 
 #[derive(Default)]
@@ -107,8 +119,6 @@ pub struct Sources {
     pub open: Option<String>,
     /// Source whose Remove button was clicked once.
     pub confirm: Option<String>,
-    /// Index of the row being dragged.
-    pub drag: Option<usize>,
     pub edit: Edit,
     pub form: Form,
 }
@@ -169,10 +179,18 @@ impl Sources {
             }
             let mut g = inner.lock().unwrap();
             g.signing = false;
-            (g.list, g.loading, g.changed) = (None, false, Some(Instant::now()));
+            (g.list, g.loading) = (None, false);
+            g.mark(true);
             drop(g);
             ctx.request_repaint();
         });
+    }
+
+    /// Fetches the list again after something outside this tab changed it.
+    pub fn refetch(&self) {
+        let mut g = self.lock();
+        (g.list, g.loading) = (None, false);
+        g.mark(true);
     }
 
     pub fn checking(&self, id: &str) -> bool {
@@ -191,7 +209,7 @@ impl Sources {
         if let Some(s) = g.list.as_mut().and_then(|l| l.as_mut().ok()).and_then(|l| l.iter_mut().find(|s| s.id == id)) {
             edit(s);
         }
-        g.changed = Some(Instant::now()); // the settle timer starts at the click, not at the reply
+        g.mark(!home_only(&body)); // the settle timer starts at the click, not at the reply
         if g.sending.contains(id) {
             match (g.queued.get_mut(id), body) {
                 (Some(Value::Object(q)), Value::Object(b)) => q.extend(b),
@@ -206,7 +224,9 @@ impl Sources {
         let (inner, ctx, id) = (self.inner.clone(), ctx.clone(), id.to_string());
         std::thread::spawn(move || {
             let mut body = body;
+            let mut full = false;
             loop {
+                full |= !home_only(&body);
                 let r = backend::put_json::<_, Source>(&format!("/sources/{id}"), &body);
                 let mut g = inner.lock().unwrap();
                 match r {
@@ -218,7 +238,7 @@ impl Sources {
                                 l.iter_mut().filter(|o| o.id == id).for_each(|o| *o = s.clone());
                             }
                             g.sending.remove(&id);
-                            g.changed = Some(Instant::now());
+                            g.mark(full);
                             if retest && s.enabled {
                                 g.checking.insert(id.clone());
                                 drop(g);
@@ -255,7 +275,7 @@ impl Sources {
         std::thread::spawn(move || match backend::put_json::<_, Vec<Source>>("/sources/order", &ids) {
             Ok(l) => {
                 with_list(&inner, |cur| *cur = l);
-                inner.lock().unwrap().changed = Some(Instant::now());
+                inner.lock().unwrap().mark(true);
                 ctx.request_repaint();
             }
             Err(e) => fail(&inner, &ctx, e),
@@ -267,7 +287,7 @@ impl Sources {
         std::thread::spawn(move || match backend::delete(&format!("/sources/{id}")) {
             Ok(()) => {
                 with_list(&inner, |l| l.retain(|s| s.id != id));
-                inner.lock().unwrap().changed = Some(Instant::now());
+                inner.lock().unwrap().mark(true);
                 ctx.request_repaint();
             }
             Err(e) => fail(&inner, &ctx, e),
@@ -301,7 +321,8 @@ impl Sources {
                         if let Some(Ok(l)) = &mut g.list {
                             l.push(s);
                         }
-                        (g.added, g.changed) = (true, Some(Instant::now()));
+                        g.added = true;
+                        g.mark(true);
                         None
                     }
                     Err(e) => Some((false, e)),
@@ -330,19 +351,20 @@ impl Sources {
         self.lock().msg = None;
     }
 
-    /// True once, 700 ms after the last change to the sources (toggles in a row count as one).
-    pub fn take_changed(&self, ctx: &Context) -> bool {
+    /// Yields once, 700 ms after the last change to the sources (toggles in a row count as one):
+    /// true if everything must be refetched, false if only Home.
+    pub fn take_changed(&self, ctx: &Context) -> Option<bool> {
         const SETTLE: Duration = Duration::from_millis(700);
         let mut g = self.lock();
-        let Some(at) = g.changed else { return false };
+        let (at, full) = g.changed?;
         match SETTLE.checked_sub(at.elapsed()) {
             Some(left) => {
                 ctx.request_repaint_after(left);
-                false
+                None
             }
             None => {
                 g.changed = None;
-                true
+                Some(full)
             }
         }
     }
@@ -389,9 +411,10 @@ impl Sources {
         self.lock().list.as_ref().and_then(|l| l.as_ref().ok()).map(|l| l.iter().map(|s| (s.id.clone(), s.name.clone())).collect()).unwrap_or_default()
     }
 
-    /// Names of the enabled sources, in priority order.
-    pub fn enabled_names(&self) -> Vec<String> {
-        self.lock().list.as_ref().and_then(|l| l.as_ref().ok()).map(|l| l.iter().filter(|s| s.enabled).map(|s| s.name.clone()).collect()).unwrap_or_default()
+    /// Names of the sources taking part in `cap` (`home` or `search`), in priority order.
+    pub fn names_for(&self, cap: &str) -> Vec<String> {
+        let on = |s: &Source| s.enabled && if cap == "home" { s.home } else { s.search } && s.caps.iter().any(|c| c == cap);
+        self.lock().list.as_ref().and_then(|l| l.as_ref().ok()).map(|l| l.iter().filter(|s| on(s)).map(|s| s.name.clone()).collect()).unwrap_or_default()
     }
 
     /// The first enabled source, whose account the greeting uses.
@@ -442,7 +465,20 @@ pub fn mixed<'a>(ids: impl Iterator<Item = &'a str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::mixed;
+    use super::{home_only, mixed, Inner};
+    use serde_json::json;
+
+    #[test]
+    fn only_a_home_toggle_spares_the_caches() {
+        assert!(home_only(&json!({ "home": false })));
+        assert!(!home_only(&json!({ "home": false, "search": true })));
+        let mut g = Inner::default();
+        g.mark(false);
+        assert!(!g.changed.unwrap().1);
+        g.mark(true);
+        g.mark(false);
+        assert!(g.changed.unwrap().1);
+    }
 
     #[test]
     fn mixed_sources() {
