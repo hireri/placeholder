@@ -43,6 +43,10 @@ pub enum Route {
     Import,
     /// A home shelf listed in full; `sel` is ("shelf", shelf title).
     Shelf,
+    /// An artist's releases, each with its track list; `sel` is ("discography", artist id).
+    Discography,
+    /// An artist's songs from the user's Liked songs; `sel` is ("library", artist id).
+    LibraryTracks,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]

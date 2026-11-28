@@ -8,7 +8,7 @@ use crate::menu::Target;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Painter, Rect, ScrollArea};
 use std::time::Duration;
 
-const ROW_H: f32 = 44.;
+pub const ROW_H: f32 = 44.;
 const COVER_ROW_H: f32 = 60.;
 const COVER_ROW_COMPACT: f32 = 48.;
 /// Cover rows are 14px taller than their cover.
@@ -119,6 +119,14 @@ impl App {
             Route::Album | Route::Artist if self.sel.is_some() => {
                 let (kind, id) = self.sel.clone().unwrap();
                 self.live_detail(ui, card, kind, &id);
+            }
+            Route::Discography if self.sel.is_some() => {
+                let id = self.sel.clone().unwrap().1;
+                self.discography_page(ui, card, &id);
+            }
+            Route::LibraryTracks if self.sel.is_some() => {
+                let id = self.sel.clone().unwrap().1;
+                self.library_tracks_page(ui, card, &id);
             }
             Route::History => self.stats_page(ui, card),
             r => self.plain(ui, card, r),
@@ -330,6 +338,9 @@ impl App {
         if matches!(self.sel.as_ref().map(|s| s.0), Some("spotify")) {
             labels.push("Export");
         }
+        if self.route == Route::Artist {
+            labels.push("Discography");
+        }
         let acts_w = play_w + labels.iter().map(|l| text_w(&p, l, font(13.)) + 32.).sum::<f32>() + if page_item.is_some() { 43. } else { 0. };
         let ay = card.min.y + lerp(HERO_H - 43., (HERO_MIN - 35.) / 2.);
         let ax = lerp(card.min.x + 22., card.max.x - 22. - acts_w);
@@ -388,10 +399,16 @@ impl App {
         for label in labels {
             let w = text_w(&p, label, font(13.)) + 24.;
             let b = Rect::from_min_size(pos2(x, ay), vec2(w, 35.));
-            let hot = tonal(ui, &t, label, b, 8., None);
+            // Discography is the way into the rest of an artist's work, so it wears the accent.
+            let disco = label == "Discography";
+            let hot = tonal(ui, &t, label, b, 8., disco.then(|| t.ax.gamma_multiply(0.22)));
             if hot.clicked() {
                 if label == "Export" {
                     self.data.export_spotify(ui.ctx(), title, tracks);
+                } else if label == "Discography" {
+                    if let Some((_, id)) = self.sel.clone() {
+                        self.open(Route::Discography, Some(("discography", id)));
+                    }
                 } else {
                     match save {
                         Some((_, id, _)) if label == "Delete" => self.confirm_delete(ui.ctx(), id),
@@ -400,7 +417,7 @@ impl App {
                     }
                 }
             }
-            p.text(b.center(), Align2::CENTER_CENTER, label, font(13.), if hot.hovered() { t.tx } else { t.tm });
+            p.text(b.center(), Align2::CENTER_CENTER, label, font(13.), if hot.hovered() { t.tx } else if disco { t.ax } else { t.tm });
             x += w + 8.;
         }
         if let Some(it) = page_item {

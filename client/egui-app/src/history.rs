@@ -55,9 +55,9 @@ impl History {
         }
     }
 
-    /// The song ended or changed. A provider song that started but never finished is reported stopped at its position.
+    /// The song ended or changed. A provider song that started is reported stopped at its position (Jellyfin ends its session there).
     fn leave(&mut self) {
-        if self.provider && self.started && !self.sent {
+        if self.provider && self.started {
             send(format!("/music/played/{}?state=stop&pos={:.1}", self.vid, self.pos));
         }
         self.started = false;

@@ -156,7 +156,8 @@ class JellyfinSource(override val config: SourceConfig) : MusicSource {
     private fun thumb(o: JsonObject): String? {
         val id = if (o.obj("ImageTags")?.get("Primary") != null) o.str("Id") else if (o.str("Type") == "Audio") o.str("AlbumId") else null
         val tag = o.obj("ImageTags")?.str("Primary")?.takeIf { id == o.str("Id") }?.let { "&tag=$it" }.orEmpty() // changes when the image does
-        return id?.let { "$base/Items/$it/Images/Primary?maxWidth=400$tag" + (token?.let { t -> "&api_key=$t" } ?: "") }
+        // ponytail: images need no auth on Jellyfin, so the URL stays token-free and can go to Discord; a server that gates them needs api_key back
+        return id?.let { "$base/Items/$it/Images/Primary?maxWidth=400$tag" }
     }
 
     private fun seconds(o: JsonObject) = o.long("RunTimeTicks")?.let { (it / TICKS_PER_SEC).toInt() }
@@ -168,9 +169,17 @@ class JellyfinSource(override val config: SourceConfig) : MusicSource {
         val type = when (o.str("Type")) { "Audio" -> "song"; "MusicAlbum" -> "album"; "MusicArtist" -> "artist"; "Playlist" -> "playlist"; else -> return null }
         return ItemDto(
             type = type, id = id, title = o.str("Name").orEmpty(),
-            subtitle = if (type == "artist" || type == "playlist") null else artistName(o) ?: o.int("ProductionYear")?.toString(),
+            subtitle = when (type) {
+                "artist", "playlist" -> null
+                "album" -> listOfNotNull(o.str("AlbumArtist") ?: artistName(o), o.int("ProductionYear")?.toString()).joinToString(" · ").ifEmpty { null }
+                else -> artistName(o)
+            },
             thumbnail = thumb(o), durationSec = if (type == "song") seconds(o) else null,
-            artistId = if (type == "song" || type == "album") artistId(o) else null,
+            artistId = when (type) {
+                "song" -> artistId(o)
+                "album" -> o.arr("AlbumArtists")?.firstOrNull()?.jsonObject?.str("Id") ?: artistId(o)
+                else -> null
+            },
             album = if (type == "song") o.str("Album") else null,
             albumId = if (type == "song") o.str("AlbumId") else null,
             editable = type == "playlist" && (o["CanDelete"] as? JsonPrimitive)?.booleanOrNull == true,
@@ -211,15 +220,16 @@ class JellyfinSource(override val config: SourceConfig) : MusicSource {
             "artists" -> list("/Artists/AlbumArtists", mapOf("userId" to u.getValue("userId"), "SortBy" to "SortName", "Limit" to "500"))
             "playlists" -> list("/Items", u + mapOf("IncludeItemTypes" to "Playlist", "Limit" to "200", "Fields" to "CanDelete"))
             else -> emptyList()
-        })
+        }).let { if (kind == "playlists") listOf(FAVORITES_ITEM) + it else it }
     }
 
     override suspend fun home(): List<SectionDto> {
         val u = uid()
         val songs = mapOf("userId" to u, "IncludeItemTypes" to "Audio", "Recursive" to "true", "Limit" to "20")
-        var cont = items(list("/UserItems/Resume", mapOf("userId" to u, "MediaTypes" to "Audio", "Limit" to "20")))
-        if (cont.isEmpty()) cont = items(list("/Items", songs + mapOf("SortBy" to "DatePlayed", "SortOrder" to "Descending", "Filters" to "IsPlayed")))
-        val recent = items(list("/Items/Latest", mapOf("userId" to u, "IncludeItemTypes" to "MusicAlbum", "Limit" to "20")))
+        // Same queries as jellyfin-web's music views. /UserItems/Resume is for half-heard long tracks, not recently played.
+        val cont = items(list("/Items", songs + mapOf("SortBy" to "DatePlayed", "SortOrder" to "Descending", "Filters" to "IsPlayed")))
+        // Latest groups new tracks by album, ordered by when the tracks were added; asking for MusicAlbum sorts by folder dates instead.
+        val recent = items(list("/Items/Latest", mapOf("userId" to u, "IncludeItemTypes" to "Audio", "Limit" to "20")))
         val playedRaw = list("/Items", songs + mapOf("SortBy" to "PlayCount", "SortOrder" to "Descending", "Filters" to "IsPlayed"))
         val seed = list("/Items", songs + mapOf("Filters" to "IsFavorite", "Limit" to "1")).firstOrNull() ?: playedRaw.firstOrNull()
         val mixes = seed?.str("Id")?.let { id -> items(mix(id)) }.orEmpty()
@@ -236,7 +246,7 @@ class JellyfinSource(override val config: SourceConfig) : MusicSource {
     override suspend fun radio(id: String) = tracks(mix(id))
 
     private suspend fun detail(id: String): JsonObject =
-        call(HttpMethod.Get, "/Items/${enc(id)}", mapOf("userId" to uid(), "Fields" to "CanDelete")) as? JsonObject ?: throw Failure("Item not found")
+        call(HttpMethod.Get, "/Items/${enc(id)}", mapOf("userId" to uid(), "Fields" to "CanDelete,Overview")) as? JsonObject ?: throw Failure("Item not found")
 
     override suspend fun album(id: String): PageDto {
         val t = list("/Items", mapOf("userId" to uid(), "ParentId" to id, "IncludeItemTypes" to "Audio", "Recursive" to "true", "SortBy" to "ParentIndexNumber,IndexNumber,SortName"))
@@ -244,17 +254,28 @@ class JellyfinSource(override val config: SourceConfig) : MusicSource {
     }
 
     override suspend fun playlist(id: String): PageDto {
+        if (id == FAVORITES) return PageDto(FAVORITES_ITEM, tracks = tracks(list("/Items", mapOf("userId" to uid(), "IncludeItemTypes" to "Audio", "Recursive" to "true", "Filters" to "IsFavorite", "SortBy" to "SortName"))))
         val t = list("/Playlists/${enc(id)}/Items", mapOf("userId" to uid()))
         return PageDto(item(detail(id)) ?: throw Failure("Not a playlist"), tracks = tracks(t))
     }
 
+    // Shelves only, like a YouTube artist page: the client shows a page with tracks as a bare track list.
+    // Albums / Appears on use jellyfin-web's own artist queries.
     override suspend fun artist(id: String): PageDto {
         val u = uid()
-        val top = list("/Items", mapOf("userId" to u, "ArtistIds" to id, "IncludeItemTypes" to "Audio", "Recursive" to "true", "SortBy" to "PlayCount,SortName", "SortOrder" to "Descending", "Limit" to "20"))
-        val albums = items(list("/Items", mapOf("userId" to u, "AlbumArtistIds" to id, "IncludeItemTypes" to "MusicAlbum", "Recursive" to "true", "SortBy" to "ProductionYear", "SortOrder" to "Descending")))
+        val a = detail(id)
+        val base = mapOf("userId" to u, "Recursive" to "true")
+        val newest = mapOf("SortBy" to "PremiereDate,ProductionYear,SortName", "SortOrder" to "Descending")
+        val top = list("/Items", base + mapOf("ArtistIds" to id, "IncludeItemTypes" to "Audio", "SortBy" to "PlayCount,SortName", "SortOrder" to "Descending,Ascending", "Limit" to "10"))
+        val albums = list("/Items", base + newest + mapOf("AlbumArtistIds" to id, "IncludeItemTypes" to "MusicAlbum"))
+        val appears = list("/Items", base + newest + mapOf("ContributingArtistIds" to id, "IncludeItemTypes" to "MusicAlbum"))
+        val similar = runCatching { list("/Artists/${enc(id)}/Similar", mapOf("userId" to u, "limit" to "12")) }.getOrDefault(emptyList())
         return PageDto(
-            item(detail(id)) ?: throw Failure("Not an artist"), tracks = tracks(top),
-            sections = listOf(SectionDto("Albums", albums)).filter { it.items.isNotEmpty() },
+            item(a) ?: throw Failure("Not an artist"), description = a.str("Overview"),
+            sections = listOf(
+                SectionDto("Top songs", items(top)), SectionDto("Albums", items(albums)),
+                SectionDto("Appears on", items(appears)), SectionDto("Similar artists", items(similar)),
+            ).filter { it.items.isNotEmpty() },
         )
     }
 
@@ -327,15 +348,19 @@ class JellyfinSource(override val config: SourceConfig) : MusicSource {
     }
 
     override suspend fun reportPlay(id: String, state: String, pos: Double) {
-        if (state == "start") {
-            call(HttpMethod.Post, "/Sessions/Playing", body = buildJsonObject { put("ItemId", id); put("CanSeek", true) })
-        } else {
-            call(HttpMethod.Post, "/Sessions/Playing/Stopped", body = buildJsonObject { put("ItemId", id); put("PositionTicks", (pos * TICKS_PER_SEC).toLong()) })
+        // Jellyfin counts the play (PlayCount, DatePlayed) at start; "finish" is our scrobble point, and the stop on leaving the song ends it.
+        when (state) {
+            "start" -> call(HttpMethod.Post, "/Sessions/Playing", body = buildJsonObject { put("ItemId", id); put("CanSeek", true); put("PlayMethod", "DirectPlay") })
+            "finish" -> {}
+            else -> call(HttpMethod.Post, "/Sessions/Playing/Stopped", body = buildJsonObject { put("ItemId", id); put("PositionTicks", (pos * TICKS_PER_SEC).toLong()) })
         }
     }
 
     internal companion object {
         private const val MAX_IDS = 500
+        /** Jellyfin has no favorites playlist; this virtual one lists the favorited songs. Real ids are 32 hex chars, so no clash. */
+        const val FAVORITES = "favorites"
+        val FAVORITES_ITEM = ItemDto("playlist", FAVORITES, "Favorites")
         const val TICKS_PER_SEC = 10_000_000L
         val json = Json { ignoreUnknownKeys = true }
         val http = HttpClient(OkHttp) {

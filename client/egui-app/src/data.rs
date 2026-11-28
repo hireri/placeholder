@@ -476,6 +476,8 @@ pub struct Data {
     pub searches: Mutex<HashMap<String, Arc<Remote<Vec<Track>>>>>,
     /// Album and artist search results by `type/query`.
     pub item_searches: Mutex<HashMap<String, Arc<Remote<Vec<Item>>>>>,
+    /// Artist discographies (each release with its tracks), by artist id.
+    pub discos: Mutex<HashMap<String, Arc<Remote<Vec<Detail>>>>>,
     /// Error from the last library save, shown on the album page.
     pub details: Mutex<HashMap<String, Arc<Remote<Detail>>>>,
     /// Search suggestions by query.
@@ -513,6 +515,7 @@ impl Data {
             home_at: AtomicU64::new(0),
             searches: Default::default(),
             item_searches: Default::default(),
+            discos: Default::default(),
             details: Default::default(),
             suggests: Default::default(),
             matcher: SpotifyMatcher::start(),
@@ -814,8 +817,17 @@ impl Data {
         r
     }
 
+    /// Every album, EP and single of an artist with its tracks, newest first.
+    pub fn discography(&self, ctx: &Context, artist_id: &str) -> Arc<Remote<Vec<Detail>>> {
+        let r = self.discos.lock().unwrap().entry(artist_id.to_string()).or_insert_with(|| Arc::new(Remote::new())).clone();
+        let path = format!("/music/discography/{}", backend::enc(artist_id));
+        r.ensure(ctx, move || backend::get::<Vec<Detail>>(&path).map(|v| v.into_iter().map(Detail::clean).filter(|d| !d.tracks.is_empty()).collect()));
+        r
+    }
+
     /// Drops what was fetched under the old content filters so it is fetched again (Spotify imports keep their match progress).
     pub fn refilter(&self) {
+        self.discos.lock().unwrap().clear();
         self.home.reset();
         self.details.lock().unwrap().retain(|k, _| k.starts_with("spotify/"));
         self.searches.lock().unwrap().clear();

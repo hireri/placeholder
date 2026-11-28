@@ -26,6 +26,7 @@ struct Lib {
     fps: unsafe extern "C" fn(Handle, i32),
     soft_cut: unsafe extern "C" fn(Handle, f64),
     hard_cut: unsafe extern "C" fn(Handle, bool),
+    tex_paths: unsafe extern "C" fn(Handle, *const *const c_char, usize),
 }
 
 fn lib() -> Option<&'static Lib> {
@@ -39,7 +40,9 @@ fn lib() -> Option<&'static Lib> {
             &["libprojectM-4.so.4", "libprojectM-4.so"]
         };
         let env = std::env::var_os("SERAFIN_PROJECTM_LIB");
-        let l = env.iter().map(|p| p.to_string_lossy().into_owned()).chain(names.iter().map(|s| s.to_string())).find_map(|n| Library::new(n).ok())?;
+        // The release bundles projectM next to the executable; a system install is the fallback.
+        let bundled = crate::backend::exe_dir().into_iter().flat_map(|d| names.iter().map(move |n| d.join(n).to_string_lossy().into_owned()));
+        let l = env.iter().map(|p| p.to_string_lossy().into_owned()).chain(bundled).chain(names.iter().map(|s| s.to_string())).find_map(|n| Library::new(n).ok())?;
         unsafe fn get<T: Copy>(l: &Library, n: &str) -> Option<T> {
             l.get::<T>(format!("{n}\0").as_bytes()).ok().map(|s| *s)
         }
@@ -57,6 +60,7 @@ fn lib() -> Option<&'static Lib> {
             fps: sym!("projectm_set_fps"),
             soft_cut: sym!("projectm_set_soft_cut_duration"),
             hard_cut: sym!("projectm_set_hard_cut_enabled"),
+            tex_paths: sym!("projectm_set_texture_search_paths"),
             _lib: l,
         })
     })
@@ -115,9 +119,10 @@ fn scan(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Where presets are looked for: the app's `presets` folder in its config directory, then the usual install locations.
+/// Where presets are looked for: the app's `presets` folder in its config directory, the release's bundled set, then the usual install locations.
 pub fn dirs() -> Vec<PathBuf> {
     let mut v = vec![crate::backend::data_dir().join("presets")];
+    v.extend(crate::backend::exe_dir().map(|d| d.join("presets")));
     v.extend(["/usr/share/projectM/presets", "/usr/share/projectm/presets"].map(PathBuf::from));
     v
 }
@@ -235,6 +240,11 @@ fn run(st: &Arc<Mutex<Gpu>>, gl_shared: &viz_gl::Shared, pcm: &[f32], (radius, o
             (l.fps)(handle, fps);
             (l.soft_cut)(handle, 3.);
             (l.hard_cut)(handle, false);
+            if let Some(t) = crate::backend::exe_dir().map(|d| d.join("textures")).filter(|t| t.is_dir()) {
+                if let Ok(c) = CString::new(t.to_string_lossy().as_bytes()) {
+                    (l.tex_paths)(handle, &c.as_ptr(), 1);
+                }
+            }
             (l.window_size)(handle, w as usize, h as usize);
             s.inst = Some(Inst { h: handle, tex, save, size: (w, h), last: Instant::now() - Duration::from_secs(1), fps, pending: None });
         }

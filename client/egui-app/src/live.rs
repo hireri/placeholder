@@ -310,7 +310,12 @@ impl App {
             ui.spacing_mut().item_spacing = vec2(0., 0.);
             ui.add_space(HERO_H - HERO_MIN);
             for (si, s) in secs.iter().enumerate() {
-                self.carousel_from(ui, (l, w, area.width()), &s.title, s.source.as_deref(), s.items.iter(), si, true);
+                if self.route == Route::Artist && s.title == "Top songs" && s.items.iter().all(|i| i.r#type == "song") {
+                    self.top_songs(ui, (l, w, area.width()), card, &s.items);
+                    self.library_card(ui, (l, w, area.width()));
+                } else {
+                    self.carousel_from(ui, (l, w, area.width()), &s.title, s.source.as_deref(), s.items.iter(), si, true);
+                }
             }
             ui.add_space(70.);
         });
@@ -318,6 +323,76 @@ impl App {
         let off = out.state.clamped_offset().y;
         crate::gfx::page_bar(&lui, out.id, &out, card.min.y + HERO_H - off.min(HERO_H - HERO_MIN), self.t.tf);
         off
+    }
+
+    /// An artist's Top songs as a vertical track list.
+    fn top_songs(&mut self, ui: &mut egui::Ui, (l, w, full): (f32, f32, f32), card: Rect, items: &[Item]) {
+        let tracks: Vec<Track> = items.iter().map(Item::track).collect();
+        let (_, hd) = ui.allocate_space(vec2(full, 44.));
+        trunc(ui.painter(), pos2(l + 8., hd.center().y + 6.), w - 16., "Top songs", font_w(17., Weight::Bold), self.t.tx);
+        let (tl, tr) = (card.min.x + 16., card.max.x - 16.);
+        let look = Look { cover_w: self.cover_px(), open: false, album: false };
+        let (_, head) = ui.allocate_space(vec2(full, HEAD));
+        self.table_head(ui, head.min.y + 14., tl, tr, look, None);
+        let acts = self.track_rows(ui, "top-songs", &tracks, 0..tracks.len(), (tl, tr), self.cover_row_h(), look);
+        self.apply_acts(ui, &tracks, acts, look);
+        ui.add_space(16.);
+    }
+
+    /// The artist's songs among the user's Liked songs (empty until that page loads).
+    fn liked_by(&mut self, ctx: &egui::Context, artist_id: &str) -> Vec<Track> {
+        let name = self.data.detail(ctx, "artists", artist_id).ready().map(|d| d.item.title.clone()).unwrap_or_default();
+        match self.data.detail(ctx, "playlists", "LM").ready() {
+            Some(d) => d.tracks.iter().filter(|t| t.artist_id.as_deref() == Some(artist_id) || t.artists.contains(&name)).cloned().collect(),
+            None => vec![],
+        }
+    }
+
+    /// "From your library" card under Top songs; opens the liked songs by this artist. Hidden when there are none.
+    fn library_card(&mut self, ui: &mut egui::Ui, (l, w, full): (f32, f32, f32)) {
+        let Some(("artists", id)) = self.sel.clone() else { return };
+        let liked = self.liked_by(ui.ctx(), &id);
+        let Some(first) = liked.first() else { return };
+        let t = self.t;
+        let (_, r) = ui.allocate_space(vec2(full, 88. + 16.));
+        let card = Rect::from_min_size(pos2(l + 8., r.min.y + 8.), vec2(w - 16., 80.));
+        let hit = tonal(ui, &t, "library-card", card, 14., Some(t.s2));
+        let art = Rect::from_min_size(card.min + vec2(12., 12.), vec2(56., 56.));
+        self.thumb(ui, first.thumbnail.as_deref(), art, 8.);
+        let p = ui.painter();
+        let tx = art.max.x + 16.;
+        trunc(p, pos2(tx, card.center().y - 11.), card.max.x - tx - 48., "From your library", font_w(15., Weight::Bold), t.tx);
+        trunc(p, pos2(tx, card.center().y + 11.), card.max.x - tx - 48., &summary(&liked), font(13.), t.tm);
+        icon(ui, icon!("fwd"), pos2(card.max.x - 28., card.center().y), 18., t.tm);
+        if hit.clicked() {
+            self.open(Route::LibraryTracks, Some(("library", id)));
+        }
+    }
+
+    /// The user's liked songs by one artist, as a cover track list.
+    pub fn library_tracks_page(&mut self, ui: &mut egui::Ui, card: Rect, artist_id: &str) {
+        let t = self.t;
+        let name = self.data.detail(ui.ctx(), "artists", artist_id).ready().map(|d| d.item.title.clone()).unwrap_or_default();
+        let p = ui.painter().clone();
+        trunc(&p, pos2(card.min.x + 22., card.min.y + 38.), card.width() - 44., "From your library", font_w(26., Weight::Bold), t.tx);
+        trunc(&p, pos2(card.min.x + 22., card.min.y + 66.), card.width() - 44., &name, font(13.), t.tm);
+        let tracks = self.liked_by(ui.ctx(), artist_id);
+        if tracks.is_empty() {
+            return self.note(ui, card, card.min.y + 90., "No liked songs by this artist.");
+        }
+        let list = Rect::from_min_max(pos2(card.min.x, card.min.y + 90.), card.max);
+        let mut lui = App::region(ui, list);
+        let (tl, tr) = (card.min.x + 16., card.max.x - 16.);
+        let look = Look { cover_w: self.cover_px(), open: false, album: false };
+        let out = ScrollArea::vertical().id_salt(("library-tracks", artist_id)).auto_shrink(false).show(&mut lui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(0., 0.);
+            let (_, head) = ui.allocate_space(vec2(list.width(), HEAD));
+            self.table_head(ui, head.min.y + 14., tl, tr, look, None);
+            let acts = self.track_rows(ui, "library-tracks", &tracks, 0..tracks.len(), (tl, tr), self.cover_row_h(), look);
+            self.apply_acts(ui, &tracks, acts, look);
+            ui.add_space(70.);
+        });
+        scroll_fades(&lui, &out, t.s1);
     }
 
     /// Compact quick-pick tile: cover flush left, title beside it.
@@ -556,7 +631,7 @@ impl App {
                 let (head, round) = match kind { "artists" => ("Artist", true), "playlists" | "spotify" => ("Playlist", false), _ => ("Album", false) };
                 let album = kind == "albums" && !p.tracks.is_empty();
                 // Albums read "Artist · 2026 · 12 songs, 41 min"; the artist is a link, so it leaves the subtitle.
-                let year = p.item.subtitle.as_deref().and_then(|s| s.rsplit(" · ").next()).filter(|y| y.len() == 4 && y.bytes().all(|b| b.is_ascii_digit())).map(String::from);
+                let year = p.item.subtitle.as_deref().and_then(|s| s.rsplit(" · ").next()).filter(|y| is_year(y)).map(String::from);
                 let note = year.as_deref().map(|y| format!("Released {y}")).unwrap_or_default();
                 let sub = if album {
                     [year, Some(summary(&p.tracks))].into_iter().flatten().collect::<Vec<_>>().join(" · ")
@@ -564,7 +639,16 @@ impl App {
                     [p.item.subtitle.clone().filter(|_| kind != "artists" || self.opts.show_subs), (!p.tracks.is_empty()).then(|| summary(&p.tracks))].into_iter().flatten().collect::<Vec<_>>().join(" · ")
                 };
                 let first = p.tracks.first();
-                let by = first.filter(|_| album).map(|t| t.artists.first().map_or((crate::data::UNKNOWN_ARTIST, None), |n| (n.as_str(), t.artist_id.as_deref())));
+                // The album's own artist (its subtitle before the year), not the first track's, which may be a featured guest.
+                let album_artist = p.item.subtitle.as_deref().map(|s| match s.rsplit_once(" · ") {
+                    Some((a, y)) if is_year(y) => a,
+                    _ if is_year(s) => "",
+                    _ => s,
+                }).filter(|a| !a.is_empty());
+                let by = match album_artist {
+                    Some(a) if album => Some((a, p.item.artist_id.as_deref().or(first.and_then(|t| t.artist_id.as_deref())))),
+                    _ => first.filter(|_| album).map(|t| t.artists.first().map_or((crate::data::UNKNOWN_ARTIST, None), |n| (n.as_str(), t.artist_id.as_deref()))),
+                };
                 // Only YouTube albums and playlists can be saved; the saved state is read off the sidebar's library list.
                 let save = match kind {
                     "albums" | "playlists" => {
@@ -981,6 +1065,110 @@ fn shared<'a>(ids: impl Iterator<Item = &'a str> + Clone) -> Option<&'a str> {
 /// "Album · Artist", or just the kind when there is nothing after it.
 fn kind_line(kind: &str, sub: &str) -> String {
     if sub.is_empty() { kind.into() } else { format!("{kind} · {sub}") }
+}
+
+fn is_year(s: &str) -> bool {
+    s.len() == 4 && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Spotify's rule of thumb: up to 3 songs under 30 minutes is a single, up to 6 an EP.
+fn release_kind(tracks: &[Track]) -> &'static str {
+    let mins = tracks.iter().filter_map(|t| t.duration_sec).sum::<u32>() / 60;
+    match tracks.len() {
+        n if n <= 3 && mins < 30 => "Single",
+        n if n <= 6 && mins < 30 => "EP",
+        _ => "Album",
+    }
+}
+
+const DISCO_CHIPS: [&str; 3] = ["All", "Albums", "Singles and EPs"];
+/// A release's header row: cover, title, details and play button.
+const DISCO_HEAD: f32 = 124.;
+
+impl App {
+    /// Every release of an artist, newest first, each with its track list under it (rows are only drawn while on screen).
+    pub fn discography_page(&mut self, ui: &mut egui::Ui, card: Rect, artist_id: &str) {
+        let t = self.t;
+        let name = self.data.detail(ui.ctx(), "artists", artist_id).ready().map(|d| d.item.title.clone()).unwrap_or_default();
+        let p = ui.painter().clone();
+        trunc(&p, pos2(card.min.x + 22., card.min.y + 38.), card.width() - 44., "Discography", font_w(26., Weight::Bold), t.tx);
+        trunc(&p, pos2(card.min.x + 22., card.min.y + 66.), card.width() - 44., &name, font(13.), t.tm);
+        let top = card.min.y + 90.;
+        let all = match &*self.data.discography(ui.ctx(), artist_id).lock() {
+            State::Ready(v) => v.clone(),
+            State::Failed(e) => return self.note(ui, card, top, e),
+            _ => return self.note(ui, card, top, "Loading releases…"),
+        };
+        let chip_id = ui.scope_id().with(("disco-chip", artist_id));
+        let cur = ui.ctx().data(|m| m.get_temp::<usize>(chip_id)).unwrap_or(0);
+        let chip = self.chips(ui, card.min.x + 22., top, &DISCO_CHIPS, cur);
+        if chip != cur {
+            ui.ctx().data_mut(|m| m.insert_temp(chip_id, chip));
+        }
+        let shown: Vec<&crate::data::Detail> = all.iter().filter(|d| match chip {
+            1 => release_kind(&d.tracks) == "Album",
+            2 => release_kind(&d.tracks) != "Album",
+            _ => true,
+        }).collect();
+        if shown.is_empty() {
+            return self.note(ui, card, top + 44., "No releases here.");
+        }
+        let list = Rect::from_min_max(pos2(card.min.x, top + 48.), card.max);
+        let mut lui = App::region(ui, list);
+        let (tl, tr) = (card.min.x + 6., card.max.x - 6.);
+        let rh = if self.opts.compact { 34. } else { crate::page::ROW_H };
+        let look = Look { cover_w: 0., open: false, album: false };
+        let out = ScrollArea::vertical().id_salt(("disco", artist_id, chip)).auto_shrink(false).show_viewport(&mut lui, |ui, vp| {
+            ui.spacing_mut().item_spacing = vec2(0., 0.);
+            let mut y = 0.;
+            for d in &shown {
+                let h = DISCO_HEAD + HEAD + d.tracks.len() as f32 * rh + 28.;
+                let visible = y + h >= vp.min.y && y <= vp.max.y;
+                y += h;
+                if !visible {
+                    ui.add_space(h);
+                    continue;
+                }
+                ui.push_id(("disco-release", &d.item.id), |ui| {
+                    let (_, hr) = ui.allocate_space(vec2(list.width(), DISCO_HEAD));
+                    let p = ui.painter().clone();
+                    let art = Rect::from_min_size(pos2(card.min.x + 22., hr.min.y + 14.), vec2(96., 96.));
+                    shadow(&p, art, 6., 4, 14, 50);
+                    self.thumb(ui, d.item.thumbnail.as_deref(), art, 6.);
+                    let tx = art.max.x + 18.;
+                    let title_r = trunc(&p, pos2(tx, art.min.y + 26.), (card.max.x - 22. - tx).max(0.), &d.item.title, font_w(20., Weight::Bold), t.tx);
+                    let open = ui.interact(art.union(title_r), ui.scope_id().with("open"), egui::Sense::click());
+                    if open.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        p.line_segment([title_r.left_bottom() + vec2(0., 1.), title_r.right_bottom() + vec2(0., 1.)], (1., t.tx));
+                    }
+                    if open.clicked() {
+                        self.open_album(&d.item.id);
+                    }
+                    let year = d.item.subtitle.as_deref().and_then(|s| s.rsplit(" · ").next()).filter(|y| is_year(y));
+                    let meta = [Some(release_kind(&d.tracks)), year].into_iter().flatten().map(String::from).chain([summary(&d.tracks)]).collect::<Vec<_>>().join(" · ");
+                    trunc(&p, pos2(tx, art.min.y + 54.), (card.max.x - 22. - tx).max(0.), &meta, font(13.), t.tm);
+                    let pb = Rect::from_center_size(pos2(tx + 16., art.max.y - 16.), vec2(32., 32.));
+                    let pr = ui.interact(pb, ui.scope_id().with("play"), egui::Sense::click());
+                    p.circle_filled(pb.center(), 16., if pr.is_pointer_button_down_on() { t.ax.gamma_multiply(0.85) } else { t.ax });
+                    icon(ui, icon!("play"), pb.center(), 18., t.on_ax);
+                    if pr.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if pr.clicked() {
+                        self.pl.play_tracks(ui.ctx(), &d.tracks, 0, false);
+                    }
+                    let (_, head) = ui.allocate_space(vec2(list.width(), HEAD));
+                    self.table_head(ui, head.min.y + 14., tl, tr, look, None);
+                    let acts = self.track_rows(ui, "disco", &d.tracks, 0..d.tracks.len(), (tl, tr), rh, look);
+                    self.apply_acts(ui, &d.tracks, acts, look);
+                    ui.add_space(28.);
+                });
+            }
+            ui.add_space(70.);
+        });
+        scroll_fades(&lui, &out, t.s1);
+    }
 }
 
 /// "12 songs, 41 min 5 sec" over the tracks' durations.

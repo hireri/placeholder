@@ -144,11 +144,14 @@ pub struct Opts {
     pub viz_wave: bool,
     /// Frame rate cap of the visualizers.
     pub viz_fps: u8,
+    /// Player art: 0 auto (covers fill the card, videos float 16:9), 1 all framed (covers float in their own square like a
+    /// video and shrink while paused), 2 all cropped (videos are cropped to a square cover).
+    pub cover_style: u8,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { compact: false, hide_off: false, home_layout: 0, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, discord_listen: true, discord_get: false, discord_cover: true, discord_link: 0, party_auto_accept: false, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, lyrics_center: false, lyrics_follow: true, lyrics_tap_seek: true, reduce_motion: false, close_tray: true, start_minimized: false, autostart: false, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false, image_cache: 96, hide_recents: false, hide_moods: false, hide_top_picks: false, hide_shorts: false, music_only: false, auto_playlists: true, auto_update: true, restore_queue: false, skip_on_error: false, output: String::new(), viz_style: 1, viz_logo: false, logo: 1, viz_ambient: false, viz_wave: false, viz_fps: 60 }
+        Opts { compact: false, hide_off: false, home_layout: 0, tint: true, mode: 0, custom: false, auto_theme: true, accent: 0, crossfade: 0, gapless: true, endless: false, video: true, video_h: VIDEO_HEIGHTS[0], discord: true, discord_paused: false, discord_party: true, discord_listen: true, discord_get: false, discord_cover: true, discord_link: 0, party_auto_accept: false, notify_requests: true, notify_people: false, notify_ended: true, notify_background: true, cache_mb: 512, hide_explicit: false, hide_video: false, show_bio: true, show_subs: true, show_monthly: true, pure_black: false, normalize: true, font: String::new(), romaji: false, lyrics_size: 100, lyrics_center: false, lyrics_follow: true, lyrics_tap_seek: true, reduce_motion: false, close_tray: true, start_minimized: false, autostart: false, seek_step: 5, vol_step: 5, no_dupes: false, keep_search: true, ui_scale: 100, scroll_speed: 100, target_lufs: -14, remember_modes: false, sleep_fade: false, progressive_seek: false, image_cache: 96, hide_recents: false, hide_moods: false, hide_top_picks: false, hide_shorts: false, music_only: false, auto_playlists: true, auto_update: true, restore_queue: false, skip_on_error: false, output: String::new(), viz_style: 1, viz_logo: false, logo: 1, viz_ambient: false, viz_wave: false, viz_fps: 60, cover_style: 0 }
     }
 }
 
@@ -590,6 +593,9 @@ impl App {
                 crate::gfx::set_reduced_motion(self.opts.reduce_motion);
             }
         }
+        if let Some(cy) = self.row(ui, pg, "Player art", "Auto keeps videos wide. Framed floats covers and shrinks them when paused. Cropped squares videos") {
+            self.opts.cover_style = segmented(ui, &self.t, "cover-style", right, cy, &["Auto", "Framed", "Cropped"], (self.opts.cover_style as usize).min(2)) as u8;
+        }
         self.sec(ui, pg, "Visualizer");
         if let Some(cy) = self.row(ui, pg, "Style", "Opens from the button in the player header") {
             // MilkDrop only appears when libprojectM is installed.
@@ -937,8 +943,18 @@ impl App {
         if let Some(cy) = self.row(ui, pg, "Tap to seek", "Click a line to jump to it") {
             toggle(ui, &self.t, "lyrics-tap-seek", right, cy, &mut self.opts.lyrics_tap_seek);
         }
+    }
+
+    /// Lyric providers in priority order; a connected Jellyfin or Navidrome server is always asked first, so its row is fixed and dimmed without one.
+    fn lyric_providers(&mut self, ui: &mut egui::Ui, pg: &mut Page, list: &[crate::sources::Source]) {
+        let right = pg.right();
         let Ok(d) = self.daemon(ui) else { return };
         self.sec(ui, pg, "Lyric providers");
+        let servers: Vec<&str> = list.iter().filter(|s| s.enabled && !s.builtin && !s.singleton).map(|s| s.name.as_str()).collect();
+        let desc = if servers.is_empty() { "Add a Jellyfin or Navidrome server to use its lyrics".to_string() } else { format!("{} · always asked first", servers.join(", ")) };
+        if let Some(cy) = self.row(ui, pg, "Your servers", &desc) {
+            self.gate(ui, pg, cy, "lyr-servers", servers.is_empty().then_some("No server is connected"));
+        }
         let (t, n) = (self.t, d.lyrics.order.len());
         for (i, name) in d.lyrics.order.iter().enumerate() {
             let Some(cy) = self.row(ui, pg, name, &format!("Priority {}", i + 1)) else { continue };
@@ -1221,6 +1237,7 @@ impl App {
                 self.data.home.reset();
             }
         }
+        self.lyric_providers(ui, pg, &list);
     }
 
     /// The expanded source's settings, opened and closed with a slide and fade. Its height is measured while it is drawn and reused the next frame.

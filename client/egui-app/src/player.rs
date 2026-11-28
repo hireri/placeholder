@@ -63,15 +63,34 @@ fn song_of(t: &Track) -> Song {
     }
 }
 
+/// Whether the URL's host is one Discord can't reach: loopback, a private or link-local IP, a dotless name, or `.local`/`.lan`.
+fn private_host(url: &str) -> bool {
+    let host = url.split("://").nth(1).unwrap_or(url).split(['/', '?']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(v6),
+        None => host.split(':').next().unwrap_or(host),
+    };
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80,
+        Err(_) => { let h = host.to_ascii_lowercase(); !h.contains('.') || h.ends_with(".local") || h.ends_with(".lan") }
+    }
+}
+
 impl Song {
     /// Id of the source it came from (`yt` for YouTube Music).
     pub fn source(&self) -> &str {
         if self.source == "youtube" { "yt" } else { &self.source }
     }
 
-    /// Its cover is a public URL, safe to hand to Discord. A server's cover URL carries its API key or token and points at a LAN address.
+    /// Its cover is a public URL, safe to hand to Discord. Jellyfin's is too (its images need no auth) unless the server is on a private address; other servers' covers carry a token or point at a LAN address.
     pub fn public_cover(&self) -> bool {
-        matches!(self.source().split('-').next(), Some("yt" | "soundcloud" | "spotify" | "bandcamp"))
+        match self.source().split('-').next() {
+            Some("yt" | "soundcloud" | "spotify" | "bandcamp") => true,
+            Some("jellyfin") => self.thumbnail.as_deref().is_some_and(|u| !private_host(u)),
+            _ => false,
+        }
     }
 
     /// The artist credit as shown: the placeholder when the song has none.
@@ -853,6 +872,12 @@ impl App {
 
         let empty = self.pl.song().is_none();
         let url = self.pl.song().and_then(|s| s.thumbnail.clone());
+        // The card's tints (ink hue, accent, controls) follow the playing cover, whatever the app theme or accent is.
+        let t = match url.as_deref().map(|u| self.g.tone(u)) {
+            Some(Some(Some(tone))) => Theme::tinted(tone, true),
+            Some(Some(None)) => Theme::idle(true),
+            _ => t,
+        };
         let blur = url.as_deref().and_then(|u| self.g.backdrop(owned.ctx(), u));
         let ui = &mut App::region(&mut owned, c);
         let ui_id = ui.scope_id();
@@ -888,7 +913,9 @@ impl App {
         let cards_h = if empty { 0. } else { self.info_cards(ui, c, 0., false) };
         // Lyrics/queue body: shrinks (down to 240) so the controls stay on screen in short windows, caps at 380 so tall ones show the cards.
         let body_h = (c.height() - 118. - CTRL_H - 6.).clamp(240., 380.);
-        let top_h = lerp(c.width()..=118. + body_h, va).max(c.height() - CTRL_H - 6. - cards_h);
+        // Framed covers need room for an 18px margin on top and the title row below, so the art view grows past the square.
+        let art_h = c.width() + if self.opts.cover_style == 1 { 42. } else { 0. };
+        let top_h = lerp(art_h..=118. + body_h, va).max(c.height() - CTRL_H - 6. - cards_h);
         let max_sc = (top_h + CTRL_H + 6. + cards_h - c.height()).max(0.);
         let sc = self.pl.card_scroll.clamp(0., max_sc);
         let body_hit = Rect::from_min_max(pos2(x0, c.min.y - sc + 118.), pos2(x1, c.min.y - sc + top_h));
@@ -919,9 +946,15 @@ impl App {
         // A cover that fails to load (a server's URL for a song with no art can 404) must not keep the previous song's cover up
         // forever: the crossfade below only swaps once the new cover has loaded.
         let url = url.filter(|u| aspect.is_some() || !cover_broken(ui.ctx(), u, square.size()));
-        let wide = aspect.filter(|a| *a > 1.2);
-        // A wide cover is a video's: with videos on, the video itself plays in the floating rect (paced by the audio playhead).
-        let want = (self.video_on && wide.is_some() && open > 0.5).then(|| self.pl.song().map(|s| s.vid.clone())).flatten().filter(|v| !v.is_empty());
+        let video = aspect.filter(|a| *a > 1.2);
+        // "Crop videos" treats a video like a square cover: it is cropped to the square and gets no floating rect.
+        let wide = video.filter(|_| self.opts.cover_style != 2);
+        // Framed: every cover floats in an inset frame (a square one gets a square frame) and shrinks while paused.
+        let framed = self.opts.cover_style == 1;
+        let floats = wide.is_some() || framed;
+        let shrink = ui.ctx().calm_bool_ease(ui.scope_id().with("pl-shrink"), framed && !self.pl.playing, if reduced_motion() { 0. } else { 0.35 }, ease_out_soft);
+        // A video's thumbnail is wide: with videos on, the video itself plays in the floating rect (paced by the audio playhead).
+        let want = (self.video_on && video.is_some() && open > 0.5).then(|| self.pl.song().map(|s| s.vid.clone())).flatten().filter(|v| !v.is_empty());
         #[cfg(feature = "video")]
         let frame = self.video_frame(ui.ctx(), want.as_deref(), self.video_h);
         #[cfg(not(feature = "video"))]
@@ -983,20 +1016,29 @@ impl App {
         }
 
         let wide_a = wide.map(|a| frame.as_ref().map_or(a, |f| f.1));
-        let start = wide_a.map_or(square, |a| {
-            let slot = Rect::from_min_max(pos2(x0, base + 56.), pos2(x1, body_bottom - 62.));
-            let h = (w / a).min(slot.height().max(0.));
+        let slot = Rect::from_min_max(pos2(x0, base + 56.), pos2(x1, body_bottom - 62.));
+        let start = if let Some(a) = wide_a {
+            let h = (w / a).min(slot.height().max(0.)) * if framed { lerp(1.0..=0.82, shrink) } else { 1. };
             Rect::from_center_size(slot.center(), vec2(h * a, h))
-        });
+        } else if framed {
+            // Margin m on the top and sides (the art view is grown to fit it). Top-anchored, and pausing shrinks it around the
+            // playing frame's centre. The header buttons float over it on hover.
+            let m = (x0 - c.min.x).max(12.);
+            let full = (c.width() - 2. * m).min(body_bottom - 60. - base - m).max(0.);
+            let side = full * lerp(1.0..=0.82, shrink);
+            Rect::from_center_size(pos2(c.center().x, base + m + full / 2.), vec2(side, side))
+        } else {
+            square
+        };
         // A video keeps its shape in the compact header too.
         let small = Rect::from_min_size(pos2(x0, ident_top), vec2(46. * wide_a.unwrap_or(1.), 46.));
         let cr = Rect::from_min_max(start.min.lerp(small.min, va), start.max.lerp(small.max, va));
-        let (r0, b0): (f32, f32) = if wide.is_some() { (12., 12.) } else { (18., 0.) };
+        let (r0, b0): (f32, f32) = if floats { (12., 12.) } else { (18., 0.) };
         let (top_r, bot_r) = (lerp(r0..=6., va) as u8, lerp(b0..=6., va) as u8);
         let shown = lerp(1.0..=open, va);
         let cr_corners = CornerRadius { nw: top_r, ne: top_r, sw: bot_r, se: bot_r };
         let tint = Color32::WHITE.gamma_multiply(shown);
-        if wide.is_some() {
+        if floats {
             shadow(ui.painter(), cr, 12., 8, 28, (90. * (1. - va)) as u8);
         }
         if let Some(p) = st.prev.as_deref().filter(|_| f < 1.) {
@@ -1026,7 +1068,7 @@ impl App {
         // Dissolves the cover's lower half into the backdrop. It follows the cover (not the art-view square) and is gone
         // by mid-morph, so it never sits over the cover as it travels to the header.
         let dis = (1. - va * 2.).max(0.);
-        if wide.is_none() && dis > 0. {
+        if !floats && dis > 0. {
             // Runs a pixel past the cover: at a fractional edge the cover's last row would otherwise show as a bright line.
             let end = cr.max.y + 1.;
             let fp = ui.painter().with_clip_rect(Rect::from_min_max(cr.min, pos2(cr.max.x, end)));
@@ -1054,11 +1096,12 @@ impl App {
             }
         }
         // Video / thumbnail toggle and quality in the floating rect's corner; they fade in while the pointer is over it.
-        if wide.is_some() && va < 0.5 && cfg!(feature = "video") {
+        if video.is_some() && va < 0.5 && cfg!(feature = "video") {
             let over = ui.rect_contains_pointer(cr);
             let a = ui.ctx().calm_bool_ease(ui.scope_id().with("pl-vctl"), over, 0.15, ease_in_out);
             if a > 0. {
-                let at = pos2(cr.max.x - 24., cr.max.y - 24.);
+                // On a full-bleed cover the corner holds the like and menu buttons, so the controls sit above them.
+                let at = if floats { pos2(cr.max.x - 24., cr.max.y - 24.) } else { pos2(cr.max.x - 24., (body_bottom - 27.).min(cr.max.y) - 48.) };
                 p.circle_filled(at, 16., Color32::from_black_alpha(140).gamma_multiply(a));
                 let (ic, tip) = if self.video_on { (icon!("vidoff"), "Hide the video") } else { (icon!("vid"), "Play the video") };
                 if glyph_button(ui, "pl-video", at, 32., ic, 16., Color32::WHITE.gamma_multiply(a)).tip(&self.t, tip).clicked() {
@@ -1193,20 +1236,28 @@ impl App {
 
         // Header: album name (compact views) + hide button.
         let top = base + 12.;
-        if va < 0.99 {
-            let disc = Color32::from_black_alpha(90).lerp_to_gamma(Color32::from_white_alpha(70), dark).gamma_multiply(1. - va);
-            p.circle_filled(pos2(x1 - 16., top + 16.), 16., disc);
+        // Framed art has no header strip: the buttons move into the cover's top-right corner and show on hover.
+        let k = if framed { 1. - va } else { 0. };
+        let hover = ui.ctx().calm_bool_ease(ui.scope_id().with("pl-hdr"), ui.rect_contains_pointer(cr), 0.15, ease_out);
+        let ha = lerp(1.0..=hover, k);
+        let corner = pos2(cr.max.x - 24., cr.min.y + 24.);
+        let hide_at = pos2(x1 - 16., top + 16.).lerp(corner, k);
+        if va < 0.99 && ha > 0. {
+            let disc = Color32::from_black_alpha(90).lerp_to_gamma(Color32::from_white_alpha(70), dark).gamma_multiply((1. - va) * ha);
+            p.circle_filled(hide_at, 16., disc);
         }
         if va > 0.01 {
             trunc(&p, pos2(x0 + 4., top + 16.), w - if self.opts.viz_style > 0 { 82. } else { 44. }, if album.is_empty() { &title } else { &album }, font_w(13., Weight::Semi), it.tx.gamma_multiply(va));
         }
-        let hide = glyph_button(ui, "hide", pos2(x1 - 16., top + 16.), 32., icon!("colr"), 16., if va < 0.5 { it.tx } else { it.tm }).clicked();
+        let hide = ha > 0.05 && glyph_button(ui, "hide", hide_at, 32., icon!("colr"), 16., (if va < 0.5 { it.tx } else { it.tm }).gamma_multiply(ha)).clicked();
         if self.opts.viz_style > 0 {
-            let at = pos2(x1 - 16. - 38., top + 16.);
+            let at = hide_at - vec2(38., 0.);
             let on = view == PlayerView::Viz;
             let disc = if on { it.tx.gamma_multiply(0.9) } else { Color32::from_black_alpha(90).lerp_to_gamma(Color32::from_white_alpha(70), dark).gamma_multiply(1. - va) };
-            p.circle_filled(at, 16., disc);
-            if glyph_button(ui, "viz", at, 32., icon!("viz"), 16., if on { it.s1 } else if va < 0.5 { it.tx } else { it.tm }).clicked() {
+            if ha > 0. {
+                p.circle_filled(at, 16., disc.gamma_multiply(ha));
+            }
+            if ha > 0.05 && glyph_button(ui, "viz", at, 32., icon!("viz"), 16., (if on { it.s1 } else if va < 0.5 { it.tx } else { it.tm }).gamma_multiply(ha)).clicked() {
                 self.view = if on { PlayerView::Art } else { PlayerView::Viz };
                 pl.scroll = 0.;
             }
@@ -1715,4 +1766,18 @@ impl App {
 
 fn codec_name(mime: &str) -> String {
     if mime.contains("opus") { "OPUS" } else if mime.contains("mp4a") { "AAC" } else { "AUDIO" }.into()
+}
+
+#[cfg(test)]
+mod private_host_tests {
+    use super::private_host;
+    #[test]
+    fn classifies_hosts() {
+        for u in ["http://192.168.1.5:8096/Items/x", "http://localhost:8096/a", "http://nas/a", "https://jf.local/a", "http://[::1]:8096/a", "http://10.0.0.2/a", "http://172.20.0.1/a"] {
+            assert!(private_host(u), "{u}");
+        }
+        for u in ["https://jf.example.com/Items/x?a=1", "http://8.8.8.8:8096/a", "https://u@media.example.org:443/a"] {
+            assert!(!private_host(u), "{u}");
+        }
+    }
 }

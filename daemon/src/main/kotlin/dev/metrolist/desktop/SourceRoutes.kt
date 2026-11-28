@@ -147,6 +147,7 @@ fun Route.sourceRoutes() {
     get("/music/stream/{id}") { val (s, id) = Sources.parse(call.parameters["id"]!!); call.respond(Sources.use(s).stream(id)) }
     get("/music/album/{id}") { val (s, id) = Sources.parse(call.parameters["id"]!!); call.respond(Sources.use(s).album(id).ns(s)) }
     get("/music/artist/{id}") { val (s, id) = Sources.parse(call.parameters["id"]!!); call.respond(Sources.use(s).artist(id).ns(s)) }
+    get("/music/discography/{id}") { val (s, id) = Sources.parse(call.parameters["id"]!!); call.respond(Sources.use(s).discography(id).map { it.ns(s) }) }
     get("/music/playlist/{id}") { val (s, id) = Sources.parse(call.parameters["id"]!!); call.respond(Sources.use(s).playlist(id).ns(s)) }
     get("/music/radio/{id}") { val (s, id) = Sources.parse(call.parameters["id"]!!); call.respond(Sources.use(s).radio(id).map { it.ns(s) }) }
     post("/music/like/{id}") { val (s, id) = Sources.parse(call.parameters["id"]!!); Sources.use(s).like(id, call.request.queryParameters["on"] == "true"); call.respond(HttpStatusCode.NoContent) }

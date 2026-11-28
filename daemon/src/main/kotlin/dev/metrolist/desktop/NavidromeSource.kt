@@ -128,7 +128,7 @@ class NavidromeSource(override val config: SourceConfig) : MusicSource {
         "songs" -> call("getStarred2").obj("starred2").list("song").map(::songItem)
         "albums" -> albumList("alphabeticalByName", 5000)
         "artists" -> call("getArtists").obj("artists").list("index").flatMap { it.list("artist") }.map(::artistItem)
-        "playlists" -> call("getPlaylists").obj("playlists").list("playlist").map(::playlistItem)
+        "playlists" -> listOf(STARRED_ITEM) + call("getPlaylists").obj("playlists").list("playlist").map(::playlistItem)
         else -> emptyList()
     }
 
@@ -159,10 +159,12 @@ class NavidromeSource(override val config: SourceConfig) : MusicSource {
 
     override suspend fun artist(id: String): PageDto {
         val a = call("getArtist", "id" to id).obj("artist")
-        return PageDto(artistItem(a), sections = listOf(SectionDto("Albums", a.list("album").map(::albumItem))))
+        val albums = a.list("album").sortedWith(compareByDescending<JsonObject> { it.int("year") ?: 0 }.thenBy { it.str("name").orEmpty().lowercase() })
+        return PageDto(artistItem(a), sections = listOf(SectionDto("Albums", albums.map(::albumItem))).filter { it.items.isNotEmpty() })
     }
 
     override suspend fun playlist(id: String): PageDto {
+        if (id == STARRED) return PageDto(STARRED_ITEM, tracks = call("getStarred2").obj("starred2").list("song").map(::track))
         val p = call("getPlaylist", "id" to id).obj("playlist")
         return PageDto(playlistItem(p), description = p.str("comment"), tracks = p.list("entry").map(::track))
     }
@@ -244,6 +246,9 @@ class NavidromeSource(override val config: SourceConfig) : MusicSource {
     }
 
     private companion object {
+        /** Subsonic has no starred playlist; this virtual one lists the starred songs. */
+        const val STARRED = "starred"
+        val STARRED_ITEM = ItemDto("playlist", STARRED, "Starred songs")
         val http = HttpClient(OkHttp) { install(HttpTimeout) { requestTimeoutMillis = 20_000; connectTimeoutMillis = 8_000 } }
         fun JsonObject.str(k: String) = (this[k] as? JsonPrimitive)?.contentOrNull
         fun JsonObject.int(k: String) = (this[k] as? JsonPrimitive)?.intOrNull

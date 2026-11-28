@@ -275,7 +275,8 @@ object Services {
         val (src, raw) = Sources.parse(id)
         if (src != "yt") {
             try {
-                Sources.use(src).lyrics(raw)?.takeIf { it.isNotBlank() }?.let { return LyricsDto(src, LyricsUtils.filterLyricsCreditLines(it)) }
+                val server = Sources.use(src)
+                server.lyrics(raw)?.takeIf { it.isNotBlank() }?.let { return LyricsDto(server.config.name, LyricsUtils.filterLyricsCreditLines(it)) }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -286,6 +287,8 @@ object Services {
         val ytId = if (id.contains(':')) "" else id
         val cleaned = LyricsUtils.cleanTitleForSearch(title)
         for (name in Settings.lyricsOrder()) {
+            // YouTube's providers look songs up by video id; a server's song has none, and must not reach YouTube.
+            if (ytId.isEmpty() && name.startsWith("YouTube")) continue
             val provider = LyricsProviderRegistry.getProviderByName(name)?.takeIf { it.isEnabled(context) } ?: continue
             try {
                 provider.getLyrics(context, ytId, cleaned, artist, durationSec, album).getOrNull()

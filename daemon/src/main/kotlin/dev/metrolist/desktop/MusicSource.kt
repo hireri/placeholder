@@ -1,5 +1,10 @@
 package dev.metrolist.desktop
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
 
 enum class Kind { CATALOG, LIBRARY }
@@ -101,6 +106,18 @@ interface MusicSource {
     suspend fun album(id: String): PageDto = unsupported()
     suspend fun artist(id: String): PageDto = unsupported()
     suspend fun playlist(id: String): PageDto = unsupported()
+
+    /**
+     * Every album, EP and single on the artist's page with its tracks, newest first. "Appears on" and "Featured on" shelves are
+     * someone else's releases, so they are left out.
+     */
+    suspend fun discography(id: String): List<PageDto> = coroutineScope {
+        val releases = artist(id).sections.filter { s -> listOf("appears", "featured").none { it in s.title.lowercase() } }
+            .flatMap { it.items }.filter { it.type == "album" }.distinctBy { it.id }
+        val gate = Semaphore(4)
+        releases.map { a -> async { gate.withPermit { runCatching { album(a.id).copy(sections = emptyList()) }.getOrNull() } } }.awaitAll().filterNotNull()
+            .sortedByDescending { p -> p.item.subtitle?.substringAfterLast(" · ")?.takeIf { it.length == 4 }?.toIntOrNull() ?: 0 }
+    }
     suspend fun radio(id: String): List<TrackDto> = emptyList()
     suspend fun like(id: String, on: Boolean): Unit = unsupported()
     // Playlist and image writes, for sources with [Cap.PLAYLIST_WRITE] / [Cap.IMAGE]. Ids are the source's raw ids; a refusal

@@ -49,7 +49,7 @@ fn log_file() -> Stdio {
 }
 
 /// Release layout: `daemon/` (installDist) and `jre/` sit next to the executable; dev falls back to the Gradle build tree.
-fn exe_dir() -> Option<std::path::PathBuf> {
+pub fn exe_dir() -> Option<std::path::PathBuf> {
     std::env::current_exe().ok().and_then(|p| p.parent().map(Into::into))
 }
 

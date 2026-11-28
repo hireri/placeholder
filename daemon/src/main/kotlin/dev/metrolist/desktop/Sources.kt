@@ -56,7 +56,10 @@ object Sources {
     /** `<sourceId>:<rawId>` to its parts; a bare id is YouTube. Raw ids may themselves contain ':' so only the first one splits. */
     fun parse(full: String): Pair<String, String> {
         val i = full.indexOf(':')
-        return if (i > 0 && exists(full.substring(0, i))) full.substring(0, i) to full.substring(i + 1) else "yt" to full
+        if (i > 0 && exists(full.substring(0, i))) return full.substring(0, i) to full.substring(i + 1)
+        // A server id whose source was removed would otherwise be sent to YouTube as a bare id.
+        if (i > 0 && full.substring(0, i).substringBefore('-') in factories) throw NoSuchElementException("no source ${full.substring(0, i)}")
+        return "yt" to full
     }
 
     fun status(cfg: SourceConfig): SourceStatusDto {
