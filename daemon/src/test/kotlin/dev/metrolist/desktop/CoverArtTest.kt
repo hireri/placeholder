@@ -17,10 +17,11 @@ class CoverArtTest {
             val p = ex.requestURI.path
             val q = ex.requestURI.query.orEmpty()
             val (code, body) = when {
+                p.startsWith("/ws/2/release/") && "Down" in q -> 503 to ""
                 p.startsWith("/ws/2/release/") -> { mbCalls.incrementAndGet(); 200 to if ("Nope" in q) """{"releases":[]}""" else if ("NoArt" in q) """{"releases":[{"id":"bad"}]}""" else """{"releases":[{"id":"abc"}]}""" }
                 p.startsWith("/ws/2/recording/") -> { mbCalls.incrementAndGet(); 200 to """{"recordings":[{"releases":[{"id":"abc"}]}]}""" }
                 p == "/release/abc/front-500" -> 200 to ""
-                p == "/search" -> 200 to if ("Fallback" in q) """{"results":[{"artistName":"Other","artworkUrl100":"https://x/a/100x100bb.jpg"},{"artistName":"The Artist","artworkUrl100":"https://x/a/100x100bb.jpg"}]}""" else """{"results":[]}"""
+                p == "/search" -> 200 to if ("Fallback" in q || "Down" in q) """{"results":[{"artistName":"Other","artworkUrl100":"https://x/a/100x100bb.jpg"},{"artistName":"The Artist","artworkUrl100":"https://x/a/100x100bb.jpg"}]}""" else """{"results":[]}"""
                 else -> 404 to ""
             }
             ex.sendResponseHeaders(code, if (body.isEmpty()) -1 else body.length.toLong())
@@ -41,6 +42,8 @@ class CoverArtTest {
             assertEquals("$base/release/abc/front-500", CoverArt.lookup("Artist", "", "Song").url)
             // MusicBrainz has no release: the catalogue search answers, for the right artist only, at a larger size.
             assertEquals("https://x/a/600x600bb.jpg", CoverArt.lookup("The Artist", "Nope Fallback", "T").url)
+            // MusicBrainz is down: the catalogue search still answers.
+            assertEquals("https://x/a/600x600bb.jpg", CoverArt.lookup("The Artist", "Down", "T").url)
         } finally { server.stop(0); CoverArt.clear() }
         Unit
     }

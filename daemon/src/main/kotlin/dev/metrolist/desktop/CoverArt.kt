@@ -51,7 +51,7 @@ object CoverArt {
 
     private suspend fun find(artist: String, album: String, title: String): String? {
         if (artist.isBlank() || (album.isBlank() && title.isBlank())) return null
-        return musicBrainz(artist, album, title) ?: runCatching { itunes(artist, album, title) }.getOrNull()
+        return runCatching { musicBrainz(artist, album, title) }.getOrNull() ?: runCatching { itunes(artist, album, title) }.getOrNull()
     }
 
     /** The first of the best three releases that has front art; many releases have none. */
