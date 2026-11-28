@@ -79,7 +79,7 @@ jobs:
           git clone --depth 1 https://github.com/projectM-visualizer/presets-milkdrop-texture-pack.git textures-src
           mkdir -p dist/presets dist/textures
           # The set Feishin plays (butterchurn base + extra + md1), not the 10k-preset pack: most of that is goop or strobing.
-          while IFS= read -r n; do cp "presets-src/presets/milkdrop/$n.milk" dist/presets/; done < scripts/butterchurn-presets.txt
+          while IFS= read -r n; do cp "presets-src/presets/milkdrop/${n%$'\r'}.milk" dist/presets/; done < scripts/butterchurn-presets.txt # Windows checks the list out with CRLF
           cp -r textures-src/textures/. dist/textures/
       - name: Package
         run: |
