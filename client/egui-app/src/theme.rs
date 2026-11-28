@@ -117,6 +117,12 @@ impl Theme {
         Theme::new(hue, (chroma * 1.4).clamp(0.06, 0.16), (chroma * 0.2).clamp(0.006, 0.026), dark)
     }
 
+    /// Keeps `self`'s surfaces and text but takes `p`'s accent colours.
+    pub fn accent_of(mut self, p: Theme) -> Self {
+        (self.ax, self.on_ax, self.axc) = (p.ax, p.on_ax, p.axc);
+        self
+    }
+
     /// Window and sidebar go true black (OLED); panels and hover keep their tonal steps.
     pub fn pure_black(mut self) -> Self {
         self.s0 = Color32::BLACK;

@@ -827,6 +827,16 @@ fn dim_alpha(a: f32) -> Color32 {
 impl App {
     /// `open` is 0..1 (0 = collapsed to the peek sliver); the card keeps its full size and is just slid by the caller.
     pub fn player(&mut self, ui: &mut egui::Ui, slot: Rect, open: f32) {
+        // The card is always dark: it sits on the cover's blur, so the app's light/dark mode must not leak into it.
+        let app_theme = self.t;
+        if !app_theme.dark {
+            self.t = self.theme_for(true);
+        }
+        self.player_card(ui, slot, open, app_theme.s0);
+        self.t = app_theme;
+    }
+
+    fn player_card(&mut self, ui: &mut egui::Ui, slot: Rect, open: f32, behind: Color32) {
         let t = self.t;
         let mut owned = App::region(ui, slot);
         let view = self.view;
@@ -840,7 +850,6 @@ impl App {
             round_top_corners(&outer, c, 18., bg);
             round_bottom_corners(&outer, c, 18., bg);
         };
-        let behind = t.s0;
 
         let empty = self.pl.song().is_none();
         let url = self.pl.song().and_then(|s| s.thumbnail.clone());

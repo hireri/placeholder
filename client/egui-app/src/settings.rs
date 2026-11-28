@@ -554,8 +554,7 @@ impl App {
                 }
                 hit.tip(&self.t, name);
             }
-            let playing = self.pl.song().is_some();
-            let why = (self.opts.auto_theme && playing).then_some("Turn off “Theme from artwork” to pick an accent while a song is playing");
+            let why = self.opts.custom.then_some("Turn off “Custom theme” to pick an accent");
             let id = ui.scope_id().with(("settings-gate", "accent"));
             let k = ui.ctx().calm_bool_ease(id, why.is_some(), 0.2, ease_out);
             self.gate_rect(ui, card.shrink2(vec2(0., 1.)), id, k, why);

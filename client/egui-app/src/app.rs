@@ -1162,8 +1162,8 @@ impl App {
             None => Theme::preset(self.opts.accent, dark),
             // Until the cover's tone arrives keep the theme the last song left; a grey or unreadable cover goes neutral.
             Some(None) if self.theme_anim.1.dark == dark => return self.theme_anim.1,
-            Some(Some(Some(tone))) => Theme::tinted(tone, dark),
-            Some(_) => Theme::idle(dark),
+            Some(Some(Some(tone))) => Theme::tinted(tone, dark).accent_of(Theme::preset(self.opts.accent, dark)),
+            Some(_) => Theme::idle(dark).accent_of(Theme::preset(self.opts.accent, dark)),
         };
         // Artwork theming wins while a cover is driving it; the custom colours apply otherwise.
         let t = self.custom.as_ref().filter(|_| cover.is_none()).map_or(base, |c| base.custom(c));
