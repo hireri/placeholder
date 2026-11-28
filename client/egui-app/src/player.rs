@@ -653,7 +653,8 @@ impl Player {
                 break;
             }
             match ev {
-                audio::Event::Advanced => match self.queued.take().and_then(|q| Some((self.queue.iter().position(|s| s.id == q.id)?, q))) {
+                // The engine chained into `queued` before a song was added or moved ahead of it: only follow it if it is still next.
+                audio::Event::Advanced => match self.queued.take().and_then(|q| (self.cur + 1..self.queue.len()).find(|&i| self.off_of(&self.queue[i]).is_none()).filter(|&i| self.queue[i].id == q.id).map(|i| (i, q))) {
                     Some((i, q)) => {
                         self.enter(ctx, i);
                         self.quality = Some(q.quality);
