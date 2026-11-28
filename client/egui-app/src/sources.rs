@@ -394,6 +394,11 @@ impl Sources {
         self.lock().list.as_ref().and_then(|l| l.as_ref().ok()).map(|l| l.iter().filter(|s| s.enabled).map(|s| s.name.clone()).collect()).unwrap_or_default()
     }
 
+    /// The first enabled source, whose account the greeting uses.
+    pub fn top(&self) -> Option<Source> {
+        self.lock().list.as_ref().and_then(|l| l.as_ref().ok()).and_then(|l| l.iter().find(|s| s.enabled).cloned())
+    }
+
     pub fn take_added(&self) -> bool {
         std::mem::take(&mut self.lock().added)
     }

@@ -296,11 +296,11 @@ impl App {
                             LibView::Compact => (cell.min.x + 10., cell.center().y, cell.width() - 20.),
                             LibView::List => {
                                 let art = Rect::from_center_size(pos2(cell.min.x + 26., cell.center().y), vec2(40., 40.));
-                                self.thumb_g(ui, it.thumb.as_deref(), art, if it.round() { 20. } else { 6. }, off);
+                                self.thumb_l(ui, it.thumb.as_deref(), art, if it.round() { 20. } else { 6. }, off, crate::live::is_liked_list(&it.id));
                                 (cell.min.x + 56., cell.center().y, cell.max.x - cell.min.x - 62.)
                             }
                             LibView::Grid => {
-                                self.thumb_g(ui, it.thumb.as_deref(), cell, if it.round() { cw / 2. } else { 6. }, off);
+                                self.thumb_l(ui, it.thumb.as_deref(), cell, if it.round() { cw / 2. } else { 6. }, off, crate::live::is_liked_list(&it.id));
                                 if on {
                                     tp.rect_stroke(cell.expand(2.), rad(8.), egui::Stroke::new(2., t.tx), egui::StrokeKind::Outside);
                                 }
@@ -313,7 +313,7 @@ impl App {
                             }
                             LibView::Grid2 => {
                                 let art = Rect::from_min_size(cell.min + vec2(8., 8.), vec2(cw - 16., cw - 16.));
-                                self.thumb_g(ui, it.thumb.as_deref(), art, if it.round() { (cw - 16.) / 2. } else { 6. }, off);
+                                self.thumb_l(ui, it.thumb.as_deref(), art, if it.round() { (cw - 16.) / 2. } else { 6. }, off, crate::live::is_liked_list(&it.id));
                                 (art.min.x, art.max.y + 8. + 8., cw - 16.)
                             }
                         };

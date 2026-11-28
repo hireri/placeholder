@@ -82,6 +82,7 @@ class NavidromeSource(override val config: SourceConfig) : MusicSource {
     private fun track(o: JsonObject) = TrackDto(
         id = o.str("id").orEmpty(), title = o.str("title").orEmpty(), artists = artistsOf(o), album = o.str("album"),
         durationSec = o.int("duration"), thumbnail = cover(o), source = config.id, artistId = o.str("artistId"), albumId = o.str("albumId"),
+        liked = o.str("starred") != null,
     )
 
     private fun songItem(o: JsonObject) = ItemDto(

@@ -7,7 +7,7 @@ use crate::data::{Item, Section, State, Track};
 use crate::gfx::*;
 use crate::menu::Target;
 use crate::page::{Look, HEAD, HERO_H, HERO_MIN};
-use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, ScrollArea};
+use eframe::egui::{self, pos2, Image, vec2, Align2, Color32, Rect, ScrollArea};
 use std::borrow::Cow;
 
 /// Seconds a carousel arrow takes to slide the row.
@@ -29,6 +29,11 @@ pub fn target(it: &Item) -> Option<(&'static str, Route)> {
     })
 }
 
+/// The Liked songs playlist (`LM`) or a source's favourites (`<source>:favorites`).
+pub fn is_liked_list(id: &str) -> bool {
+    id == "LM" || id.ends_with(":favorites")
+}
+
 /// Columns and card width for a grid across `w` pixels whose cards are at least `min` wide, `gap` apart.
 pub fn grid(w: f32, min: f32, gap: f32) -> (usize, f32) {
     let cols = (((w + gap) / (min + gap)) as usize).max(1);
@@ -47,7 +52,22 @@ impl App {
 
     /// [`thumb`](Self::thumb), in greyscale when `gray` (an item whose source is off).
     pub fn thumb_g(&self, ui: &egui::Ui, url: Option<&str>, rect: Rect, r: f32, gray: bool) {
-        ui.painter().rect_filled(rect, rad(r), self.t.s3);
+        self.thumb_l(ui, url, rect, r, gray, false);
+    }
+
+    /// [`thumb_g`](Self::thumb_g); `liked` marks the Liked songs playlist, whose placeholder is a filled star.
+    pub fn thumb_l(&self, ui: &egui::Ui, url: Option<&str>, rect: Rect, r: f32, gray: bool, liked: bool) {
+        let side = rect.width().min(rect.height());
+        if liked {
+            // The source's own cover paints over this once it has loaded; without one this is the cover.
+            Image::new(liked_cover(ui.ctx(), self.t.on_ax)).fit_to_exact_size(rect.size()).corner_radius(rad(r)).paint_at(ui, rect);
+            icon(ui, "bytes://icons/starf.svg", rect.center(), side * 0.5, self.t.ax);
+        } else {
+            ui.painter().rect_filled(rect, rad(r), self.t.s3);
+            // Round slots are artists, square ones tracks.
+            let round = r * 2. >= side - 1.;
+            icon(ui, if round { "bytes://icons/art.svg" } else { "bytes://icons/song.svg" }, rect.center(), side * 0.45, self.t.tf);
+        }
         if let Some(u) = url {
             if gray { paint_cover_gray(ui, u, rect, rad(r), Color32::WHITE) } else { paint_cover(ui, u, rect, rad(r), Color32::WHITE) }
         }
@@ -538,9 +558,20 @@ impl App {
         let top = top;
         let d = self.data.clone();
         d.status.ensure(ui.ctx(), || backend::get("/auth/status"));
-        let user = match &*d.status.lock() {
-            State::Ready(s) => s.youtube.user.clone().filter(|_| s.youtube.logged_in),
-            _ => None,
+        // The greeting names the account of the topmost enabled source.
+        let user = match self.sources.top() {
+            Some(s) if !s.builtin => {
+                // Name and picture come from a connection test, which the daemon forgets on restart and on sign-in.
+                if s.secret_set && s.status == "unchecked" && !self.sources.checking(&s.id) {
+                    self.sources.test(ui.ctx(), &s.id);
+                }
+                s.detail.as_deref().and_then(|d| d.strip_prefix("Signed in as ")).map(str::to_string).or(s.username.clone().filter(|_| s.secret_set))
+                    .map(|name| backend::User { name, subtitle: None, avatar_url: s.avatar_url.clone() })
+            }
+            _ => match &*d.status.lock() {
+                State::Ready(s) => s.youtube.user.clone().filter(|_| s.youtube.logged_in),
+                _ => None,
+            },
         };
         // Home refetches when a source changes, and whenever it is older than ten minutes when the page is drawn.
         if d.home_age() > 600 {

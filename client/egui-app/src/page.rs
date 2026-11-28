@@ -345,7 +345,7 @@ impl App {
         let ay = card.min.y + lerp(HERO_H - 43., (HERO_MIN - 35.) / 2.);
         let ax = lerp(card.min.x + 22., card.max.x - 22. - acts_w);
         shadow(&p, art, ar, 6, 22, 71);
-        self.thumb(ui, cover_url, art, ar);
+        self.thumb_l(ui, cover_url, art, ar, false, page_item.as_ref().is_some_and(|i| i.r#type == "playlist" && crate::live::is_liked_list(&i.id)));
 
         // Meta block, bottom-aligned with the art: kicker, big title, then "Artist · details" with the artist a link.
         let mx = art.max.x + 22.;
@@ -552,6 +552,10 @@ impl App {
         // A playlist or album from one source says so once, in its header; rows only say it when the list mixes sources.
         let mixed = crate::sources::mixed(tracks.iter().map(|t| t.source.as_str()));
         self.data.detail(ui.ctx(), "playlists", "LM"); // starts loading Liked songs so the stars know what is liked
+        let sc: Vec<String> = self.sources.list(ui.ctx()).and_then(|l| l.ok()).unwrap_or_default().into_iter().filter(|s| s.enabled && s.secret_set && s.r#type == "soundcloud").map(|s| s.id).collect();
+        if !sc.is_empty() {
+            self.data.load_source_likes(ui.ctx(), sc);
+        }
         for ix in range {
             let (_, r) = ui.allocate_space(vec2(tr - tl + 12., rh));
             let row = Rect::from_min_max(pos2(tl, r.min.y), pos2(tr, r.max.y));
@@ -638,7 +642,7 @@ impl App {
             ui.painter().text(pos2(cols[4].0 + cols[4].1, cy), Align2::RIGHT_CENTER, tk.dur(), font(13.), if dim { t.tf } else { t.tm });
             // Fav and more: shown on hover (the fav star stays while liked).
             let likable = self.sources.can(&tk.source, "like");
-            let liked = likable && self.data.is_liked(&tk.id);
+            let liked = likable && self.data.is_liked(tk);
             if hot || liked {
                 if likable {
                     let col = if liked { t.ax } else { t.tm };
@@ -671,7 +675,7 @@ impl App {
             _ => {}
         }
         if let Some(ix) = a.like {
-            let on = !self.data.is_liked(&tracks[ix].id);
+            let on = !self.data.is_liked(&tracks[ix]);
             self.data.like(ui.ctx(), tracks[ix].clone(), on);
         }
         if let Some((pos, ix)) = a.menu {

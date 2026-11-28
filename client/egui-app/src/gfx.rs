@@ -884,6 +884,28 @@ pub fn sized(id: TextureId, size: f32) -> SizedTexture {
     SizedTexture::new(id, egui::vec2(size, size))
 }
 
+/// The Liked songs / favourites cover: `base` as a diagonal gradient, rebuilt only when the colour changes.
+pub fn liked_cover(ctx: &Context, base: Color32) -> SizedTexture {
+    let key = egui::Id::NULL.with("liked-cover");
+    let img = || gradient(64, 64, 135., mix(base, Color32::WHITE, 0.3), mix(base, Color32::BLACK, 0.25), 1.);
+    // The texture calls take the context lock themselves, so they must not run inside `data_mut`.
+    let tex = match ctx.data(|d| d.get_temp::<(Color32, egui::TextureHandle)>(key)) {
+        Some((c, tex)) if c == base => tex,
+        found => {
+            let tex = match found {
+                Some((_, mut tex)) => {
+                    tex.set(img(), egui::TextureOptions::LINEAR);
+                    tex
+                }
+                None => ctx.load_texture("liked-cover", img(), egui::TextureOptions::LINEAR),
+            };
+            ctx.data_mut(|d| d.insert_temp(key, (base, tex.clone())));
+            tex
+        }
+    };
+    SizedTexture::from_handle(&tex)
+}
+
 /// CSS-style linear gradient (`angle` 0 = up, clockwise); `end` is where `to` is reached (0..1).
 fn gradient(w: usize, h: usize, angle: f32, from: Color32, to: Color32, end: f32) -> ColorImage {
     let (s, c) = angle.to_radians().sin_cos();

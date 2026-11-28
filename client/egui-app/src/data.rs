@@ -195,6 +195,9 @@ pub struct Track {
     pub album_id: Option<String>,
     pub explicit: bool,
     pub video: bool,
+    /// Favorited on its own source (Jellyfin, Navidrome) when the list was fetched.
+    #[serde(default)]
+    pub liked: bool,
     /// Spotify import only: the YouTube counterpart is still being looked up.
     #[serde(default)]
     pub resolving: bool,
@@ -486,8 +489,10 @@ pub struct Data {
     exporting: Arc<AtomicBool>,
     /// Songs looked up by id, to learn which album a feed item sits on.
     pub song_infos: Mutex<HashMap<String, Arc<Remote<Track>>>>,
-    /// Liked songs from non-YouTube sources, by their prefixed id (they have no cached page to live in).
-    pub provider_likes: Mutex<HashSet<String>>,
+    /// Likes and unlikes made here on non-YouTube songs, by prefixed id; they win over the `liked` flag the source sent.
+    pub provider_likes: Mutex<HashMap<String, bool>>,
+    /// Prefixed ids of the songs liked on SoundCloud, which does not flag them on the tracks it sends.
+    pub source_likes: Remote<HashSet<String>>,
     /// Set while a sign-in/out is in flight (the login window blocks), with the last error.
     pub busy: Arc<Mutex<(Option<&'static str>, Option<String>)>>,
 }
@@ -522,6 +527,7 @@ impl Data {
             exporting: Default::default(),
             song_infos: Default::default(),
             provider_likes: Default::default(),
+            source_likes: Remote::new(),
             busy: Default::default(),
         }
     }
@@ -868,6 +874,7 @@ impl Data {
         self.history.reset();
         self.spotify.reset();
         self.library.reset();
+        self.source_likes.reset();
         self.searches.lock().unwrap().clear();
         self.item_searches.lock().unwrap().clear();
         self.details.lock().unwrap().clear();
@@ -919,12 +926,25 @@ impl Data {
     }
 
     /// Whether `id` is in the loaded Liked songs page (false until it loads).
-    pub fn is_liked(&self, id: &str) -> bool {
-        if self.provider_likes.lock().unwrap().contains(id) {
-            return true;
+    pub fn is_liked(&self, track: &Track) -> bool {
+        if let Some(&on) = self.provider_likes.lock().unwrap().get(&track.id) {
+            return on;
         }
-        let page = self.details.lock().unwrap().get("playlists/LM").cloned();
-        page.is_some_and(|p| matches!(&*p.lock(), State::Ready(d) if d.tracks.iter().any(|t| t.id == id)))
+        track.liked || self.source_likes.ready().is_some_and(|l| l.contains(&track.id)) || {
+            let page = self.details.lock().unwrap().get("playlists/LM").cloned();
+            page.is_some_and(|p| matches!(&*p.lock(), State::Ready(d) if d.tracks.iter().any(|t| t.id == track.id)))
+        }
+    }
+
+    /// Loads the liked songs of the given sources (their library page) once, so stars show what is already liked.
+    pub fn load_source_likes(&self, ctx: &Context, sources: Vec<String>) {
+        self.source_likes.ensure(ctx, move || {
+            let mut ids = HashSet::new();
+            for s in sources {
+                ids.extend(backend::get::<Vec<Item>>(&format!("/source/{s}/library/songs"))?.into_iter().map(|i| i.id));
+            }
+            Ok(ids)
+        });
     }
 
     /// Likes or unlikes a song from a list row: the star and Liked songs page change at once; a refusal puts it back.
@@ -945,8 +965,7 @@ impl Data {
     /// Mirrors a like into the cached Liked songs page (`LM`) so it shows without a refetch. Other sources only set the liked flag.
     pub fn mirror_like(&self, track: Track, on: bool) {
         if track.source != "youtube" {
-            let mut set = self.provider_likes.lock().unwrap();
-            if on { set.insert(track.id) } else { set.remove(&track.id) };
+            self.provider_likes.lock().unwrap().insert(track.id, on);
             return;
         }
         for key in ["playlists/LM", "playlists/VLLM"] {

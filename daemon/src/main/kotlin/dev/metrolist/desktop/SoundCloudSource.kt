@@ -12,6 +12,13 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.isSuccess
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -22,6 +29,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
+import java.io.File
 
 /**
  * SoundCloud through the unofficial api-v2 the web player uses. `config.secret` is the optional `oauth_token` cookie value.
@@ -114,31 +122,89 @@ class SoundCloudSource(override val config: SourceConfig) : MusicSource {
         return when (kind) {
             "songs" -> page("track_likes")()
             "artists" -> page("followings")()
-            "playlists" -> page("playlists_without_albums")() + page("playlist_likes")().filter { it.type == "playlist" }
+            "playlists" -> listOf(FAVORITES_ITEM) + page("playlists_without_albums")() + page("playlist_likes")().filter { it.type == "playlist" }
             "albums" -> page("albums")() + page("playlist_likes")().filter { it.type == "album" }
             else -> emptyList()
         }.distinctBy { it.id }
     }
 
-    override suspend fun album(id: String) = set(id)
-    override suspend fun playlist(id: String) = set(id)
+    override suspend fun album(id: String) = if (id.startsWith(SINGLE)) single(id.removePrefix(SINGLE)) else set(id)
+    override suspend fun playlist(id: String) = if (id == FAVORITES) favorites() else set(id)
+
+    /** The sidebar's "Liked songs", like Jellyfin's. ponytail: first 200 likes; follow next_href for more. */
+    private suspend fun favorites() =
+        PageDto(item = FAVORITES_ITEM, tracks = items(get("/users/${me()}/track_likes", "limit" to "200")).mapNotNull(::track))
 
     override suspend fun artist(id: String): PageDto {
         val u = get("/users/$id").obj() ?: error("SoundCloud returned no user")
-        val sets = items(get("/users/$id/albums", "limit" to "20")) + items(get("/users/$id/playlists_without_albums", "limit" to "20"))
+        // The client only draws an artist's shelves when `tracks` is empty, and renders a "Top songs" shelf as a track list, like YouTube and Jellyfin.
+        val top = runCatching { items(get("/users/$id/toptracks", "limit" to "10")) }.getOrNull()?.takeIf { it.isNotEmpty() }
+            ?: items(get("/users/$id/tracks", "limit" to "10"))
         return PageDto(
             item = item(u) ?: error("bad user"), description = u.str("description"),
-            tracks = items(get("/users/$id/tracks", "limit" to "50")).mapNotNull(::track),
-            sections = if (sets.isEmpty()) emptyList() else listOf(SectionDto("Sets", sets)),
+            sections = listOf(
+                SectionDto("Top songs", top), SectionDto("Albums", items(get("/users/$id/albums", "limit" to "20"))),
+                SectionDto("Playlists", items(get("/users/$id/playlists_without_albums", "limit" to "20"))),
+            ).filter { it.items.isNotEmpty() },
         )
+    }
+
+    /**
+     * Every album, the artist's own playlists and every upload that is in neither (shown as one-track "singles"), newest first.
+     * ponytail: capped at 20 pages of 50 per list.
+     */
+    override suspend fun discography(id: String): List<PageDto> = coroutineScope {
+        val name = get("/users/$id").obj()?.str("username")
+        fun dated(o: JsonObject) = listOfNotNull(name, (o.str("release_date") ?: o.str("created_at"))?.take(4)).joinToString(" · ")
+        val gate = Semaphore(4)
+        val sets = (pages("/users/$id/albums") + pages("/users/$id/playlists_without_albums")).distinctBy(::idOf)
+            .map { s -> async { gate.withPermit { runCatching { set(idOf(s)!!).let { it.copy(item = it.item.copy(subtitle = dated(s))) } }.getOrNull() } } }
+            .awaitAll().filterNotNull().filter { p -> p.item.type == "album" || p.tracks.all { it.artistId == id } }
+        val inSets = sets.flatMapTo(HashSet()) { p -> p.tracks.map { it.id } }
+        val singles = pages("/users/$id/tracks").filter { idOf(it) !in inSets }.mapNotNull { t ->
+            val i = item(t) ?: return@mapNotNull null
+            PageDto(i.copy(type = "album", id = SINGLE + i.id, subtitle = dated(t)), tracks = listOfNotNull(track(i)))
+        }
+        (sets + singles).sortedByDescending { it.item.subtitle?.substringAfterLast(" · ")?.takeIf { y -> y.length == 4 }?.toIntOrNull() ?: 0 }
+    }
+
+    /** Follows `next_href` so long catalogues are complete. */
+    private suspend fun pages(path: String): List<JsonObject> {
+        val out = mutableListOf<JsonObject>()
+        var r = get(path, "limit" to "50")
+        repeat(20) {
+            out += collection(r)
+            r = get((r as? JsonObject)?.str("next_href") ?: return out)
+        }
+        return out
+    }
+
+    /** A track released on its own, opened as a one-song album. */
+    private suspend fun single(id: String): PageDto {
+        val i = item(get("/tracks/$id").obj() ?: error("SoundCloud returned no track")) ?: error("bad track")
+        return PageDto(i.copy(type = "album", id = SINGLE + id), tracks = listOfNotNull(track(i)))
     }
 
     override suspend fun radio(id: String): List<TrackDto> = items(get("/tracks/$id/related", "limit" to "30")).mapNotNull(::track)
 
     override suspend fun like(id: String, on: Boolean) {
         if (token == null) unsupported()
+        // DataDome, SoundCloud's bot protection, always answers plain HTTP clients with a captcha on likes, so go straight to a real browser session when there is one.
+        System.getenv("SERAFIN_LOGIN_HELPER")?.takeIf { File(it).isFile }?.let { return likeInBrowser(it, id, on) }
         val r = call(if (on) HttpMethod.Put else HttpMethod.Delete, "/users/${me()}/track_likes/$id", emptyMap())
-        check(r.status.isSuccess()) { "SoundCloud like failed: HTTP ${r.status.value}" }
+        check(r.status.isSuccess()) { "SoundCloud like failed: HTTP ${r.status.value} ${r.bodyAsText().take(120)}" }
+    }
+
+    /** Sends the like from the login helper's webview (its own SoundCloud session), which shows the captcha window if DataDome insists. */
+    private suspend fun likeInBrowser(helper: String, id: String, on: Boolean) {
+        val (user, client) = me() to clientId()
+        val (code, out) = withContext(Dispatchers.IO) {
+            val p = ProcessBuilder(helper, "soundcloud-like", if (on) "on" else "off", user, id).redirectErrorStream(true)
+                .apply { environment().also { it["SC_TOKEN"] = token; it["SC_CLIENT_ID"] = client } }.start()
+            val text = p.inputStream.bufferedReader().readText()
+            p.waitFor() to text.trim()
+        }
+        check(code == 0) { "SoundCloud like failed: ${out.take(200)}" }
     }
 
     /** A set with its tracks; past the first few SoundCloud returns id-only stubs, filled in via /tracks?ids=. */
@@ -212,6 +278,9 @@ class SoundCloudSource(override val config: SourceConfig) : MusicSource {
     }
 
     private companion object {
+        const val FAVORITES = "favorites"
+        const val SINGLE = "t-"
+        val FAVORITES_ITEM = ItemDto("playlist", FAVORITES, "Liked songs")
         val http = HttpClient(OkHttp) {
             install(HttpTimeout) { connectTimeoutMillis = 15_000; requestTimeoutMillis = 30_000; socketTimeoutMillis = 30_000 }
             defaultRequest { header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0") }

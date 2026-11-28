@@ -27,6 +27,8 @@ data class TrackDto(
     val albumId: String? = null,
     val explicit: Boolean = false,
     val video: Boolean = false,
+    /** Already favorited on the source itself (Jellyfin, Navidrome). */
+    val liked: Boolean = false,
 )
 
 @Serializable

@@ -53,6 +53,11 @@ pub fn exe_dir() -> Option<std::path::PathBuf> {
     std::env::current_exe().ok().and_then(|p| p.parent().map(Into::into))
 }
 
+/// The login helper, which the daemon also runs to send SoundCloud likes from a real browser session.
+fn login_helper() -> std::path::PathBuf {
+    exe_dir().map(|d| d.join(format!("serafin-login{}", std::env::consts::EXE_SUFFIX))).unwrap_or_default()
+}
+
 /// Hidden-webview helper the daemon uses to mint PoTokens; sits next to the executable like the login helper.
 fn potoken_helper() -> std::path::PathBuf {
     exe_dir().map(|d| d.join(format!("serafin-potoken{}", std::env::consts::EXE_SUFFIX))).unwrap_or_default()
@@ -89,7 +94,7 @@ fn daemon_command() -> Command {
 /// Blocking on first call: starts the daemon and reads its `{"port":..,"token":..}` handshake line.
 fn conn() -> Result<&'static (String, String), String> {
     CONN.get_or_init(|| {
-        let mut child = daemon_command().env("METROLIST_LOG", "1").env("SERAFIN_EXIT_ON_STDIN_EOF", "1").env("SERAFIN_POTOKEN_HELPER", potoken_helper()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log_file()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
+        let mut child = daemon_command().env("METROLIST_LOG", "1").env("SERAFIN_EXIT_ON_STDIN_EOF", "1").env("SERAFIN_POTOKEN_HELPER", potoken_helper()).env("SERAFIN_LOGIN_HELPER", login_helper()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log_file()).spawn().map_err(|e| format!("cannot start daemon: {e}"))?;
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).map_err(|e| e.to_string())?;
         if line.trim().is_empty() {

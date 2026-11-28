@@ -48,6 +48,13 @@ class SoundCloudSourceTest {
             {"url":"$base/api/h160","preset":"aac_160k","format":{"protocol":"hls","mime_type":"audio/mp4; codecs=\"mp4a.40.2\""}},
             {"url":"$base/api/henc","preset":"aac_160k","format":{"protocol":"ctr-encrypted-hls","mime_type":"audio/mp4"}}]}}""")
         api("/h160", """{"url":"https://cf-hls-media.sndcdn.com/pl/160.m3u8"}""")
+        api("/users/7", """{"kind":"user","id":7,"username":"Up","description":"bio"}""")
+        api("/users/7/toptracks", """{"collection":[{"kind":"track","id":42,"title":"Song","user":{"id":7,"username":"Up"}}]}""")
+        api("/users/7/albums", """{"collection":[{"kind":"playlist","id":5,"title":"LP","is_album":true,"user":{"id":7,"username":"Up"}}]}""")
+        api("/users/7/playlists_without_albums", """{"collection":[]}""")
+        api("/users/7/tracks", """{"collection":[{"kind":"track","id":42,"title":"Song","user":{"id":7,"username":"Up"}},
+            {"kind":"track","id":50,"title":"Loose","created_at":"2020-05-01T00:00:00Z","user":{"id":7,"username":"Up"}}],"next_href":"$base/api/more?limit=50"}""")
+        api("/more", """{"collection":[{"kind":"track","id":51,"title":"Later","created_at":"2022-01-01T00:00:00Z","user":{"id":7,"username":"Up"}}]}""")
         api("/me", """{"id":1,"username":"me"}""")
         server.start()
         return SoundCloudSource(SourceConfig("sc", "soundcloud", "SC", secret = secret)).also { it.api = "$base/api"; it.web = base }
@@ -99,6 +106,22 @@ class SoundCloudSourceTest {
         val p = source().album("5")
         assertEquals(listOf("Song", "Stub filled"), p.tracks.map { it.title })
         assertEquals("album", p.item.type)
+    }
+
+    @Test
+    fun artistPageIsShelvesNotATrackList() = runBlocking {
+        val p = source().artist("7")
+        assertTrue(p.tracks.isEmpty())
+        assertEquals(listOf("Top songs", "Albums"), p.sections.map { it.title })
+        assertEquals("bio", p.description)
+    }
+
+    @Test
+    fun discographyHasAlbumsAndEveryLooseTrackAcrossPages() = runBlocking {
+        val d = source().discography("7")
+        assertEquals(listOf("Later", "Loose", "LP"), d.map { it.item.title })
+        assertEquals("t-51", d[0].item.id)
+        assertEquals(listOf("Later"), d[0].tracks.map { it.title })
     }
 
     @Test

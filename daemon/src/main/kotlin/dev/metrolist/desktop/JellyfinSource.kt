@@ -193,6 +193,7 @@ class JellyfinSource(override val config: SourceConfig) : MusicSource {
             artists = o.arr("Artists")?.mapNotNull { it.str() }?.takeIf { it.isNotEmpty() } ?: listOfNotNull(o.str("AlbumArtist")),
             album = o.str("Album"), durationSec = seconds(o), thumbnail = thumb(o), source = config.id,
             artistId = artistId(o), albumId = o.str("AlbumId"),
+            liked = o.obj("UserData")?.get("IsFavorite").prim()?.booleanOrNull == true,
         )
     }
 
