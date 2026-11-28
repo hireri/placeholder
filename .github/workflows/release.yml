@@ -75,10 +75,11 @@ jobs:
           else
             cp -a pm-build/src/libprojectM/libprojectM-4.so* dist/
           fi
-          git clone --depth 1 https://github.com/projectM-visualizer/presets-cream-of-the-crop.git presets-src
+          git clone --depth 1 https://github.com/jberg/butterchurn-presets.git presets-src
           git clone --depth 1 https://github.com/projectM-visualizer/presets-milkdrop-texture-pack.git textures-src
           mkdir -p dist/presets dist/textures
-          cp -r presets-src/. dist/presets/ && rm -rf dist/presets/.git
+          # The set Feishin plays (butterchurn base + extra + md1), not the 10k-preset pack: most of that is goop or strobing.
+          while IFS= read -r n; do cp "presets-src/presets/milkdrop/$n.milk" dist/presets/; done < scripts/butterchurn-presets.txt
           cp -r textures-src/textures/. dist/textures/
       - name: Package
         run: |

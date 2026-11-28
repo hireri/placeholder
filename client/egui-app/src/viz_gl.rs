@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 /// Modes 1..=5 are the visualizer styles, numbered as in `viz::STYLES`.
 pub const GLOW: i32 = 6;
 const BLIT: i32 = 8;
+const EASE: i32 = 9;
 
 const VERT: &str = r#"
 out vec2 v_uv;
@@ -31,6 +32,7 @@ uniform float u_pk[48]; // peak caps
 uniform vec4 u_col;     // straight rgb + opacity
 uniform vec4 u_p;       // bass, kick, gate, spare
 uniform sampler2D u_tex;
+uniform sampler2D u_tex2;
 
 const float PI = 3.14159265;
 
@@ -59,6 +61,10 @@ void emit(float a) { o = vec4(u_col.rgb * a * u_col.a, a * u_col.a); }
 void main() {
     vec2 p = v_uv * u_px;
     float k = u_ppp;
+    if (u_mode == 9) { // u_tex eased toward by u_p.y from u_tex2 (a flash limiter)
+        o = vec4(mix(texture(u_tex2, v_uv).rgb, texture(u_tex, v_uv).rgb, u_p.y), 1.0);
+        return;
+    }
     if (u_mode == 8) { // a finished image, with rounded corners (u_p.x, in points) and an opacity
         float a = cov(box(p, u_px * 0.5, u_px * 0.5, u_p.x * u_ppp)) * u_col.a;
         o = vec4(texture(u_tex, v_uv).rgb * a, a);
@@ -157,6 +163,8 @@ pub struct Params {
     pub p: [f32; 3],
     /// A GL texture for the blit mode to draw.
     pub raw_tex: Option<glow::Texture>,
+    /// The second texture of the ease mode.
+    pub raw_tex2: Option<glow::Texture>,
 }
 
 /// Queues the effect over `rect`.
@@ -235,6 +243,12 @@ pub fn run(sh: &Shared, p: &Params, info: &egui::PaintCallbackInfo, gp: &egui_gl
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.uniform_1_i32(loc("u_tex").as_ref(), 0);
         }
+        if let Some(tex) = p.raw_tex2 {
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.uniform_1_i32(loc("u_tex2").as_ref(), 1);
+            gl.active_texture(glow::TEXTURE0);
+        }
         gl.draw_arrays(glow::TRIANGLES, 0, 3);
         gl.bind_vertex_array(None);
     }
@@ -242,6 +256,12 @@ pub fn run(sh: &Shared, p: &Params, info: &egui::PaintCallbackInfo, gp: &egui_gl
 
 /// Draws a finished GL texture over the callback's rect (used for projectM's output and for restoring what it overwrote).
 pub fn blit(sh: &Shared, info: &egui::PaintCallbackInfo, gp: &egui_glow::Painter, tex: glow::Texture, radius: f32, opacity: f32) {
-    let p = Params { mode: BLIT, bands: [0.; crate::viz::BANDS], peaks: [0.; crate::viz::BANDS], col: Color32::WHITE.gamma_multiply(opacity), p: [radius, 0., 0.], raw_tex: Some(tex) };
+    let p = Params { mode: BLIT, bands: [0.; crate::viz::BANDS], peaks: [0.; crate::viz::BANDS], col: Color32::WHITE.gamma_multiply(opacity), p: [radius, 0., 0.], raw_tex: Some(tex), raw_tex2: None };
+    run(sh, &p, info, gp);
+}
+
+/// Draws `new` mixed `amount` of the way from `old` over the callback's rect, fully opaque.
+pub fn ease(sh: &Shared, info: &egui::PaintCallbackInfo, gp: &egui_glow::Painter, new: glow::Texture, old: glow::Texture, amount: f32) {
+    let p = Params { mode: EASE, bands: [0.; crate::viz::BANDS], peaks: [0.; crate::viz::BANDS], col: Color32::WHITE, p: [0., amount, 0.], raw_tex: Some(new), raw_tex2: Some(old) };
     run(sh, &p, info, gp);
 }

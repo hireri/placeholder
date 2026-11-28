@@ -267,7 +267,7 @@ pub fn pulse(p: &Painter, c: egui::Pos2, col: Color32, lv: &Levels) -> (f32, f32
 }
 
 fn gl_params(mode: i32, lv: &Levels, col: Color32) -> crate::viz_gl::Params {
-    crate::viz_gl::Params { mode, bands: lv.bands, peaks: lv.peaks, col, p: [lv.bass, lv.kick, lv.gate()], raw_tex: None }
+    crate::viz_gl::Params { mode, bands: lv.bands, peaks: lv.peaks, col, p: [lv.bass, lv.kick, lv.gate()], raw_tex: None, raw_tex2: None }
 }
 
 /// Draws `style` (1..) filling `area`, on the GPU when the shader is available. `col` carries the opacity.

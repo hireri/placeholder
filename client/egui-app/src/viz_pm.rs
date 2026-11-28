@@ -15,6 +15,9 @@ type Handle = *mut c_void;
 const MONO: i32 = 1;
 /// A preset plays this long before the next one fades in.
 const PRESET_SECS: f64 = 35.;
+/// How much of each new frame shows through: presets can flash hard on a beat, and this low-pass (about four frames)
+/// turns a strobe into a soft pulse.
+const EASE: f32 = 0.3;
 
 struct Lib {
     _lib: Library,
@@ -76,6 +79,8 @@ struct Inst {
     h: Handle,
     /// projectM's last frame.
     tex: glow::Texture,
+    /// `tex` eased over time; what is shown.
+    smooth: glow::Texture,
     /// What the window held where projectM draws, put back after each frame.
     save: glow::Texture,
     size: (i32, i32),
@@ -112,6 +117,11 @@ fn scan(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
+            // "! Transition" holds fade-to-black helper presets, not visuals: picked at random they read as blackouts and goop.
+            // ponytail: add "Reaction" here if feedback blobs are still too common.
+            if p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('!')) {
+                continue;
+            }
             scan(&p, out);
         } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("milk")) {
             out.push(p);
@@ -223,16 +233,17 @@ fn run(st: &Arc<Mutex<Gpu>>, gl_shared: &viz_gl::Shared, pcm: &[f32], (radius, o
             if since.elapsed() >= Duration::from_millis(150) || i.size.0 > screen.0 || i.size.1 > screen.1 {
                 gl.delete_texture(i.tex);
                 gl.delete_texture(i.save);
-                let (Some(tex), Some(save)) = (make_tex(gl, want.0, want.1, glow::LINEAR), make_tex(gl, want.0, want.1, glow::NEAREST)) else { return s.failed = true };
-                (i.tex, i.save, i.size, i.pending) = (tex, save, want, None);
+                gl.delete_texture(i.smooth);
+                let (Some(tex), Some(save), Some(smooth)) = (make_tex(gl, want.0, want.1, glow::LINEAR), make_tex(gl, want.0, want.1, glow::NEAREST), make_tex(gl, want.0, want.1, glow::LINEAR)) else { return s.failed = true };
+                (i.tex, i.save, i.smooth, i.size, i.pending) = (tex, save, smooth, want, None);
                 (l.window_size)(i.h, want.0 as usize, want.1 as usize);
             }
         }
         let (w, h) = s.inst.as_ref().map_or(want, |i| i.size);
         if s.inst.is_none() {
             let handle = (l.create)();
-            let (tex, save) = (make_tex(gl, w, h, glow::LINEAR), make_tex(gl, w, h, glow::NEAREST));
-            let (Some(tex), Some(save)) = (tex, save) else { return s.failed = true };
+            let (tex, save, smooth) = (make_tex(gl, w, h, glow::LINEAR), make_tex(gl, w, h, glow::NEAREST), make_tex(gl, w, h, glow::LINEAR));
+            let (Some(tex), Some(save), Some(smooth)) = (tex, save, smooth) else { return s.failed = true };
             if handle.is_null() {
                 eprintln!("viz: projectM could not start (it needs OpenGL 3.3)");
                 return s.failed = true;
@@ -246,7 +257,7 @@ fn run(st: &Arc<Mutex<Gpu>>, gl_shared: &viz_gl::Shared, pcm: &[f32], (radius, o
                 }
             }
             (l.window_size)(handle, w as usize, h as usize);
-            s.inst = Some(Inst { h: handle, tex, save, size: (w, h), last: Instant::now() - Duration::from_secs(1), fps, pending: None });
+            s.inst = Some(Inst { h: handle, tex, smooth, save, size: (w, h), last: Instant::now() - Duration::from_secs(1), fps, pending: None });
         }
         if let Some(path) = s.request.take() {
             if let Ok(c) = CString::new(path.to_string_lossy().as_bytes()) {
@@ -268,12 +279,14 @@ fn run(st: &Arc<Mutex<Gpu>>, gl_shared: &viz_gl::Shared, pcm: &[f32], (radius, o
             (l.render)(i.h);
             grab(gl, i.tex, w, h);
             gl.viewport(0, 0, w, h);
+            viz_gl::ease(gl_shared, info, gp, i.tex, i.smooth, EASE);
+            grab(gl, i.smooth, w, h);
             viz_gl::blit(gl_shared, info, gp, i.save, 0., 1.);
         }
         gl.viewport(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
         let c = info.clip_rect_in_pixels();
         gl.enable(glow::SCISSOR_TEST);
         gl.scissor(c.left_px, c.from_bottom_px, c.width_px, c.height_px);
-        viz_gl::blit(gl_shared, info, gp, i.tex, radius, opacity);
+        viz_gl::blit(gl_shared, info, gp, i.smooth, radius, opacity);
     }
 }
