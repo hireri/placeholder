@@ -660,13 +660,15 @@ impl App {
             let hit = press(ui, ("mode", i), r);
             let k = ui.ctx().calm_bool_ease(ui.scope_id().with(("mode-on", i)), self.opts.mode as usize == i, 0.18, ease_out);
             let p = ui.painter();
+            // The window in the colours that mode would really use: library with its selected row, page card, player card.
             let draw = |p: &egui::Painter, dark: bool| {
-                let th = crate::theme::Theme::preset(self.opts.accent, dark);
+                let th = self.theme_for(dark);
+                let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(r.min + vec2(x, y), vec2(w, h));
                 p.rect_filled(r, rad(12.), th.s0);
-                p.rect_filled(Rect::from_min_size(r.min + vec2(8., 8.), vec2(24., r.height() - 16.)), rad(6.), th.s2);
-                for (j, w) in [52., 36., 44.].into_iter().enumerate() {
-                    p.rect_filled(Rect::from_min_size(r.min + vec2(40., 12. + j as f32 * 14.), vec2(w, 8.)), rad(4.), if j == 0 { th.ax } else { th.s3 });
-                }
+                p.rect_filled(at(8., 12., 22., 8.), rad(4.), th.axc);
+                p.rect_filled(at(36., 12., 44., 52.), rad(8.), th.s1);
+                p.rect_filled(at(86., 12., 26., 52.), rad(8.), th.s1);
+                p.circle_filled(r.min + vec2(99., 50.), 5., th.ax);
             };
             match i {
                 0 => {

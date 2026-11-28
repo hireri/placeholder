@@ -1155,6 +1155,21 @@ impl App {
         }
     }
 
+    /// The theme the app settles on in light or dark: the cover's tone or the accent preset, then theme.toml, then Pure black.
+    pub(crate) fn theme_for(&self, dark: bool) -> Theme {
+        let cover = self.pl.song().and_then(|s| s.thumbnail.as_deref()).filter(|_| self.opts.auto_theme);
+        let base = match cover.map(|u| self.g.tone(u)) {
+            None => Theme::preset(self.opts.accent, dark),
+            // Until the cover's tone arrives keep the theme the last song left; a grey or unreadable cover goes neutral.
+            Some(None) if self.theme_anim.1.dark == dark => return self.theme_anim.1,
+            Some(Some(Some(tone))) => Theme::tinted(tone, dark),
+            Some(_) => Theme::idle(dark),
+        };
+        // Artwork theming wins while a cover is driving it; the custom colours apply otherwise.
+        let t = self.custom.as_ref().filter(|_| cover.is_none()).map_or(base, |c| base.custom(c));
+        if dark && self.opts.pure_black { t.pure_black() } else { t }
+    }
+
     /// Fetches the current and next covers (backdrop + tone) and lyrics ahead of use, and eases the theme toward the current cover's tone.
     fn follow_track(&mut self, ctx: &Context) {
         self.pl.poll_lyrics(ctx);
@@ -1175,20 +1190,7 @@ impl App {
             2 => true,
             _ => ctx.system_theme() != Some(egui::Theme::Light),
         };
-        let want = match cur {
-            _ if !self.opts.auto_theme => Theme::preset(self.opts.accent, dark),
-            None => Theme::preset(self.opts.accent, dark),
-            // Until the cover's tone arrives keep the theme the last song left; a grey or unreadable cover goes neutral.
-            Some(u) => match self.g.tone(&u) {
-                None => self.theme_anim.1,
-                Some(Some(tone)) => Theme::tinted(tone, dark),
-                Some(None) => Theme::idle(dark),
-            },
-        };
-        // Artwork theming wins while a cover is driving it; the custom colours apply otherwise.
-        let artwork = self.opts.auto_theme && self.pl.song().is_some_and(|s| s.thumbnail.is_some());
-        let want = self.custom.as_ref().filter(|_| !artwork).map_or(want, |c| want.custom(c));
-        let want = if dark && self.opts.pure_black { want.pure_black() } else { want };
+        let want = self.theme_for(dark);
         let now = ctx.input(|i| i.time);
         if want != self.theme_anim.1 {
             // Light/dark flips are instant; everything else eases from what is on screen.
