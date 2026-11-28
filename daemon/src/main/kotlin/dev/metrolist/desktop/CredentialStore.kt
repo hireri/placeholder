@@ -4,19 +4,37 @@ import com.metrolist.music.utils.DesktopPaths
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
 
 /** Plain JSON file, owner-only. ponytail: OS keyring (libsecret/Keychain/DPAPI) if this needs hardening. */
 class CredentialStore(private val file: File = File(DesktopPaths.dataDir, "credentials.json")) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
+    /** A file that exists but can't be read is set aside, never overwritten, so a later save can't wipe the logins in it. */
     @Synchronized
-    fun load(): StoredCreds = runCatching { json.decodeFromString<StoredCreds>(file.readText()) }.getOrDefault(StoredCreds())
+    fun load(): StoredCreds {
+        if (!file.exists()) return StoredCreds()
+        return runCatching { json.decodeFromString<StoredCreds>(file.readText()) }.getOrElse { e ->
+            val bad = File(file.parentFile, "${file.name}.bad-${System.currentTimeMillis()}")
+            System.err.println("credentials: ${file.name} is unreadable (${e.message}); kept as ${bad.name}")
+            file.renameTo(bad)
+            StoredCreds()
+        }
+    }
 
+    /** Written owner-only to a temp file and renamed over the old one, so a crash mid-write leaves the previous file intact. */
     @Synchronized
     fun save(creds: StoredCreds) {
-        file.writeText(json.encodeToString(StoredCreds.serializer(), creds))
-        runCatching { Files.setPosixFilePermissions(file.toPath(), PosixFilePermissions.fromString("rw-------")) }
+        val dir = file.absoluteFile.parentFile.toPath()
+        val tmp = runCatching { Files.createTempFile(dir, file.name, ".tmp", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))) }
+            .getOrElse { Files.createTempFile(dir, file.name, ".tmp") } // no POSIX permissions on Windows
+        try {
+            Files.writeString(tmp, json.encodeToString(StoredCreds.serializer(), creds))
+            Files.move(tmp, file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        } finally {
+            Files.deleteIfExists(tmp)
+        }
     }
 
     @Synchronized
